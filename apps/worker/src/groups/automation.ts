@@ -24,14 +24,29 @@ export interface GroupAutomationOptions {
   audit: (sessionId: string, detail: Record<string, unknown>) => Promise<void>
   logger: { warn(obj: object, message?: string): void }
   now?: () => number
+  /** Fonte de aleatoriedade (injetável nos testes). Default: Math.random. */
+  random?: () => number
 }
+
+const HOUR = 3_600_000
+/** Janela (horário de Brasília) em que a mensagem diária pode sair; o minuto exato é sorteado por grupo e por dia. */
+const POST_FROM_HOUR = 9
+const POST_TO_HOUR = 21
 
 export class GroupAutomation {
   private timer?: ReturnType<typeof setInterval>
   private stopped = false
   private running = new Map<string, Promise<void>>()
   private readonly now: () => number
-  constructor(private readonly opts: GroupAutomationOptions) { this.now = opts.now ?? Date.now }
+  private readonly random: () => number
+  constructor(private readonly opts: GroupAutomationOptions) { this.now = opts.now ?? Date.now; this.random = opts.random ?? Math.random }
+  /** Sorteia o horário da mensagem de hoje entre agora (ou 9 h) e 21 h; passou da janela, fica para amanhã. */
+  private postTime(now: number) {
+    const start = Date.parse(`${automationDay(now)}T00:00:00-03:00`)
+    const from = Math.max(now, start + POST_FROM_HOUR * HOUR)
+    const to = start + POST_TO_HOUR * HOUR
+    return from >= to ? start + 24 * HOUR : from + Math.floor(this.random() * (to - from))
+  }
 
   /** Chip "normal" sem proxy (IP) não entra em grupos automaticamente; só chips com proxy entram. O envio continua liberado. */
   private hasProxy(session: SessionView): boolean { return session.proxyId != null }
@@ -185,6 +200,12 @@ export class GroupAutomation {
       for (const group of state.groups.filter((g) => g.state === 'joined').sort((a, b) => (a.lastPostDay ?? '').localeCompare(b.lastPostDay ?? ''))) {
         if (!group.forwardedTo) await this.forward(id, group, config)
         if (group.lastPostDay === automationDay(now)) continue
+        // Horário diferente por grupo e por dia, para a mensagem não sair sempre no mesmo momento.
+        if (group.postAt?.day !== automationDay(now)) {
+          group.postAt = { day: automationDay(now), at: this.postTime(now) }
+          await this.opts.store.saveState(id, state)
+        }
+        if (group.postAt.at > now) continue
         if (group.lastMessageId) {
           try {
             const previous = await this.opts.messages.get(group.lastMessageId)

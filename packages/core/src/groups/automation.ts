@@ -20,6 +20,8 @@ export interface ManagedGroup {
   joinedAt: number
   state: 'pending' | 'joined'
   lastPostDay?: string
+  /** Horário sorteado para a mensagem do dia (cada grupo e cada dia num horário diferente). */
+  postAt?: { day: string; at: number }
   draft?: { day: string; text: string }
   draftAttemptDay?: string
   lastMessageId?: string

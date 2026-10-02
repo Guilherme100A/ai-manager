@@ -41,7 +41,7 @@ function setup() {
   const messages = { get: vi.fn(async () => ({ status: 'sent', sentAt: new Date(now - DAY).toISOString() })) }
   const invites = { run: vi.fn(async () => ({ result: 'joined' })) }
   const audit = vi.fn(async () => undefined)
-  const options = { manager, store, model, pipeline: { sendGroup } as never, limits: limits as never, messages: messages as never, invites: invites as never, audit, logger: { warn: vi.fn() }, now: () => now }
+  const options = { manager, store, model, pipeline: { sendGroup } as never, limits: limits as never, messages: messages as never, invites: invites as never, audit, logger: { warn: vi.fn() }, now: () => now, random: () => 0 }
   const service = new GroupAutomation(options)
   return { service, options, a, b, configs, states, sessions, model, sendGroup, messages, invites, inspect, accept, leases, limits,
     advance: (ms: number) => { now += ms }, level: (n: number) => { day = n } }
@@ -122,6 +122,33 @@ describe('entrada automática e mensagem diária', () => {
     await t.service.run('a')
     expect(t.inspect).toHaveBeenCalledTimes(1)
     expect(t.states.get('a')?.groups.filter((g) => !g.forwardedTo)).toHaveLength(1)
+  })
+  it('mensagem diária sai num horário sorteado entre 9 h e 21 h, diferente a cada dia', async () => {
+    const s = setup() // 12:00Z = 09:00 em Brasília
+    let r = 0.5
+    const service = new GroupAutomation({ ...s.options, random: () => r })
+    await service.run('a')
+    expect(s.accept).toHaveBeenCalledTimes(1)
+    expect(s.sendGroup).not.toHaveBeenCalled() // sorteou 15:00 (metade da janela)
+    expect(s.states.get('a')?.groups[0]?.postAt).toEqual({ day: '2026-10-02', at: Date.parse('2026-10-02T18:00:00Z') })
+    s.advance(6 * 3_600_000 - 60_000)
+    await service.run('a')
+    expect(s.sendGroup).not.toHaveBeenCalled()
+    s.advance(60_000)
+    await service.run('a')
+    expect(s.sendGroup).toHaveBeenCalledTimes(1)
+    r = 0.25
+    s.advance(18 * 3_600_000) // dia seguinte, 09:00: novo sorteio (12:00 em Brasília)
+    await service.run('a')
+    expect(s.states.get('a')?.groups[0]?.postAt).toEqual({ day: '2026-10-03', at: Date.parse('2026-10-03T15:00:00Z') })
+    expect(s.sendGroup).toHaveBeenCalledTimes(1)
+  })
+  it('depois das 21 h a mensagem do dia fica para amanhã', async () => {
+    const s = setup()
+    s.advance(12.5 * 3_600_000) // 21:30 em Brasília
+    await s.service.run('a')
+    expect(s.accept).toHaveBeenCalledTimes(1)
+    expect(s.sendGroup).not.toHaveBeenCalled()
   })
   it('não repete pesquisa ou mensagem no dia, inclusive após recriar o serviço', async () => {
     const s = setup()
