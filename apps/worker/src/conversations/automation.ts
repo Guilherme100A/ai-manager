@@ -149,7 +149,8 @@ export class ConversationAutomation {
         const peer = states.get(target.id)!
         if (!await this.opts.store.renew(lease)) return
         const now = this.now()
-        const fresh = { history: [], turns: 0, partnerId: target.id, nextSenderId: source.id,
+        // Quem abre a rodada é sorteado, para não ser sempre a mesma conta.
+        const fresh = { history: [], turns: 0, partnerId: target.id, nextSenderId: this.random() < 0.5 ? source.id : target.id,
           lastPartnerId: target.id, lastPairedAt: now } satisfies ConversationState
         // A reserva do dono bloqueia as duas contas mesmo se houver queda antes de salvar a outra ponta.
         await this.opts.store.saveState(source.id, fresh)
@@ -315,9 +316,10 @@ export class ConversationAutomation {
             (await Promise.all(parts.map((part) => this.opts.received(pending.receiverId, pending.sourcePhone, part.text, pending.reservedAt)))).every(Boolean)) {
             state.history = [...state.history, { senderId: pending.senderId, text: pending.text }].slice(-10)
             state.turns++
-            // Rajada: a mesma conta envia um número aleatório de falas antes de passar a vez.
+            // Rajada: a mesma conta envia um número aleatório de falas antes de passar a vez. A rajada nunca
+            // fica com a última fala da rodada: quem só ouviu sempre responde antes da pausa.
             state.burstLeft = (state.burstLeft ?? this.burstSize()) - 1
-            if (state.burstLeft <= 0) {
+            if (state.burstLeft <= 0 || turnsPerRound - state.turns <= 1) {
               state.nextSenderId = pending.receiverId // passa a vez para a outra conta
               state.burstLeft = this.burstSize()      // nova rajada aleatória para ela
             } else {
@@ -330,7 +332,7 @@ export class ConversationAutomation {
               if (!await this.opts.store.renew(lease)) return
               await this.finishRotation(id, state, now)
             } else if (state.turns >= turnsPerRound) {
-              state.turns = 0; state.history = []; state.nextSenderId = id; state.nextAt = now + 30 * MINUTE; delete state.burstLeft
+              state.turns = 0; state.history = []; state.nextSenderId = this.random() < 0.5 ? id : targetId; state.nextAt = now + 30 * MINUTE; delete state.burstLeft
             }
           } else if (now - (message.sentAt ? Date.parse(message.sentAt) : pending.reservedAt) > 2 * 60 * MINUTE) {
             state.halted = true; state.lastError = 'Sem confirmação de recebimento em duas horas. Conversa interrompida.'

@@ -111,6 +111,22 @@ describe('conversas entre duas contas', () => {
     expect(s.states.get(A)!.turns).toBe(2)
     expect(s.states.get(A)!.nextSenderId).toBe(A)
   })
+  it('rajada nunca fica com a última fala da rodada: quem só ouviu responde antes da pausa; abertura sorteada', async () => {
+    const s = setup({ random: () => 0.99 }) // rajadas sempre de 3; sorteio de abertura cai na outra conta
+    s.configs.set(A, { ...s.config, turnsPerConversation: 6 })
+    s.received.mockResolvedValue(true)
+    for (let fala = 0; fala < 6; fala++) {
+      await s.automation.run(A) // envia
+      await s.automation.run(A) // confirma
+      s.advance(5 * 60_000)
+    }
+    const senders = s.pipeline.send.mock.calls.map((c) => (c[0] as { sessionId: string }).sessionId)
+    expect(senders).toEqual([A, A, A, B, B, A]) // a rajada de B é cortada para A responder por último
+    expect(s.states.get(A)!.turns).toBe(0)
+    s.advance(30 * 60_000)
+    await s.automation.run(A)
+    expect(s.pipeline.send).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: B })) // próxima rodada aberta por B
+  })
   it('encerra a rodada no teto de falas e espera 30 minutos', async () => {
     const s = setup(); s.received.mockResolvedValue(true)
     await s.automation.run(A); await s.automation.run(A)

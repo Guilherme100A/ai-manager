@@ -33,6 +33,16 @@ describe('modelo de conversas', () => {
     const partes = s.create.mock.calls.map((c) => JSON.parse((c[0] as { messages: { content: string }[] }).messages[0]!.content).partes)
     expect(partes).toEqual([3, 1])
   })
+  it('não pede nova pergunta enquanto a própria pergunta está sem resposta', async () => {
+    const s = setup()
+    const payload = async (history: { senderId: string; text: string }[]) => {
+      s.create.mockClear(); await s.model.message('jogos', 'a', history)
+      return JSON.parse((s.create.mock.calls[0]![0] as { messages: { content: string }[] }).messages[0]!.content).sem_perguntas
+    }
+    expect(await payload([{ senderId: 'a', text: 'qual boss tá difícil?' }, { senderId: 'a', text: 'tem builds boas' }])).toBe(true)
+    expect(await payload([{ senderId: 'a', text: 'qual boss?' }, { senderId: 'b', text: 'o Malenia' }])).toBe(false)
+    expect(await payload([{ senderId: 'b', text: 'oi?' }, { senderId: 'a', text: 'opa, tudo bem' }])).toBe(false)
+  })
   it('quebra a fala em partes por linha, sem linhas vazias e juntando o excedente na última', () => {
     expect(splitConversationParts('opa\n\n tudo certo? \nviu o trailer?', 3)).toEqual(['opa', 'tudo certo?', 'viu o trailer?'])
     expect(splitConversationParts('a\nb\nc\nd', 3)).toEqual(['a', 'b', 'c d'])
