@@ -38,10 +38,11 @@ export interface AttachAiOptions {
   optOutKeywords?: readonly string[]
   /** Central routing after persistence and opt-out, before optional AI suggestions. */
   routeIncoming?: (event: RouteEvent) => Promise<number>
+  consumeConversation?: (sessionId: string, phone: string, text: string) => Promise<boolean>
 }
 
 export type InboundOutcome =
-  | { kind: 'ignored'; reason: 'from_me' | 'no_phone' | 'stopped' }
+  | { kind: 'ignored'; reason: 'from_me' | 'no_phone' | 'stopped' | 'conversation' }
   | { kind: 'duplicate'; messageId: string }
   | { kind: 'opt_out'; messageId: string }
   | { kind: 'no_text'; messageId: string }
@@ -162,6 +163,7 @@ export class AiAttachment extends EventEmitter<AiAttachmentEvents> {
     // (3) Regras habilitadas têm prioridade; sem envio roteado, gera sugestão com aprovação humana.
     const text = msg.text?.trim()
     if (!text) return { kind: 'no_text', messageId: inbound.id }
+    if (await this.opts.consumeConversation?.(sessionId, inbound.phone, text)) return { kind: 'ignored', reason: 'conversation' }
     if (this.opts.routeIncoming) {
       const queued = await this.opts.routeIncoming({ sessionId, inboundId: msg.id, phone: inbound.phone, text })
       if (queued > 0) return { kind: 'routed', messageId: inbound.id, queued }

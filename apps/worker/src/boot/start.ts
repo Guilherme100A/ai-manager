@@ -9,6 +9,9 @@ import {
   AiAssistant,
   AiSettingsService,
   SmallGroupModel,
+  SmallConversationModel,
+  ContactsService,
+  canMessage,
   AlertDispatcher,
   attachMetrics,
   bindTransportSession,
@@ -25,7 +28,10 @@ import {
   toConnectionOptions,
   type Logger,
 } from '@wsm/core'
-import { createDb, runMigrations, sessions, type Database } from '@wsm/db'
+import { createDb, runMigrations, sessions, messages, auditLogs, type Database } from '@wsm/db'
+import { and, eq, gt, sql } from 'drizzle-orm'
+import { ConversationAutomation } from '../conversations/automation'
+import { RedisConversationStore } from '../conversations/store'
 import { attachAlerts } from '../alerts'
 import { HealthMonitor } from '../health'
 import { createWorkerLogger, startObservabilityServer, type ObservabilityServer } from '../observability'
@@ -196,10 +202,27 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     // e só então aplica vínculos habilitados ou gera sugestões (pending_approval para respostas de IA).
     const routingPipeline = new SendPipeline({ db, queue, limits, getTransport: (id) => manager.getTransport(id) })
     const sessionRouter = new SessionRouter(new SessionLinkStore(db).dependencies((request) => routingPipeline.send(request)))
+    const conversationSettings = new AiSettingsService({ db, env })
+    const conversationContacts = new ContactsService(db)
+    const conversations = new ConversationAutomation({
+      manager, store: new RedisConversationStore(redis), limits, pipeline: routingPipeline, messages: queue,
+      model: new SmallConversationModel(() => conversationSettings.resolve()),
+      allowed: async (phone) => canMessage(await conversationContacts.findByPhone(phone)).ok,
+      received: async (receiverId, phone, text, since) => {
+        const rows = await db.select({ id: messages.id }).from(messages).where(and(
+          eq(messages.sessionId, receiverId), eq(messages.direction, 'inbound'), eq(messages.phone, phone),
+          gt(messages.createdAt, new Date(since)), sql`${messages.content}->>'text' = ${text}`,
+        )).limit(1)
+        return rows.length > 0
+      },
+      audit: async (id, detail) => { await db.insert(auditLogs).values({ actor: 'session-conversations', action: 'conversation.turn', targetType: 'session', targetId: id, detail }) },
+      logger,
+    })
     const ai = attachAi(manager, {
       db,
       logger,
       routeIncoming: (event) => sessionRouter.route(event),
+      consumeConversation: (id, phone, text) => conversations.handlesInbound(id, phone, text),
       // T19 — configuração dinâmica: tabela ai_settings (painel) com fallback no ambiente AI_*, relida a cada
       // AI_SETTINGS_REFRESH_MS (default 5 s) sem restart. Sem chave ou enabled=false → só o fallback determinístico.
       assistant: new AiAssistant({
@@ -215,6 +238,10 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     })
 
     const bridgeTargets = createBridgeTargets({ manager, queue, health: monitor, db })
+    bridgeTargets.sessions.getConversation = (id) => conversations.view(id)
+    bridgeTargets.sessions.configureConversation = (id, config) => conversations.configure(id, config)
+    bridgeTargets.sessions.tickConversation = async (id) => { await manager.get(id); return conversations.requestTick(id) }
+    onStop('session-conversations', () => conversations.stop())
     const groupSettings = new AiSettingsService({ db, env })
     const groupAutomation = new GroupAutomation({
       manager, store: new RedisGroupAutomationStore(redis, config.queuePrefix), limits,
@@ -269,6 +296,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     await manager.start()
     await resumeQueues(db, queue, logger)
     await groupAutomation.start()
+    conversations.start()
 
     logger.info(
       { boot_id: bootId, wa_transport: config.transport, health_port: observability.port, internal_port: internal.port, reconciled: counts(reconciled) },

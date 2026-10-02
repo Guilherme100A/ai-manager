@@ -107,7 +107,7 @@ export class SuggestionService {
    */
   async recordInbound(sessionId: string, msg: IncomingMessage): Promise<RecordInboundResult | null> {
     if (msg.fromMe) return null
-    const phone = jidToE164(msg.from)
+    const phone = jidToE164(msg.from) ?? jidToE164(msg.fromAlt ?? '')
     if (!phone) return null
     const [existing] = await this.db
       .select()

@@ -1,6 +1,7 @@
 // Detalhe da sessão (AC-T12-05): card da seção 12 da nota + gráficos agregados no cliente.
 import { useEffect, useMemo, useState } from 'react'
 import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { ConversationPanel } from '../components/ConversationPanel'
 import { SessionProxyPanel } from '../components/SessionProxyPanel'
 import { ChartBox, ErrorText, PageHeader, StateIndicator } from '../components/ui'
 import { appendSample, bucketMessages, formatDateTime, latencySeries, parsePrometheusLatency, timeLabel } from '../lib/aggregate'
@@ -156,6 +157,7 @@ export function SessionDetail({ id }: { id: string }) {
       </section>
 
       {s ? <SessionProxyPanel session={s} onChanged={() => session.reload()} /> : null}
+      <ConversationPanel key={id} sessionId={id} />
 
       {showLogs ? <Logs messages={msgs} /> : null}
 

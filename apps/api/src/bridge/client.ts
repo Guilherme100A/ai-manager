@@ -16,6 +16,7 @@ import {
   type EnqueueMessageInput,
   type GroupAddOutcome,
   type GroupAutomationConfig,
+  type ConversationConfig,
   type GroupInviteInput,
   type GroupInviteOutcome,
   type GroupSummary,
@@ -99,6 +100,9 @@ export interface WorkerBridge {
   call<T>(target: string, method: string, ...args: unknown[]): Promise<T>
   sessions: SessionsControl & {
     getTransport(sessionId: string): WaTransport
+    getConversation(id: string): Promise<unknown>
+    configureConversation(id: string, config: ConversationConfig): Promise<unknown>
+    tickConversation(id: string): Promise<unknown>
     getGroupAutomation(id: string): Promise<unknown>
     configureGroupAutomation(id: string, config: GroupAutomationConfig): Promise<unknown>
     tickGroupAutomation(id: string): Promise<unknown>
@@ -158,6 +162,9 @@ export function createWorkerBridge(opts: WorkerBridgeOptions): WorkerBridge {
   }
 
   const sessions: WorkerBridge['sessions'] = {
+    getConversation: (id) => call('sessions', 'getConversation', id),
+    configureConversation: (id, config) => call('sessions', 'configureConversation', id, config),
+    tickConversation: (id) => call('sessions', 'tickConversation', id),
     getGroupAutomation: (id) => call('sessions', 'getGroupAutomation', id),
     configureGroupAutomation: (id, input) => call('sessions', 'configureGroupAutomation', id, input),
     tickGroupAutomation: (id) => call('sessions', 'tickGroupAutomation', id),

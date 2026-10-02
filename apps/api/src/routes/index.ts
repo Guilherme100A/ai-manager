@@ -7,6 +7,7 @@ import { contactsRoutes } from './contacts'
 import { proxiesRoutes } from './proxies'
 import { sessionsRoutes } from './sessions'
 import { groupsRoutes } from './groups'
+import { conversationRoutes } from './conversations'
 import { healthSessionRoutes } from './health-session'
 import { messagesRoutes } from './messages'
 import { limitsRoutes } from './messages-limits'
@@ -23,6 +24,7 @@ export function registerRoutes(app: Hono<AppEnv>, deps: AppDeps) {
   app.route('/', proxiesRoutes(deps))
   app.route('/', sessionsRoutes(deps))
   app.route('/', groupsRoutes(deps))
+  app.route('/', conversationRoutes(deps))
   app.route('/', healthSessionRoutes(deps))
   app.route('/', messagesRoutes(deps))
   // T09 — limites de envio por sessão

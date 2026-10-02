@@ -6,12 +6,15 @@ import { timingSafeEqual } from 'node:crypto'
 import type { AddressInfo } from 'node:net'
 import { serve, type ServerType } from '@hono/node-server'
 import { Hono, type Context } from 'hono'
-import { TransportNotConnectedError, type GroupAutomationConfig, type GroupInviteInput, type EnqueueMessageInput, type GroupSummary, type ListMessagesFilter, type WaTransport } from '@wsm/core'
+import { TransportNotConnectedError, type ConversationConfig, type GroupAutomationConfig, type GroupInviteInput, type EnqueueMessageInput, type GroupSummary, type ListMessagesFilter, type WaTransport } from '@wsm/core'
 import type { FakeControl } from './fake-control'
 
 /** Operações do worker expostas à API. */
 export interface BridgeTargets {
   sessions: {
+    getConversation?(id: string): Promise<unknown>
+    configureConversation?(id: string, config: ConversationConfig): Promise<unknown>
+    tickConversation?(id: string): Promise<unknown>
     getGroupAutomation?(id: string): Promise<unknown>
     configureGroupAutomation?(id: string, config: GroupAutomationConfig): Promise<unknown>
     tickGroupAutomation?(id: string): Promise<unknown>
@@ -50,6 +53,18 @@ export function bridgeHandlers(t: BridgeTargets): Record<string, Record<string, 
   const str = (v: unknown) => String(v)
   return {
     sessions: {
+      getConversation: async ([id]) => {
+        if (!s.getConversation) throw new Error('conversation unavailable')
+        return s.getConversation(str(id))
+      },
+      configureConversation: async ([id, input]) => {
+        if (!s.configureConversation) throw new Error('conversation unavailable')
+        return s.configureConversation(str(id), input as ConversationConfig)
+      },
+      tickConversation: async ([id]) => {
+        if (!s.tickConversation) throw new Error('conversation unavailable')
+        return s.tickConversation(str(id))
+      },
       getGroupAutomation: async ([id]) => {
         if (!s.getGroupAutomation) throw new Error('group automation unavailable')
         return s.getGroupAutomation(str(id))
