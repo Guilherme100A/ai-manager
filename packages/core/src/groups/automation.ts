@@ -28,6 +28,8 @@ export interface ManagedGroup {
 export interface GroupAutomationState {
   groups: ManagedGroup[]
   entryTimes?: number[]
+  /** Chip sem proxy: quando registrou grupos descobertos para repassar (limitado ao teto por 24 h). */
+  discoveredTimes?: number[]
   discovery?: { query: string; at: number; candidates: Array<{ inviteUrl: string; topic: string }> }
   lastSearchAt?: number
   lastJoinAt?: number

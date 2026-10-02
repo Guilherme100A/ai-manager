@@ -113,6 +113,7 @@ export class GroupAutomation {
       state.groups = state.groups.filter((group) => actualIds.has(group.id) || (group.state === 'pending' && now - group.joinedAt < DAY))
       for (const group of state.groups) if (actualIds.has(group.id)) group.state = 'joined'
       state.entryTimes = (state.entryTimes ?? []).filter((at) => at > now - DAY)
+      state.discoveredTimes = (state.discoveredTimes ?? []).filter((at) => at > now - DAY)
       await this.opts.store.saveState(id, state)
 
       // O limite é de entradas por 24 h; o volume recebido nos grupos não participa desta decisão.
@@ -120,7 +121,11 @@ export class GroupAutomation {
       // público para encaminhar aos chips com proxy (e também nunca posta no grupo, mais abaixo).
       const capacity = await this.capacity(id)
       const proxied = this.hasProxy(session)
-      if ((proxied && capacity.canEnter) || !proxied) {
+      // Sem proxy: só descobre se há chip com proxy para receber, nenhum grupo aguardando repasse e cabe no teto
+      // de 24 h. Evita pesquisas pagas e consultas de convite ao WhatsApp que ninguém usaria.
+      const canDiscover = !proxied && !state.groups.some((g) => !g.forwardedTo) &&
+        state.discoveredTimes.length < config.maxEntriesPerDay && (await this.forwardTargets(id, config)).length > 0
+      if (proxied ? capacity.canEnter : canDiscover) {
         try {
           if (!state.discovery || state.discovery.query !== config.query || now - state.discovery.at >= DAY) {
             // Persiste antes da chamada para evitar repetir pesquisas pagas em caso de falha/restart.
@@ -160,6 +165,7 @@ export class GroupAutomation {
             } else if (!proxied && !state.groups.some((g) => g.inviteCode === code)) {
               // Chip sem proxy: registra o grupo descoberto apenas para encaminhar; NUNCA entra.
               state.groups.push({ id: group.id, name: group.name, topic, inviteCode: code, joinedAt: now, state: 'pending' })
+              state.discoveredTimes.push(now)
               await this.opts.store.saveState(id, state)
               await this.opts.audit(id, { action: 'group_discovered', groupId: group.id })
             }
@@ -241,14 +247,17 @@ export class GroupAutomation {
     const state = await this.opts.store.state(id)
     return groupEntryCapacity(await this.opts.limits.get(id), (state.entryTimes ?? []).filter((at) => at > this.now() - DAY).length, config.maxEntriesPerDay)
   }
-  private async forward(id: string, group: ManagedGroup, config: GroupAutomationConfig) {
+  /** Chips que podem receber um grupo repassado por `id`: só com proxy (IP), conectados, ativos e com automação ligada. */
+  private async forwardTargets(id: string, config: GroupAutomationConfig) {
     const candidates = (await this.opts.manager.list()).filter((s) => s.id !== id && (!config.targetSessionId || s.id === config.targetSessionId))
     const eligible = []
     for (const candidate of candidates) {
-      // Só encaminha a entrada para chips com proxy (IP): chip sem proxy não recebe grupo automático.
       if (this.hasProxy(candidate) && SENDABLE_STATES.includes(candidate.status) && this.opts.manager.isConnected(candidate.id) && (await this.opts.store.config(candidate.id)).enabled) eligible.push(candidate)
     }
-    const target = randomItem(eligible)
+    return eligible
+  }
+  private async forward(id: string, group: ManagedGroup, config: GroupAutomationConfig) {
+    const target = randomItem(await this.forwardTargets(id, config))
     if (!target) return
     const lease = await this.opts.store.claim(target.id, LEASE)
     if (!lease) return

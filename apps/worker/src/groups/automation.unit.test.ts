@@ -67,6 +67,62 @@ describe('entrada automática e mensagem diária', () => {
     expect(s.model.discover).toHaveBeenCalled() // mas descobre o link público
     expect(s.invites.run).toHaveBeenCalledWith(expect.objectContaining({ sourceSessionId: 'a', targetSessionId: 'b' }), { groupId: group.id, code: CODE })
   })
+  it('chip sem proxy repassa e o chip com proxy entra; quem repassa segue fora do grupo', async () => {
+    const s = setup()
+    s.sessions.set('a', { ...s.sessions.get('a')!, proxyId: null })
+    s.configs.set('b', { ...DEFAULT_GROUP_AUTOMATION, enabled: true })
+    await s.service.run('a')
+    expect(s.states.get('b')?.groups[0]).toMatchObject({ id: group.id, state: 'joined', forwardedTo: 'a' })
+    expect(s.states.get('a')?.groups[0]).toMatchObject({ id: group.id, state: 'pending', forwardedTo: 'b' })
+    expect(s.accept).not.toHaveBeenCalled()
+    expect(s.sendGroup).not.toHaveBeenCalled()
+  })
+  it('chip sem proxy não pesquisa nem consulta convites quando não há chip com proxy para receber', async () => {
+    for (const reason of ['sem-proxy', 'desativado', 'desconectado']) {
+      const s = setup()
+      s.sessions.set('a', { ...s.sessions.get('a')!, proxyId: null })
+      s.configs.set('b', { ...DEFAULT_GROUP_AUTOMATION, enabled: reason !== 'desativado' })
+      if (reason === 'sem-proxy') s.sessions.set('b', { ...s.sessions.get('b')!, proxyId: null })
+      if (reason === 'desconectado') s.sessions.get('b')!.status = 'DISCONNECTED'
+      await s.service.run('a')
+      expect(s.model.discover, reason).not.toHaveBeenCalled()
+      expect(s.inspect, reason).not.toHaveBeenCalled()
+      expect(s.invites.run, reason).not.toHaveBeenCalled()
+    }
+  })
+  it('chip sem proxy respeita o teto de 24 h e não acumula grupos aguardando repasse', async () => {
+    const other = 'ZYXWVUTSRQPONMLKJIHGFE'
+    const candidates = [
+      { inviteUrl: `https://chat.whatsapp.com/${CODE}`, topic: 'jogos' },
+      { inviteUrl: `https://chat.whatsapp.com/${other}`, topic: 'tecnologia' },
+    ]
+    const inspect = async (code: string) => ({ ...group, id: code === CODE ? 'one@g.us' : 'two@g.us', description: 'tema' })
+    const s = setup()
+    s.sessions.set('a', { ...s.sessions.get('a')!, proxyId: null })
+    s.configs.set('a', { ...DEFAULT_GROUP_AUTOMATION, enabled: true, maxEntriesPerDay: 1 })
+    s.configs.set('b', { ...DEFAULT_GROUP_AUTOMATION, enabled: true })
+    s.model.discover.mockResolvedValue(candidates)
+    s.inspect.mockImplementation(inspect)
+    await s.service.run('a')
+    s.advance(60_000)
+    await s.service.run('a')
+    expect(s.inspect).toHaveBeenCalledTimes(1) // teto 1 por 24 h
+    s.advance(DAY)
+    await s.service.run('a')
+    expect(s.inspect).toHaveBeenCalledTimes(2) // janela de 24 h renovada
+
+    const t = setup() // B sem vaga: o grupo descoberto fica aguardando e nada novo é consultado
+    t.model.discover.mockResolvedValue(candidates)
+    t.inspect.mockImplementation(inspect)
+    t.sessions.set('a', { ...t.sessions.get('a')!, proxyId: null })
+    t.configs.set('b', { ...DEFAULT_GROUP_AUTOMATION, enabled: true })
+    t.states.set('b', { groups: [], entryTimes: [Date.parse('2026-10-02T11:00:00Z')] })
+    await t.service.run('a')
+    t.advance(60_000)
+    await t.service.run('a')
+    expect(t.inspect).toHaveBeenCalledTimes(1)
+    expect(t.states.get('a')?.groups.filter((g) => !g.forwardedTo)).toHaveLength(1)
+  })
   it('não repete pesquisa ou mensagem no dia, inclusive após recriar o serviço', async () => {
     const s = setup()
     await s.service.run('a')

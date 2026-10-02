@@ -50,6 +50,28 @@ describe('convite entre sessões', () => {
     expect(s.code).not.toHaveBeenCalled()
     expect(s.accept).toHaveBeenCalledWith('TEST_CODE')
   })
+  it('repassa convite público mesmo que A não seja membro do grupo (chip sem proxy só encaminha)', async () => {
+    const s = setup()
+    s.a.setGroups([])
+    Object.assign(s.b, { inspectGroupInvite: vi.fn(async () => ({ id: 'public@g.us', name: 'Público', announce: false, participants: 1 })) })
+    s.accept.mockImplementation(async () => {
+      s.b.setGroups([{ id: 'public@g.us', name: 'Público', announce: false, participants: 2 }])
+      return 'public@g.us'
+    })
+    await expect(s.service.run({ ...input, groupIds: ['public@g.us'] }, { groupId: 'public@g.us', code: 'TEST_CODE' })).resolves.toMatchObject({ groupId: 'public@g.us', result: 'joined' })
+    expect(s.code).not.toHaveBeenCalled()
+    expect(s.accept).toHaveBeenCalledWith('TEST_CODE')
+  })
+  it('convite público não é aceito se o código aponta para outro grupo ou B já é membro', async () => {
+    const s = setup()
+    s.a.setGroups([])
+    Object.assign(s.b, { inspectGroupInvite: vi.fn(async () => ({ id: 'other@g.us', name: 'Outro', announce: false, participants: 1 })) })
+    await expect(s.service.run({ ...input, groupIds: ['public@g.us'] }, { groupId: 'public@g.us', code: 'TEST_CODE' })).rejects.toMatchObject({ code: 'GROUP_INVITE_FAILED' })
+    const t = setup()
+    t.b.setGroups([{ id: 'public@g.us', name: 'Público', announce: false, participants: 2 }])
+    await expect(t.service.run({ ...input, groupIds: ['public@g.us'] }, { groupId: 'public@g.us', code: 'TEST_CODE' })).rejects.toMatchObject({ code: 'VALIDATION_ERROR' })
+    expect(s.accept).not.toHaveBeenCalled(); expect(t.accept).not.toHaveBeenCalled()
+  })
   it('sorteia somente do pool e aceita após B receber de A; envia pelo pipeline e remove listener', async () => {
     const s = setup()
     const out = await s.service.run({ ...input, groupIds: ['two@g.us'] })

@@ -76,12 +76,15 @@ export class GroupInviteService {
       const [sourceGroups, targetGroups] = await Promise.all([source.fetchGroups(), target.fetchGroups()])
       const pool = new Set(input.groupIds)
       const existing = new Set(targetGroups.map((g) => g.id))
-      const candidates = sourceGroups.filter((g) => pool.has(g.id) && (publicInvite ? g.id === publicInvite.groupId : g.isAdmin === true) &&
-        g.id.endsWith('@g.us') && !existing.has(g.id))
+      // Convite público: A só repassa o link (o chip sem proxy nunca entra), então não precisa ser membro;
+      // o código é validado contra o grupo logo abaixo. Convite manual: A precisa ser admin do grupo.
+      const candidates = publicInvite
+        ? (pool.has(publicInvite.groupId) && publicInvite.groupId.endsWith('@g.us') && !existing.has(publicInvite.groupId) ? [publicInvite.groupId] : [])
+        : sourceGroups.filter((g) => pool.has(g.id) && g.isAdmin === true && g.id.endsWith('@g.us') && !existing.has(g.id)).map((g) => g.id)
       if (!candidates.length) {
         throw new GroupInviteError('VALIDATION_ERROR', 'Nenhum grupo elegível: A precisa ser admin e B ainda não pode ser membro.')
       }
-      groupId = candidates[randomInt(candidates.length)]!.id
+      groupId = candidates[randomInt(candidates.length)]!
       const code = publicInvite?.code ?? await source.groupInviteCode!(groupId)
       if (publicInvite && (await target.inspectGroupInvite?.(code))?.id !== groupId) throw new GroupInviteError('GROUP_INVITE_FAILED', 'Convite público não corresponde ao grupo.')
       const link = `https://chat.whatsapp.com/${code}`
