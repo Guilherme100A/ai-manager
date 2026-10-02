@@ -19,14 +19,23 @@ export interface ConversationOptions {
   audit(sourceId: string, detail: Record<string, unknown>): Promise<void>
   logger: { warn(obj: object, message?: string): void }
   now?: () => number
+  /** Fonte de aleatoriedade (injetável nos testes). Default: Math.random. */
+  random?: () => number
 }
+
+/** Tamanho de uma rajada: quantas falas seguidas a mesma conta envia antes de passar a vez. */
+const BURST_MIN = 1
+const BURST_MAX = 3
 
 export class ConversationAutomation {
   private timer?: ReturnType<typeof setInterval>
   private running?: Promise<void>
   private stopped = false
   private readonly now: () => number
-  constructor(private readonly opts: ConversationOptions) { this.now = opts.now ?? Date.now }
+  private readonly random: () => number
+  constructor(private readonly opts: ConversationOptions) { this.now = opts.now ?? Date.now; this.random = opts.random ?? Math.random }
+  /** Sorteia o tamanho da próxima rajada em [BURST_MIN, BURST_MAX]. */
+  private burstSize(): number { return BURST_MIN + Math.floor(this.random() * (BURST_MAX - BURST_MIN + 1)) }
   start() {
     this.timer = setInterval(() => this.launch(), MINUTE)
     this.timer.unref?.()
@@ -133,7 +142,7 @@ export class ConversationAutomation {
     delete peer.ownerId
     peer.nextAt = now + 30 * MINUTE
     await this.opts.store.saveState(partnerId, peer)
-    delete state.partnerId; delete state.draft; delete state.offlineSince
+    delete state.partnerId; delete state.draft; delete state.offlineSince; delete state.burstLeft
     state.history = []; state.turns = 0; state.nextSenderId = id; state.nextAt = now + 30 * MINUTE
     await this.opts.store.saveState(id, state)
   }
@@ -168,7 +177,7 @@ export class ConversationAutomation {
           if (['queued', 'retrying', 'processing'].includes(message.status)) throw new SessionError('VALIDATION_ERROR', 'A mensagem anterior ainda está na fila. Aguarde ou cancele antes de reativar.')
           state.history = [...state.history, { senderId: state.pending.senderId, text: state.pending.text }].slice(-10)
         }
-        delete state.pending; delete state.draft; delete state.halted; delete state.lastError
+        delete state.pending; delete state.draft; delete state.halted; delete state.lastError; delete state.burstLeft
         state.turns = 0; state.nextSenderId = id; state.nextAt = this.now() + input.intervalMinutes * MINUTE
         await this.opts.store.saveState(id, state)
       }
@@ -272,7 +281,14 @@ export class ConversationAutomation {
           } else if (message.sentAt && await this.opts.received(pending.receiverId, pending.sourcePhone, pending.text, pending.reservedAt)) {
             state.history = [...state.history, { senderId: pending.senderId, text: pending.text }].slice(-10)
             state.turns++
-            state.nextSenderId = pending.receiverId
+            // Rajada: a mesma conta envia um número aleatório de falas antes de passar a vez.
+            state.burstLeft = (state.burstLeft ?? this.burstSize()) - 1
+            if (state.burstLeft <= 0) {
+              state.nextSenderId = pending.receiverId // passa a vez para a outra conta
+              state.burstLeft = this.burstSize()      // nova rajada aleatória para ela
+            } else {
+              state.nextSenderId = pending.senderId   // a mesma conta continua
+            }
             state.nextAt = now + interval * MINUTE
             delete state.pending
             delete state.lastError
@@ -280,7 +296,7 @@ export class ConversationAutomation {
               if (!await this.opts.store.renew(lease)) return
               await this.finishRotation(id, state, now)
             } else if (state.turns >= turnsPerRound) {
-              state.turns = 0; state.history = []; state.nextSenderId = id; state.nextAt = now + 30 * MINUTE
+              state.turns = 0; state.history = []; state.nextSenderId = id; state.nextAt = now + 30 * MINUTE; delete state.burstLeft
             }
           } else if (now - (message.sentAt ? Date.parse(message.sentAt) : pending.reservedAt) > 2 * 60 * MINUTE) {
             state.halted = true; state.lastError = 'Sem confirmação de recebimento em duas horas. Conversa interrompida.'

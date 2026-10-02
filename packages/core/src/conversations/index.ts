@@ -20,6 +20,8 @@ export interface ConversationPending extends ConversationTurn {
 export interface ConversationState {
   partnerId?: string; ownerId?: string; lastPartnerId?: string; lastPairedAt?: number;
   history: ConversationTurn[]; turns: number; nextSenderId?: string; nextAt?: number;
+  /** Falas restantes na rajada do remetente atual antes de passar a vez (aleatório por rajada). */
+  burstLeft?: number;
   pending?: ConversationPending; draft?: ConversationTurn; lastError?: string; halted?: boolean
   /** Desde quando o par está sem conexão (tolerância antes de desfazer o par no rodízio). */
   offlineSince?: number

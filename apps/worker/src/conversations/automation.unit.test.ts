@@ -6,7 +6,7 @@ import type { ConversationStore } from './store'
 const A = '11111111-1111-4111-8111-111111111111'
 const B = '22222222-2222-4222-8222-222222222222'
 const C = '33333333-3333-4333-8333-333333333333'
-function setup() {
+function setup(over: { random?: () => number } = {}) {
   let now = 1_800_000_000_000
   let locked = false
   const config: ConversationConfig = { ...DEFAULT_CONVERSATION_CONFIG, mode: 'fixed', enabled: true, targetSessionId: B, turnsPerConversation: 2 }
@@ -33,7 +33,7 @@ function setup() {
   const received = vi.fn(async (..._args: unknown[]) => false)
   const allowed = vi.fn(async (_phone: string) => true)
   const manager = { list: async () => [...sessions.values()], get: async (id: string) => sessions.get(id)!, isConnected: (id: string) => connected.has(id), getTransport: () => undefined }
-  const options = { manager, store, limits: limits as never, pipeline: pipeline as never, messages: messages as never, model, received, allowed, audit: vi.fn(async () => undefined), logger: { warn: vi.fn() }, now: () => now }
+  const options = { manager, store, limits: limits as never, pipeline: pipeline as never, messages: messages as never, model, received, allowed, audit: vi.fn(async () => undefined), logger: { warn: vi.fn() }, now: () => now, random: over.random ?? (() => 0) }
   const automation = new ConversationAutomation(options)
   return { automation, options, store, configs, states, config, sessions, connected, limits, pipeline, messages, model, received, allowed, advance: (ms: number) => { now += ms } }
 }
@@ -55,6 +55,21 @@ describe('conversas entre duas contas', () => {
     await s.automation.run(A)
     expect(s.pipeline.send).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: B, phone: s.sessions.get(A)!.phone }))
     expect(s.model.message).toHaveBeenLastCalledWith(s.config.topic, B, [{ senderId: A, text: 'Qual jogo você recomenda?' }])
+  })
+  it('rajada: a mesma conta envia várias falas seguidas antes de passar a vez', async () => {
+    const s = setup({ random: () => 0.99 }) // burstSize sempre no máximo (3)
+    s.configs.set(A, { ...s.config, turnsPerConversation: 6 })
+    s.received.mockResolvedValue(true)
+    await s.automation.run(A) // fala 1: A → B
+    expect(s.pipeline.send).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: A, phone: s.sessions.get(B)!.phone }))
+    await s.automation.run(A) // confirma fala 1
+    expect(s.states.get(A)!.turns).toBe(1)
+    s.advance(5 * 60_000)
+    await s.automation.run(A) // fala 2: AINDA A → B (rajada), não alternou
+    expect(s.pipeline.send).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: A, phone: s.sessions.get(B)!.phone }))
+    await s.automation.run(A) // confirma fala 2
+    expect(s.states.get(A)!.turns).toBe(2)
+    expect(s.states.get(A)!.nextSenderId).toBe(A)
   })
   it('encerra a rodada no teto de falas e espera 30 minutos', async () => {
     const s = setup(); s.received.mockResolvedValue(true)
