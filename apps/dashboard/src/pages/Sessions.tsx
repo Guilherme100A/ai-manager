@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { ErrorText, PageHeader, StateIndicator } from '../components/ui'
 import { formatDateTime } from '../lib/aggregate'
 import { api } from '../lib/api'
@@ -6,7 +7,24 @@ import { proxyAddress } from '../lib/proxy-form'
 import { routeHref } from '../lib/router'
 
 export function Sessions() {
-  const { data, error } = usePoll(() => api.sessions(), POLL.list)
+  const { data, error, reload } = usePoll(() => api.sessions(), POLL.list)
+  const [removing, setRemoving] = useState<string>()
+  const [actionError, setActionError] = useState<unknown>()
+
+  async function remove(id: string, label: string) {
+    if (!window.confirm(`Excluir ${label}? O aparelho será desvinculado e o histórico de mensagens, a fila e as automações desta sessão serão apagados. Não dá para desfazer.`)) return
+    setRemoving(id)
+    setActionError(undefined)
+    try {
+      await api.deleteSession(id)
+      reload()
+    } catch (err) {
+      setActionError(err)
+    } finally {
+      setRemoving(undefined)
+    }
+  }
+
   return (
     <div data-testid="page-sessions">
       <PageHeader title="Sessões" subtitle="Números conectados, estado e proxy de cada sessão.">
@@ -15,6 +33,7 @@ export function Sessions() {
         </a>
       </PageHeader>
       <ErrorText error={error} />
+      <ErrorText error={actionError} testId="action-error" />
       <div className="table-wrap">
       <table>
         <thead>
@@ -25,6 +44,7 @@ export function Sessions() {
             <th>Proxy</th>
             <th>Última conexão</th>
             <th>Observação</th>
+            <th aria-label="Ações" />
           </tr>
         </thead>
         <tbody>
@@ -42,11 +62,16 @@ export function Sessions() {
               <td className={s.proxy ? 'mono' : 'muted'} data-testid="session-proxy">{proxyAddress(s.proxy)}</td>
               <td className="muted">{formatDateTime(s.lastConnectedAt)}</td>
               <td className="muted">{s.note ?? ''}</td>
+              <td className="cell-delete">
+                <button type="button" className="danger btn-sm" data-testid="session-delete" disabled={removing !== undefined} onClick={() => void remove(s.id, `${s.name} (${s.phone ?? 'sem número'})`)}>
+                  {removing === s.id ? 'Excluindo…' : 'Excluir'}
+                </button>
+              </td>
             </tr>
           ))}
           {data && data.length === 0 ? (
             <tr>
-              <td colSpan={6} className="empty">
+              <td colSpan={7} className="empty">
                 Nenhuma sessão
               </td>
             </tr>

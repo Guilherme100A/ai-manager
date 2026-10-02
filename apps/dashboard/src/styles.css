@@ -477,6 +477,14 @@ tbody tr:hover td {
   background: var(--surface-2);
 }
 
+td.cell-delete {
+  width: 1%;
+  text-align: right;
+  white-space: nowrap;
+  padding-left: 0;
+  padding-right: 0.5rem;
+}
+
 td.empty {
   text-align: center;
   padding: 2rem 1rem;
