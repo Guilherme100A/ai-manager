@@ -10,7 +10,7 @@ const VERSION_POOL = [
   '125.0.0.0', '126.0.0.0', '128.0.0.0', '130.0.0.0',
 ] as const
 
-const pick = <T>(pool: readonly T[], byte: number): T => pool[byte % pool.length]
+const pick = <T>(pool: readonly T[], byte: number): T => pool[byte % pool.length]!
 
 /**
  * Fingerprint (browser) estável e distinto por sessão. Deriva de um hash do
@@ -19,5 +19,5 @@ const pick = <T>(pool: readonly T[], byte: number): T => pool[byte % pool.length
  */
 export function browserForSession(sessionId: string): BrowserDescription {
   const h = createHash('sha256').update(sessionId).digest()
-  return [pick(OS_POOL, h[0]), pick(BROWSER_POOL, h[1]), pick(VERSION_POOL, h[2])]
+  return [pick(OS_POOL, h[0] ?? 0), pick(BROWSER_POOL, h[1] ?? 0), pick(VERSION_POOL, h[2] ?? 0)]
 }
