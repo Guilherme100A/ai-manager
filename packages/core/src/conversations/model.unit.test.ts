@@ -15,6 +15,17 @@ describe('modelo de conversas', () => {
     expect(JSON.stringify(request.messages)).toContain('fala-11'); expect(JSON.stringify(request.messages)).not.toContain('fala-0"')
     expect(s.create).toHaveBeenCalledTimes(1)
   })
+  it.each([
+    [[], 'abrir o assunto'],
+    [[{ senderId: 'b', text: 'oi' }], 'responder à outra conta'],
+    [[{ senderId: 'b', text: 'oi' }, { senderId: 'a', text: 'opa' }], 'continuar a sua própria fala'],
+  ])('marca autor relativo ao remetente e a tarefa (rajada)', async (history, task) => {
+    const s = setup()
+    await s.model.message('jogos', 'a', history)
+    const payload = JSON.parse((s.create.mock.calls[0]![0] as { messages: { content: string }[] }).messages[0]!.content)
+    expect(payload.task).toBe(task)
+    expect(payload.history.map((t: { autor: string }) => t.autor)).toEqual(history.map((t) => (t.senderId === 'a' ? 'você' : 'outra conta')))
+  })
   it.each(['', 'x'.repeat(301), 'https://example.com'])('rejeita fala inválida', async (text) => {
     await expect(setup(text).model.message('jogos', 'a', [])).rejects.toThrow('inválida')
   })
