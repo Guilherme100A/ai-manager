@@ -67,7 +67,7 @@ export function GroupAutomationPanel({ sessionId, sessions }: { sessionId: strin
         <label htmlFor="auto-group-target">Outra conta para receber o convite</label>
         <select id="auto-group-target" disabled={busy} value={config.targetSessionId ?? ''} onChange={(e) => setConfig({ ...config, targetSessionId: e.target.value || null })}>
           <option value="">Sortear outra conta com automação ativa</option>
-          {sessions.filter((s) => s.id !== sessionId).map((s) => <option key={s.id} value={s.id}>{s.name} ({s.phone})</option>)}
+          {sessions.filter((s) => s.id !== sessionId).map((s) => <option key={s.id} value={s.id}>{s.name} ({s.phone ?? 'sem número'})</option>)}
         </select>
         <small className="hint">Ative a automação também na conta destinatária e autorize o número dela em Contatos. Ela só entra se tiver capacidade disponível.</small>
       </div>

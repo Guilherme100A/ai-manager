@@ -29,6 +29,8 @@ export interface BridgeTargets {
     resume(id: string): Promise<unknown>
     restart(id: string): Promise<unknown>
     logout(id: string): Promise<unknown>
+    /** Exclui a sessão (conexão, banco, fila e automações). */
+    remove(id: string): Promise<unknown>
     getTransport(id: string): WaTransport | undefined
     isConnected(id: string): boolean
     /** T20 — adiciona UM número a um grupo (checagens e freio no GroupParticipantService). */
@@ -91,6 +93,7 @@ export function bridgeHandlers(t: BridgeTargets): Record<string, Record<string, 
       resume: ([id]) => s.resume(str(id)),
       restart: ([id]) => s.restart(str(id)),
       logout: ([id]) => s.logout(str(id)),
+      remove: ([id]) => s.remove(str(id)),
       fetchGroups: async ([id]): Promise<GroupSummary[]> => {
         const transport = s.getTransport(str(id))
         if (!transport || !s.isConnected(str(id))) throw new TransportNotConnectedError()

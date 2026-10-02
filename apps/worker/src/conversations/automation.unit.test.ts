@@ -17,6 +17,7 @@ function setup() {
     saveConfig: async (id, value) => { configs.set(id, structuredClone(value)) },
     state: async (id) => structuredClone(states.get(id) ?? { history: [], turns: 0 }),
     saveState: async (id, value) => { states.set(id, structuredClone(value)) },
+    remove: async (id) => { configs.delete(id); states.delete(id) },
     claim: async () => { if (locked) return undefined; locked = true; return 'lease' },
     renew: vi.fn(async () => true), release: async () => { locked = false },
   }
@@ -46,7 +47,7 @@ describe('conversas entre duas contas', () => {
     expect(s.states.get(A)!.turns).toBe(0)
     s.received.mockResolvedValue(true)
     await s.automation.run(A)
-    expect(s.received).toHaveBeenCalledWith(B, s.sessions.get(A)!.phone, 'Qual jogo você recomenda?', expect.any(Number))
+    expect(s.received).toHaveBeenCalledWith(B, s.sessions.get(A)!.phone!, 'Qual jogo você recomenda?', expect.any(Number))
     expect(s.states.get(A)!.turns).toBe(1)
     await s.automation.run(A)
     expect(s.pipeline.send).toHaveBeenCalledTimes(1)
@@ -81,9 +82,9 @@ describe('conversas entre duas contas', () => {
     const restarted = new ConversationAutomation(s.options)
     await restarted.run(A)
     expect(s.pipeline.send).toHaveBeenCalledTimes(1)
-    expect(await restarted.handlesInbound(B, s.sessions.get(A)!.phone, 'Qual jogo você recomenda?')).toBe(true)
-    expect(await restarted.handlesInbound(B, s.sessions.get(C)!.phone, 'Qual jogo você recomenda?')).toBe(false)
-    expect(await restarted.handlesInbound(B, s.sessions.get(A)!.phone, 'outra mensagem')).toBe(false)
+    expect(await restarted.handlesInbound(B, s.sessions.get(A)!.phone!, 'Qual jogo você recomenda?')).toBe(true)
+    expect(await restarted.handlesInbound(B, s.sessions.get(C)!.phone!, 'Qual jogo você recomenda?')).toBe(false)
+    expect(await restarted.handlesInbound(B, s.sessions.get(A)!.phone!, 'outra mensagem')).toBe(false)
   })
   it('reutiliza a fala depois de gate rejeitado sem nova chamada ao modelo', async () => {
     const s = setup(); s.pipeline.send.mockRejectedValueOnce(new SendRejectedError('RATE_LIMIT', 'limit'))
@@ -203,5 +204,52 @@ describe('conversas entre duas contas', () => {
     expect(s.states.get(B)!.ownerId).toBe(A)
     expect(s.states.get(C)?.partnerId).toBeUndefined()
     expect((await s.automation.view(B)).activePartnerId).toBe(A)
+  })
+  it('sessão excluída: libera o parceiro (dono ou convidado) com pausa e apaga o estado dela', async () => {
+    const owner = setup(); rotation(owner); await owner.automation.distribute(); await owner.automation.run(A)
+    expect(owner.states.get(A)!.pending).toBeDefined()
+    owner.sessions.delete(B); owner.connected.delete(B); await owner.automation.forget(B)
+    expect(owner.states.has(B)).toBe(false)
+    await owner.automation.distribute()
+    expect(owner.states.get(A)).toMatchObject({ turns: 0, history: [] })
+    expect(owner.states.get(A)!.partnerId).toBeUndefined(); expect(owner.states.get(A)!.pending).toBeUndefined()
+    expect(owner.states.get(C)?.partnerId).toBeUndefined()
+    owner.advance(30 * 60_000); await owner.automation.distribute()
+    // C esperou mais (nunca formou par), então é quem inicia o novo par com A.
+    expect(owner.states.get(C)!.partnerId).toBe(A)
+    expect(owner.states.get(A)!.ownerId).toBe(C)
+
+    const guest = setup(); rotation(guest); await guest.automation.distribute()
+    guest.sessions.delete(A); guest.connected.delete(A); await guest.automation.forget(A)
+    await guest.automation.distribute()
+    expect(guest.states.get(B)!.ownerId).toBeUndefined()
+    guest.advance(30 * 60_000); await guest.automation.distribute()
+    expect(guest.states.get(B)!.partnerId ?? guest.states.get(B)!.ownerId).toBe(C)
+  })
+  it('queda momentânea de conexão não desfaz o par; mais de 10 min desconectado desfaz', async () => {
+    const s = setup(); rotation(s); await s.automation.distribute()
+    s.connected.delete(B)
+    await s.automation.run(A)
+    expect(s.states.get(A)!.partnerId).toBe(B)
+    s.advance(5 * 60_000); await s.automation.run(A)
+    expect(s.states.get(A)!.partnerId).toBe(B)
+    s.connected.add(B); await s.automation.run(A)
+    expect(s.states.get(A)!.offlineSince).toBeUndefined()
+    expect(s.pipeline.send).toHaveBeenCalledTimes(1)
+
+    const gone = setup(); rotation(gone); await gone.automation.distribute()
+    gone.connected.delete(B)
+    await gone.automation.run(A)
+    gone.advance(10 * 60_000); await gone.automation.run(A)
+    expect(gone.states.get(A)!.partnerId).toBeUndefined()
+    expect(gone.states.get(B)!.ownerId).toBeUndefined()
+  })
+  it('sessão excluída: desativa par fixo que apontava para ela', async () => {
+    const s = setup()
+    s.sessions.delete(B); s.connected.delete(B)
+    await s.automation.distribute()
+    expect(s.configs.get(A)).toMatchObject({ enabled: false, targetSessionId: null })
+    await s.automation.run(A)
+    expect(s.pipeline.send).not.toHaveBeenCalled()
   })
 })

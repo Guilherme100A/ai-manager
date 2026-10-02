@@ -47,6 +47,12 @@ export function createBridgeTargets(opts: CreateBridgeTargetsOptions): BridgeTar
     resume: (id) => manager.resume(id),
     restart: (id) => manager.restart(id),
     logout: (id) => manager.logout(id),
+    // Conexão e banco primeiro; a fila da sessão sai depois (as mensagens dela já caíram em cascata).
+    remove: async (id) => {
+      const result = await manager.remove(id)
+      await opts.queue.removeSession(id).catch(() => undefined)
+      return result
+    },
     getTransport: (id) => manager.getTransport(id),
     isConnected: (id) => manager.isConnected(id),
     addGroupParticipant: (adminSessionId, groupId, targetSessionId) => groupParticipants.add({ adminSessionId, groupId, targetSessionId }),

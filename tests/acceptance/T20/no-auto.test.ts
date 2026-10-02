@@ -17,16 +17,22 @@ function walk(dir: string, out: string[] = []): string[] {
 const rel = (f: string) => relative(rootPath(), f).split(sep).join('/')
 const product = () => [...walk(rootPath('apps')), ...walk(rootPath('packages'))]
 const nonTest = (f: string) => !/\.test\.tsx?$/.test(f)
+// Fluxo de convite entre sessões e automação de grupos (posteriores ao T20): únicos módulos (e seus testes)
+// que podem aceitar convite. Mesma lista do T14 (AC-T14-03).
+const INVITE_FLOW_FILES = new Set(
+  ['packages/core/src/transport/baileys', 'packages/core/src/transport/types', 'packages/core/src/groups/invites', 'apps/worker/src/groups/automation']
+    .flatMap((f) => [`${f}.ts`, `${f}.unit.test.ts`]),
+)
 
 describe('T20 — sem adição automática e sem entrada em grupos', () => {
   const ctx = useGroupsApp()
 
-  it('AC-T20-07 F-NO-GROUP-JOIN: o nome proibido de aceitar convite não aparece no código (nem em testes unitários)', () => {
+  it('AC-T20-07 F-NO-GROUP-JOIN: o nome proibido de aceitar convite só aparece nos módulos do fluxo de convite (e seus testes)', () => {
     const forbidden = ['group', 'Accept', 'Invite'].join('')
     const hits = product()
       .filter((f) => readFileSync(f, 'utf8').includes(forbidden))
       .map(rel)
-    expect(hits, `ocorrências: ${hits.join(', ')}`).toEqual([])
+    expect(hits.filter((f) => !INVITE_FLOW_FILES.has(f)), `ocorrências fora do fluxo: ${hits.join(', ')}`).toEqual([])
   })
 
   it('AC-T20-03 a adição só é chamada a partir da rota/serviço: nenhum timer, fila, cron ou IA chama addGroupParticipant', () => {

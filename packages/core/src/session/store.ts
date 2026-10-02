@@ -32,7 +32,8 @@ export class SessionError extends Error {
 export interface SessionView {
   id: string
   name: string
-  phone: string
+  /** Null até a sessão conectar pela primeira vez (cadastro por QR sem número). */
+  phone: string | null
   status: SessionState
   /** Alias de `status`. */
   state: SessionState
@@ -47,7 +48,8 @@ export interface SessionView {
 
 export interface CreateSessionInput {
   name: string
-  phone: string
+  /** Opcional no QR: preenchido com o número da conta ao conectar. Obrigatório para pairing code. */
+  phone?: string | null
   proxyId?: string | null
   note?: string | null
   /** T17: proxy informado junto com a sessão (criado e vinculado na mesma transação). Exclusivo com proxyId. */
@@ -107,7 +109,8 @@ export class SessionStore {
   constructor(readonly db: Database) {}
 
   async create(input: CreateSessionInput): Promise<SessionRow> {
-    if (!E164_REGEX.test(input.phone)) throw new SessionError('VALIDATION_ERROR', 'phone must be E.164 (e.g. +5511999999999)', 'phone')
+    const phone = input.phone?.trim() || null
+    if (phone !== null && !E164_REGEX.test(phone)) throw new SessionError('VALIDATION_ERROR', 'phone must be E.164 (e.g. +5511999999999)', 'phone')
     if (input.proxy && input.proxyId) throw new SessionError('VALIDATION_ERROR', 'use either proxy or proxyId, not both', 'proxy')
     const inline = input.proxy ? normalizeProxyOrThrow(input.proxy) : undefined
     let proxyId = input.proxyId ?? null
@@ -125,7 +128,7 @@ export class SessionStore {
         }
         const [row] = await tx
           .insert(sessions)
-          .values({ name: input.name, phone: input.phone, proxyId, note: input.note ?? null, status: 'NEW' })
+          .values({ name: input.name, phone, proxyId, note: input.note ?? null, status: 'NEW' })
           .returning()
         return row!
       })
@@ -203,6 +206,28 @@ export class SessionStore {
   }
 
   /**
+   * Exclui a sessão. As tabelas dependentes (credenciais, mensagens, eventos, limites, sugestões, vínculos)
+   * caem em cascata no banco; o proxy da sessão é apagado se ficar sem uso (vínculo 1:1, como no updateDetails).
+   */
+  async delete(id: string): Promise<{ deletedProxyId: string | null }> {
+    if (!UUID_RE.test(id)) throw new SessionError('SESSION_NOT_FOUND', `session ${id} not found`)
+    return this.db.transaction(async (tx) => {
+      const [current] = await tx.select().from(sessions).where(eq(sessions.id, id)).for('update')
+      if (!current) throw new SessionError('SESSION_NOT_FOUND', `session ${id} not found`)
+      await tx.delete(sessions).where(eq(sessions.id, id))
+      let deletedProxyId: string | null = null
+      if (current.proxyId) {
+        const [stillUsed] = await tx.select({ id: sessions.id }).from(sessions).where(eq(sessions.proxyId, current.proxyId))
+        if (!stillUsed) {
+          await tx.delete(proxies).where(eq(proxies.id, current.proxyId))
+          deletedProxyId = current.proxyId
+        }
+      }
+      return { deletedProxyId }
+    })
+  }
+
+  /**
    * Muda o estado validando a SPEC 3.2 contra o valor atual no banco (linha travada).
    * `to === estado atual` é no-op (`changed: false`) quando `allowSame`; senão INVALID_TRANSITION.
    */
@@ -227,7 +252,7 @@ export class SessionStore {
     })
   }
 
-  async update(id: string, set: Partial<Pick<SessionRow, 'warmupStartedAt' | 'lastConnectedAt' | 'requiresRestart'>>): Promise<SessionRow> {
+  async update(id: string, set: Partial<Pick<SessionRow, 'warmupStartedAt' | 'lastConnectedAt' | 'requiresRestart' | 'phone'>>): Promise<SessionRow> {
     const [row] = await this.db.update(sessions).set({ ...set, updatedAt: new Date() }).where(eq(sessions.id, id)).returning()
     if (!row) throw new SessionError('SESSION_NOT_FOUND', `session ${id} not found`)
     return row

@@ -179,6 +179,7 @@ export function createWorkerBridge(opts: WorkerBridgeOptions): WorkerBridge {
     resume: (id) => call('sessions', 'resume', id),
     restart: (id) => call('sessions', 'restart', id),
     logout: (id) => call('sessions', 'logout', id),
+    remove: (id) => call('sessions', 'remove', id),
     getTransport: remoteTransport,
     addGroupParticipant: (adminSessionId, groupId, targetSessionId) => call<GroupAddOutcome>('sessions', 'addGroupParticipant', adminSessionId, groupId, targetSessionId),
   }

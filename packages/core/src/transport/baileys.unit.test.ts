@@ -7,6 +7,7 @@ import {
   UnsupportedProxyError,
   createProxyAgent,
   mapDisconnectReason,
+  phoneFromUserJid,
   redactProxyUrl,
   toIncomingMessage,
   type BaileysSocketConfig,
@@ -290,5 +291,15 @@ describe('factory padrão', () => {
   it('o pacote do Baileys expõe makeWASocket (sem abrir socket)', async () => {
     const mod = await import('@whiskeysockets/baileys')
     expect(typeof mod.makeWASocket).toBe('function')
+  })
+})
+
+describe('phoneFromUserJid', () => {
+  it('extrai o E.164 do JID da conta (com ou sem device) e ignora LID/formatos desconhecidos', () => {
+    expect(phoneFromUserJid('5511999990001:12@s.whatsapp.net')).toBe('+5511999990001')
+    expect(phoneFromUserJid('5511999990001@s.whatsapp.net')).toBe('+5511999990001')
+    expect(phoneFromUserJid('123456789012345:3@lid')).toBeUndefined()
+    expect(phoneFromUserJid('abc@s.whatsapp.net')).toBeUndefined()
+    expect(phoneFromUserJid(undefined)).toBeUndefined()
   })
 })

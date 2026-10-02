@@ -70,7 +70,7 @@ export function Groups() {
           <option value="">Selecione…</option>
           {(sessions.data ?? []).map((s) => (
             <option key={s.id} value={s.id}>
-              {s.name} ({s.phone}) — {indicatorText(s.status)}
+              {s.name} ({s.phone ?? 'sem número'}) — {indicatorText(s.status)}
             </option>
           ))}
         </select>

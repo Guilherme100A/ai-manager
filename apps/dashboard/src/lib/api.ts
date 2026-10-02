@@ -100,7 +100,7 @@ export const api = {
 
   sessions: () => request<{ items: Session[] }>('/api/sessions').then((r) => r.items),
   session: (id: string) => request<Session>(`/api/sessions/${enc(id)}`),
-  createSession: (input: { name: string; phone: string; proxy?: ProxyInput | null; note?: string | null }) =>
+  createSession: (input: { name: string; phone?: string | null; proxy?: ProxyInput | null; note?: string | null }) =>
     request<Session>('/api/sessions', { body: input }),
   /** Edita a sessão (AC-T17-04). `proxy: null` remove; sem `password` mantém a senha atual. */
   updateSession: (id: string, input: { name?: string; note?: string | null; proxy?: ProxyInput | null }) =>
@@ -109,6 +109,7 @@ export const api = {
   getQr: (id: string) => request<QrInfo>(`/api/sessions/${enc(id)}/qr`),
   pairingCode: (id: string, phone?: string) =>
     request<{ code: string }>(`/api/sessions/${enc(id)}/pairing-code`, { body: phone ? { phone } : {} }),
+  deleteSession: (id: string) => request<void>(`/api/sessions/${enc(id)}`, { method: 'DELETE' }),
   action: (id: string, action: 'pause' | 'resume' | 'restart' | 'logout') =>
     request<Session>(`/api/sessions/${enc(id)}/${action}`, { method: 'POST' }),
   health: (id: string) => request<SessionHealth>(`/api/sessions/${enc(id)}/health`),

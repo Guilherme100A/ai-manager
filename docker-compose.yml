@@ -58,6 +58,10 @@ services:
       # real (default) | passthrough (somente testes).
       ANTIBAN_MODE: ${ANTIBAN_MODE:-real}
       ANTIBAN_PRESET: ${ANTIBAN_PRESET:-conservative}
+      # Contas sem configuração de conversa entram no rodízio automático (false = só as ativadas no painel).
+      CONVERSATIONS_AUTO_ROTATE: ${CONVERSATIONS_AUTO_ROTATE:-true}
+      # Entrada automática em grupos: false (padrão) = só liga quando ativada no painel; true = contas novas já vêm ativas.
+      GROUP_AUTOMATION_AUTO_ENABLE: ${GROUP_AUTOMATION_AUTO_ENABLE:-false}
       WORKER_HEALTH_PORT: '9464'
       WORKER_INTERNAL_PORT: '9465'
     ports:

@@ -1,6 +1,6 @@
 # Entrada automática em grupos e mensagem diária
 
-Na página **Grupos**, selecione uma conta e configure **Entrada automática e mensagem diária**. A ativação é individual e fica desativada por padrão. Informe os temas para a busca, o teto de entradas por 24 horas e, opcionalmente, outra sessão para receber os convites. Também é possível sortear outra conta com automação ativa.
+Na página **Grupos**, selecione uma conta e configure **Entrada automática e mensagem diária**. A ativação é individual. Por padrão (`GROUP_AUTOMATION_AUTO_ENABLE=false`) a automação fica desativada até ser ligada no painel. Com `true`, contas que nunca salvaram essa configuração já vêm ativas com o tema e o teto padrão. Informe os temas para a busca, o teto de entradas por 24 horas e, opcionalmente, outra sessão para receber os convites. Também é possível sortear outra conta com automação ativa.
 
 ## Limite é de entradas, não de mensagens recebidas
 

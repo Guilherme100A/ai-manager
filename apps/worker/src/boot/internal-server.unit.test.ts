@@ -23,6 +23,7 @@ function targets(over: Partial<BridgeTargets['sessions']> = {}): BridgeTargets {
       resume: vi.fn(async () => ({})),
       restart: vi.fn(async () => ({})),
       logout: vi.fn(async () => ({})),
+      remove: vi.fn(async () => ({ deletedProxyId: null })),
       getTransport: vi.fn(() => undefined as WaTransport | undefined),
       isConnected: vi.fn(() => false),
       ...over,

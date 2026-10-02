@@ -17,6 +17,7 @@ function setup() {
     saveConfig: async (id, value) => { configs.set(id, structuredClone(value)) },
     state: async (id) => structuredClone(states.get(id) ?? { groups: [] }),
     saveState: async (id, value) => { states.set(id, structuredClone(value)) },
+    remove: async (id) => { configs.delete(id); states.delete(id) },
     claim: async (id) => { if (leases.has(id)) return undefined; leases.add(id); return 'token' },
     renew: async () => undefined,
     release: async (id) => { leases.delete(id) },

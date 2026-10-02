@@ -2,6 +2,8 @@
 
 No detalhe de cada conta participante, abra **Conversas entre contas**, escolha **Rodízio automático**, informe o tema e salve com as conversas ativas. Autorize os números em Contatos, conecte as sessões e habilite a IA com uma chave válida. Cada conta participa de uma conversa por vez.
 
+Com `CONVERSATIONS_AUTO_ROTATE=true` (padrão do compose), toda conta que nunca salvou essa configuração já entra no rodízio com os valores padrão: basta conectar e autorizar os números em Contatos. Para tirar uma conta, desative e salve no painel. Com `false`, só participam as contas ativadas manualmente.
+
 Configurações antigas continuam como pares fixos até o operador escolher rodízio. No modo fixo, basta selecionar a outra conta em uma sessão, sem criar vínculo inverso. Um par fixo ativo reserva suas duas contas e não participa do rodízio.
 
 ## Distribuição dos pares

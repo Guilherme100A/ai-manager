@@ -71,6 +71,12 @@ export class GroupAutomation {
       running: this.running.has(id), lastSearchAt: state.lastSearchAt ?? null, lastJoinAt: state.lastJoinAt ?? null }
   }
 
+  /** Sessão excluída: espera o ciclo em curso dela terminar e apaga configuração e estado. */
+  async forget(id: string) {
+    await this.running.get(id)
+    await this.opts.store.remove(id)
+  }
+
   requestTick(id: string) { if (!this.stopped) this.launch(id); return { queued: !this.stopped } }
   private launch(id: string) {
     if (this.running.has(id)) return

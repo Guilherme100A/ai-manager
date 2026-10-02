@@ -205,7 +205,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     const conversationSettings = new AiSettingsService({ db, env })
     const conversationContacts = new ContactsService(db)
     const conversations = new ConversationAutomation({
-      manager, store: new RedisConversationStore(redis), limits, pipeline: routingPipeline, messages: queue,
+      manager, store: new RedisConversationStore(redis, env.CONVERSATIONS_AUTO_ROTATE?.trim().toLowerCase() !== 'false'), limits, pipeline: routingPipeline, messages: queue,
       model: new SmallConversationModel(() => conversationSettings.resolve()),
       allowed: async (phone) => canMessage(await conversationContacts.findByPhone(phone)).ok,
       received: async (receiverId, phone, text, since) => {
@@ -244,7 +244,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     onStop('session-conversations', () => conversations.stop())
     const groupSettings = new AiSettingsService({ db, env })
     const groupAutomation = new GroupAutomation({
-      manager, store: new RedisGroupAutomationStore(redis, config.queuePrefix), limits,
+      manager, store: new RedisGroupAutomationStore(redis, config.queuePrefix, env.GROUP_AUTOMATION_AUTO_ENABLE?.trim().toLowerCase() !== 'false'), limits,
       pipeline: routingPipeline, messages: queue, model: new SmallGroupModel(() => groupSettings.resolve()),
       invites: bridgeTargets.groupInvites, logger,
       audit: async (sessionId, detail) => {
@@ -259,6 +259,13 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
       return groupAutomation.requestTick(id)
     }
     onStop('group-automation', () => groupAutomation.stop())
+    // Exclusão de sessão: além de conexão, banco e fila, apaga o estado das automações no Redis.
+    const removeSession = bridgeTargets.sessions.remove
+    bridgeTargets.sessions.remove = async (id) => {
+      const result = await removeSession(id)
+      await Promise.allSettled([conversations.forget(id), groupAutomation.forget(id)])
+      return result
+    }
 
     // ---- proxies (T06) + alertas (T11) + métricas (T15) --------------------------------------
     const proxyMonitor: ProxyMonitor = startProxyMonitor({ db, logger, ...(opts.proxyCheckIntervalMs ? { intervalMs: opts.proxyCheckIntervalMs } : {}) })

@@ -265,6 +265,49 @@ describe('ações manuais (AC-T05-06)', () => {
     expect((await manager.startQr(id)).status).toBe('NEW')
   })
 
+  it('cadastro por QR sem número: ao conectar, grava o número da conta; número errado é corrigido', async () => {
+    const s = await manager.create({ name: 'qr', phone: null })
+    expect(s.phone).toBeNull()
+    await manager.startQr(s.id)
+    const t = fakes.last(s.id)!
+    t.phone = '+5511999990007'
+    t.open()
+    await manager.whenIdle()
+    expect((await manager.get(s.id)).phone).toBe('+5511999990007')
+
+    const typo = await manager.create({ name: 'typo', phone: '+5511999990001' })
+    await manager.startQr(typo.id)
+    const t2 = fakes.last(typo.id)!
+    t2.phone = '+5511999990008'
+    t2.open()
+    await manager.whenIdle()
+    expect((await manager.get(typo.id)).phone).toBe('+5511999990008')
+  })
+
+  it('pairing code sem número na sessão nem na requisição → VALIDATION_ERROR, sem abrir conexão', async () => {
+    const s = await manager.create({ name: 'qr', phone: null })
+    await expect(manager.requestPairingCode(s.id)).rejects.toMatchObject({ code: 'VALIDATION_ERROR', field: 'phone' })
+    expect(fakes.created.get(s.id)).toBeUndefined()
+  })
+
+  it('remove: desvincula o aparelho, fecha a conexão sem reconectar e apaga do banco; vale também em NEW', async () => {
+    const id = await connectedSession()
+    const t = fakes.last(id)!
+    expect(await manager.remove(id)).toEqual({ deletedProxyId: null })
+    expect(t.loggedOut).toBe(true)
+    expect(t.closed).toBe(true)
+    expect(manager.isConnected(id)).toBe(false)
+    await manager.whenIdle()
+    expect(await db.select().from(sessions).where(eq(sessions.id, id))).toHaveLength(0)
+    expect(await credsCount(id)).toBe(0)
+    expect(fakes.created.get(id)).toHaveLength(1)
+    await expect(manager.remove(id)).rejects.toMatchObject({ code: 'SESSION_NOT_FOUND' })
+
+    const fresh = await manager.create({ name: 'n', phone: '+5511999990002' })
+    await manager.remove(fresh.id)
+    await expect(manager.get(fresh.id)).rejects.toMatchObject({ code: 'SESSION_NOT_FOUND' })
+  })
+
   it('pause/resume em NEW são inválidos; id inexistente → SESSION_NOT_FOUND', async () => {
     const s = await manager.create({ name: 's', phone: '+5511999990001' })
     await expect(manager.pause(s.id)).rejects.toBeInstanceOf(InvalidTransitionError)

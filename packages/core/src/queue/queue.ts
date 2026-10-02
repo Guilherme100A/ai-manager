@@ -277,6 +277,27 @@ export class MessageQueue extends EventEmitter<MessageQueueEvents> implements Se
     return worker.then(() => undefined)
   }
 
+  /**
+   * Sessão excluída: fecha o Worker da sessão (espera o envio em curso) e apaga a fila dela no Redis.
+   * As linhas de mensagens já saíram do banco em cascata; nada mais será entregue por essa sessão.
+   */
+  async removeSession(sessionId: string): Promise<void> {
+    const worker = this.workers.get(sessionId)
+    this.workers.delete(sessionId)
+    if (worker) await worker.then((w) => w.close()).catch(() => undefined)
+    const queue = await this.queue(sessionId)
+    try {
+      await queue.obliterate({ force: true })
+    } finally {
+      this.queues.delete(sessionId)
+      this.controlChains.delete(sessionId)
+      this.controlVersions.delete(sessionId)
+      for (const [id, pending] of this.pendingReceipts) if (pending.sessionId === sessionId) this.pendingReceipts.delete(id)
+      await queue.close().catch(() => undefined)
+    }
+    this.log.info({ session_id: sessionId }, 'message queue removed')
+  }
+
   /** Receipt do transporte (AC-T08-02): sent → delivered → read. Casa por `transport_message_id`. */
   async handleReceipt(sessionId: string, receipt: ReceiptUpdate): Promise<void> {
     const row = await this.store.findByTransportId(sessionId, receipt.messageId)

@@ -56,7 +56,7 @@ export function NewSession() {
     if (session) return session
     const created = await api.createSession({
       name: name.trim(),
-      phone: phone.trim(),
+      phone: phone.trim() || null,
       ...(proxyInput ? { proxy: proxyInput } : {}),
       note: note.trim() || null,
     })
@@ -71,6 +71,11 @@ export function NewSession() {
     const parsed = session ? ({ ok: true, proxy: null } as const) : parseNewSessionProxy(direct, proxy)
     setProxyError(parsed.ok ? undefined : parsed.error)
     if (!parsed.ok) return
+    // O pairing code é gerado para um número; no QR o número é lido da conta ao conectar.
+    if (m === 'pairing' && !phone.trim() && !session?.phone) {
+      setError(new Error('Informe o número para gerar o pairing code (ou use o QR Code, que não precisa).'))
+      return
+    }
     setBusy(true)
     setError(undefined)
     try {
@@ -111,8 +116,11 @@ export function NewSession() {
           value={phone}
           onChange={(e) => setPhone(e.target.value)}
           disabled={!!session}
-          required
+          aria-describedby="new-phone-hint"
         />
+        <p className="hint" id="new-phone-hint">
+          Opcional no QR Code: o número é preenchido sozinho quando o WhatsApp conecta. Obrigatório só para o pairing code.
+        </p>
         <label className="check direct-connection" htmlFor="new-direct-connection">
           <input
             id="new-direct-connection"

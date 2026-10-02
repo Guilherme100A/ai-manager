@@ -58,7 +58,8 @@ export const sessions = pgTable(
   {
     id: uuid('id').primaryKey().defaultRandom(),
     name: text('name').notNull(),
-    phone: text('phone').notNull(),
+    // Opcional no cadastro por QR: o worker preenche com o número da conta quando o WhatsApp conecta.
+    phone: text('phone'),
     status: sessionStatusEnum('status').notNull().default('NEW'),
     // UNIQUE: um proxy só pode estar vinculado a uma sessão; NULLs não conflitam (AC-T01-02).
     proxyId: uuid('proxy_id')

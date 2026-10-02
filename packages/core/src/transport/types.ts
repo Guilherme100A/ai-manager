@@ -111,6 +111,8 @@ export interface WaTransport {
   off?(event: 'message', cb: (message: IncomingMessage) => void): void
   /** T20 — adiciona UM participante a um grupo (ação manual do admin). Só lança TransportNotConnectedError. */
   addGroupParticipant(groupId: string, jid: string): Promise<GroupParticipantResult[]>
+  /** Número (E.164) da conta autenticada, quando conectada. Preenche o telefone de sessões cadastradas sem número. */
+  ownPhone?(): string | undefined
   logout(): Promise<void>
   close(): Promise<void>
 }

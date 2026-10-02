@@ -1,6 +1,6 @@
 import { api, sessionWithGroups, useSessions } from './shared'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
-import { join, relative } from 'node:path'
+import { join, relative, sep } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { FakeTransport } from '@wsm/core'
 import * as core from '@wsm/core'
@@ -29,7 +29,7 @@ describe('T14 — entradas limitadas aos fluxos autorizados', () => {
     const root = rootPath()
     const files = [...walk(rootPath('apps')), ...walk(rootPath('packages'))].filter((f) => !/\.test\.tsx?$/.test(f))
     expect(files.length).toBeGreaterThan(20)
-    const hits = files.filter((f) => readFileSync(f, 'utf8').includes(FORBIDDEN)).map((f) => relative(root, f))
+    const hits = files.filter((f) => readFileSync(f, 'utf8').includes(FORBIDDEN)).map((f) => relative(root, f).split(sep).join('/'))
     expect(hits.filter((f) => !INVITE_FILES.has(f)), `ocorrências fora do fluxo: ${hits.join(', ')}`).toEqual([])
   })
 
@@ -37,7 +37,7 @@ describe('T14 — entradas limitadas aos fluxos autorizados', () => {
     const root = rootPath()
     const files = [...walk(rootPath('apps')), ...walk(rootPath('packages'))].filter((f) => !/\.test\.tsx?$/.test(f))
     const pattern = new RegExp(`${FORBIDDEN}|acceptInvite|groupJoin|joinGroup`, 'i')
-    const hits = files.filter((f) => pattern.test(readFileSync(f, 'utf8'))).map((f) => relative(root, f))
+    const hits = files.filter((f) => pattern.test(readFileSync(f, 'utf8'))).map((f) => relative(root, f).split(sep).join('/'))
     expect(hits.filter((f) => !INVITE_FILES.has(f)), `ocorrências fora do fluxo: ${hits.join(', ')}`).toEqual([])
   })
 

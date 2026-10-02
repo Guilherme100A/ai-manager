@@ -143,6 +143,13 @@ export class FakeTransport extends TransportEmitter implements WaTransport {
     return [{ jid, status: 'added', code: 200 }]
   }
 
+  /** Número da conta "autenticada" (testes); devolvido por ownPhone() enquanto conectado. */
+  phone: string | undefined
+
+  ownPhone(): string | undefined {
+    return this.connected ? this.phone : undefined
+  }
+
   async logout(): Promise<void> {
     await this.close('loggedOut', 401)
   }

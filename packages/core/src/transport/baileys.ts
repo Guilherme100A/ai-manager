@@ -180,6 +180,12 @@ export function normalizeJid(jid: string): string {
   return jid.replace(/:\d+@/, '@')
 }
 
+/** `5511999999999:12@s.whatsapp.net` → `+5511999999999`. LIDs e formatos desconhecidos → undefined. */
+export function phoneFromUserJid(jid: string | undefined): string | undefined {
+  const match = /^(\d{8,15})(?::\d+)?@s\.whatsapp\.net$/.exec(jid ?? '')
+  return match ? `+${match[1]}` : undefined
+}
+
 /** A conta (ids próprios) é admin/superadmin do grupo? */
 export function isGroupAdmin(participants: unknown[] | undefined, ownIds: ReadonlySet<string>): boolean {
   if (!participants || ownIds.size === 0) return false
@@ -324,6 +330,10 @@ export class BaileysTransport extends TransportEmitter implements WaTransport {
     const messageId = result?.key?.id
     if (!messageId) throw new Error('Baileys não devolveu o ID da mensagem enviada')
     return { messageId }
+  }
+
+  ownPhone(): string | undefined {
+    return phoneFromUserJid(this.connected ? this.sock?.user?.id : undefined)
   }
 
   async fetchGroups(): Promise<GroupSummary[]> {

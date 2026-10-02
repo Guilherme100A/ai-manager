@@ -60,7 +60,7 @@ export function ConversationPanel({ sessionId }: { sessionId: string }) {
       {config.mode === 'fixed' ? <div className="dialog-field"><label htmlFor="conversation-target">Outra conta</label>
         <select id="conversation-target" disabled={busy} value={config.targetSessionId ?? ''} onChange={(e) => setConfig({ ...config, targetSessionId: e.target.value || null })}>
           <option value="">Selecione…</option>
-          {sessions.filter((s) => s.id !== sessionId).map((s) => <option key={s.id} value={s.id}>{s.name} ({s.phone})</option>)}
+          {sessions.filter((s) => s.id !== sessionId).map((s) => <option key={s.id} value={s.id}>{s.name} ({s.phone ?? 'sem número'})</option>)}
         </select>
         <small className="hint">Autorize os dois números em Contatos. Ative o par apenas aqui; não é necessário criar o vínculo inverso na outra conta.</small>
       </div> : <p className="hint">Ative também o rodízio nas outras contas. Só entram no sorteio contas conectadas, autorizadas em Contatos e com cota. Se o número de contas for ímpar, quem ficar de fora ganha prioridade na próxima formação.</p>}

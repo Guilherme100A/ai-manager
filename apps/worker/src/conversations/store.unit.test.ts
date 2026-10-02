@@ -8,4 +8,12 @@ describe('configuração de rodízio', () => {
     get.mockResolvedValueOnce(null as never)
     expect((await store.config('new')).mode).toBe('rotating')
   })
+  it('com autoRotate, contas sem configuração entram ativas no rodízio; as salvas são respeitadas', async () => {
+    const get = vi.fn(async () => null as string | null)
+    const store = new RedisConversationStore({ get } as never, true)
+    expect(await store.config('new')).toMatchObject({ mode: 'rotating', enabled: true })
+    get.mockResolvedValueOnce(JSON.stringify({ mode: 'rotating', enabled: false }))
+    expect((await store.config('off')).enabled).toBe(false)
+    expect((await new RedisConversationStore({ get } as never).config('legacy')).enabled).toBe(false)
+  })
 })

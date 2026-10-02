@@ -128,7 +128,7 @@ export class GroupParticipantService {
     const target = UUID_RE.test(targetSessionId) ? await this.store.find(targetSessionId) : undefined
     if (!target) fail('SESSION_NOT_FOUND', `target session ${targetSessionId} not found`, { result: 'target_not_found', field: 'targetSessionId' })
     if (!target!.phone?.trim()) fail('VALIDATION_ERROR', 'target session has no phone number', { result: 'invalid_target', field: 'targetSessionId' })
-    const jid = phoneToUserJid(target!.phone)
+    const jid = phoneToUserJid(target!.phone!)
 
     if (!SENDABLE_STATES.includes(admin!.status)) {
       fail('SESSION_NOT_CONNECTED', `session ${adminSessionId} is ${admin!.status}, not connected`, { result: 'not_connected', jid })

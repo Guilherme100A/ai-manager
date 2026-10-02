@@ -97,4 +97,32 @@ describe('SessionStore', () => {
     expect(rows).toHaveLength(1)
     expect(rows[0]).toMatchObject({ sessionId: s.id, type: 'connected', detail: { state: 'WARMING' } })
   })
+
+  it('cria sem número (QR): phone null; vazio vira null; update grava o número da conta', async () => {
+    const row = await store.create({ name: 'qr', phone: null })
+    expect(toSessionView(row).phone).toBeNull()
+    expect((await store.create({ name: 'qr2', phone: '  ' })).phone).toBeNull()
+    expect((await store.create({ name: 'qr3' })).phone).toBeNull()
+    expect((await store.update(row.id, { phone: '+5511999990009' })).phone).toBe('+5511999990009')
+  })
+
+  it('delete: apaga sessão, credenciais e eventos em cascata e o proxy que ficou sem uso; outras sessões intactas', async () => {
+    const s = await store.create({ name: 'a', phone: '+5511999990001', proxy: { protocol: 'http', host: 'proxy.local', port: 8080 } })
+    const other = await store.create({ name: 'b', phone: '+5511999990002' })
+    const b = Buffer.from('x')
+    await db.insert(sessionCredentials).values({ sessionId: s.id, keyType: 'creds', keyId: 'creds', ciphertext: b, iv: b, authTag: b, keyVersion: 1 })
+    await store.recordHealthEvent(s.id, 'connected')
+    await store.recordHealthEvent(other.id, 'connected')
+
+    expect(await store.delete(s.id)).toEqual({ deletedProxyId: s.proxyId })
+    await expect(store.get(s.id)).rejects.toMatchObject({ code: 'SESSION_NOT_FOUND' })
+    expect(await db.select().from(sessionCredentials)).toHaveLength(0)
+    expect((await db.select().from(healthEvents)).map((e) => e.sessionId)).toEqual([other.id])
+    expect(await db.select().from(proxies)).toHaveLength(0)
+    expect((await store.get(other.id)).id).toBe(other.id)
+
+    expect(await store.delete(other.id)).toEqual({ deletedProxyId: null })
+    await expect(store.delete(other.id)).rejects.toMatchObject({ code: 'SESSION_NOT_FOUND' })
+    await expect(store.delete('nao-e-uuid')).rejects.toMatchObject({ code: 'SESSION_NOT_FOUND' })
+  })
 })

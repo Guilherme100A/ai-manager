@@ -6,7 +6,8 @@ export type HealthLabel = 'Good' | 'Warning' | 'Critical'
 export interface Session {
   id: string
   name: string
-  phone: string
+  /** Null até a sessão conectar pela primeira vez (cadastro por QR sem número). */
+  phone: string | null
   status: SessionState
   state: SessionState
   proxyId: string | null

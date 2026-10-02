@@ -37,6 +37,9 @@ const TABLES = [
   'suggestions',
   // T19 — migration 0003_ai_settings
   'ai_settings',
+  // migration 0004_session_router
+  'session_links',
+  'session_route_runs',
 ]
 
 /** Quantidade de migrations declaradas no journal do drizzle (cresce a cada migration nova). */

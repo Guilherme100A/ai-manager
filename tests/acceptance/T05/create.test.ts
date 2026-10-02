@@ -61,9 +61,12 @@ describe('T05 — criação de sessão', () => {
     expect(after).toBe(before)
   })
 
-  it('AC-T05-01 body sem name ou sem phone → 400 VALIDATION_ERROR', async () => {
+  it('AC-T05-01 body sem name → 400 VALIDATION_ERROR; sem phone (cadastro por QR) → 201 com phone null', async () => {
     expectApiError(await api(ctx, 'POST', '/api/sessions', { phone: randomPhone() }), 'VALIDATION_ERROR', 400)
-    expectApiError(await api(ctx, 'POST', '/api/sessions', { name: 'sem telefone' }), 'VALIDATION_ERROR', 400)
+    // O número passou a ser opcional: no QR o worker grava o número da conta quando o WhatsApp conecta.
+    const res = await api(ctx, 'POST', '/api/sessions', { name: 'sem telefone' })
+    expect(res.status).toBe(201)
+    expect(res.body).toMatchObject({ name: 'sem telefone', phone: null, status: 'NEW' })
   })
 
   it('AC-T05-01 rotas de sessão exigem token (401 UNAUTHORIZED)', async () => {

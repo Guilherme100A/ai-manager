@@ -40,6 +40,7 @@ function setup(overrides: Partial<SessionsControl> = {}) {
     logout: vi.fn(async () => {
       throw new InvalidTransitionError('DISCONNECTED', 'logout')
     }),
+    remove: vi.fn(async () => ({ deletedProxyId: null })),
     ...overrides,
   }
   const { db, audits } = fakeDb()
@@ -60,6 +61,13 @@ describe('/api/sessions', () => {
     expect(res.status).toBe(201)
     expect(await res.json()).toMatchObject({ id: ID, status: 'NEW', name: 'a' })
     expect(audits[0]).toMatchObject({ action: 'session.create', targetType: 'session', targetId: ID })
+  })
+
+  it('POST sem número (QR) → 201; o número fica para a conexão', async () => {
+    const { req, sessions } = setup()
+    expect((await req('POST', '/api/sessions', { name: 'a' })).status).toBe(201)
+    expect((await req('POST', '/api/sessions', { name: 'b', phone: null })).status).toBe(201)
+    expect(sessions.create).toHaveBeenNthCalledWith(1, expect.objectContaining({ name: 'a', phone: null }))
   })
 
   it('POST com telefone fora do E.164 → 400 VALIDATION_ERROR', async () => {
@@ -126,8 +134,21 @@ describe('/api/sessions', () => {
     expect(((await bad.json()) as { error: { code: string } }).error.code).toBe('INVALID_TRANSITION')
   })
 
+  it('DELETE exclui (204) e audita; inexistente → 404 sem chamar o worker', async () => {
+    const { req, sessions, audits } = setup({ remove: vi.fn(async () => ({ deletedProxyId: 'p1' })) })
+    const res = await req('DELETE', `/api/sessions/${ID}`)
+    expect(res.status).toBe(204)
+    expect(sessions.remove).toHaveBeenCalledWith(ID)
+    expect(audits.at(-1)).toMatchObject({ action: 'session.delete', targetType: 'session', targetId: ID, detail: { name: 's', deletedProxyId: 'p1' } })
+    const missing = await req('DELETE', '/api/sessions/22222222-2222-4222-8222-222222222222')
+    expect(missing.status).toBe(404)
+    expect((await req('DELETE', '/api/sessions/nao-e-uuid')).status).toBe(404)
+    expect(sessions.remove).toHaveBeenCalledTimes(1)
+  })
+
   it('exige auth', async () => {
     const { app } = setup()
     expect((await app.request('/api/sessions')).status).toBe(401)
+    expect((await app.request(`/api/sessions/${ID}`, { method: 'DELETE' })).status).toBe(401)
   })
 })

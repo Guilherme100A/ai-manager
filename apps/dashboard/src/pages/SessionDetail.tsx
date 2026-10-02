@@ -74,6 +74,20 @@ export function SessionDetail({ id }: { id: string }) {
     }
   }
 
+  async function remove() {
+    const label = session.data ? `${session.data.name} (${session.data.phone ?? 'sem número'})` : 'este número'
+    if (!window.confirm(`Excluir ${label}? O aparelho será desvinculado e o histórico de mensagens, a fila e as automações desta sessão serão apagados. Não dá para desfazer.`)) return
+    setBusy(true)
+    setActionError(undefined)
+    try {
+      await api.deleteSession(id)
+      navigate({ name: 'sessions' })
+    } catch (err) {
+      setActionError(err)
+      setBusy(false)
+    }
+  }
+
   if (session.error && !session.data) return <ErrorText error={session.error} testId="session-error" />
   const h = health.data
   const s = session.data
@@ -83,7 +97,7 @@ export function SessionDetail({ id }: { id: string }) {
       <PageHeader
         title={
           <>
-            {s?.name ?? 'Sessão'} <small className="muted mono">{s?.phone}</small>
+            {s?.name ?? 'Sessão'} <small className="muted mono">{s ? (s.phone ?? 'número definido ao conectar') : null}</small>
           </>
         }
         {...(s?.note ? { subtitle: s.note } : {})}
@@ -148,6 +162,9 @@ export function SessionDetail({ id }: { id: string }) {
           </button>
           <button type="button" className="danger" data-testid="btn-logout" disabled={busy || !state || state === 'DISCONNECTED'} onClick={() => act('logout')}>
             Logout
+          </button>
+          <button type="button" className="danger" data-testid="btn-delete" disabled={busy || !state} onClick={() => void remove()}>
+            Excluir
           </button>
         </div>
         <ErrorText error={actionError} testId="action-error" />

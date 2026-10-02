@@ -36,6 +36,13 @@
       "when": 1790285985966,
       "tag": "0004_session_router",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1790953784826,
+      "tag": "0005_session_phone_optional",
+      "breakpoints": true
     }
   ]
 }

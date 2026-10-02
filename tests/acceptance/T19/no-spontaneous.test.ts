@@ -17,6 +17,12 @@ function walk(dir: string, out: string[] = []): string[] {
   return out
 }
 const rel = (f: string) => relative(rootPath(), f).split(sep).join('/')
+// Fluxo de convite entre sessões e automação de grupos (posteriores ao T19): únicos módulos (e seus testes)
+// que podem aceitar convite. Mesma lista do T14 (AC-T14-03).
+const INVITE_FLOW_FILES = new Set(
+  ['packages/core/src/transport/baileys', 'packages/core/src/transport/types', 'packages/core/src/groups/invites', 'apps/worker/src/groups/automation']
+    .flatMap((f) => [`${f}.ts`, `${f}.unit.test.ts`]),
+)
 
 describe('T19 — configurações não criam geração/envio espontâneo nem entrada em grupos', () => {
   const ctx = useQueue() as any
@@ -74,11 +80,11 @@ describe('T19 — configurações não criam geração/envio espontâneo nem ent
     }
   })
 
-  it('AC-T19-06 entrada automática em grupos continua proibida: nenhum código de produto usa aceitar convite/entrar em grupo', () => {
+  it('AC-T19-06 aceitar convite/entrar em grupo só aparece nos módulos do fluxo de convite (nunca na configuração da IA)', () => {
     const forbidden = new RegExp(['group', 'Accept', 'Invite'].join('') + '|acceptInvite|joinGroup|groupJoin|autoJoin', 'i')
     const files = [...walk(rootPath('apps')), ...walk(rootPath('packages'))]
     const hits = files.filter((f) => forbidden.test(readFileSync(f, 'utf8'))).map(rel)
-    expect(hits, `ocorrências: ${hits.join(', ')}`).toEqual([])
+    expect(hits.filter((f) => !INVITE_FLOW_FILES.has(f)), `ocorrências fora do fluxo: ${hits.join(', ')}`).toEqual([])
   })
 
   it('AC-T19-06 o código novo de configuração da IA não agenda gerações (sem setInterval/cron que chame suggest/generate)', () => {

@@ -1,6 +1,6 @@
 import {
   conversationConfigSchema, SENDABLE_STATES, SessionError,
-  type ConversationConfig, type ConversationModel, type ConversationState, type MessageQueue,
+  type ConversationConfig, type ConversationModel, type ConversationPending, type ConversationState, type MessageQueue,
   type SendPipeline, type SessionLimitsService, type SessionView,
 } from '@wsm/core'
 import type { AutomationManager } from '../groups/automation'
@@ -8,6 +8,7 @@ import type { ConversationStore } from './store'
 
 const MINUTE = 60_000
 const DAY = 86_400_000
+const OFFLINE_GRACE = 10 * MINUTE
 export interface ConversationOptions {
   manager: AutomationManager; store: ConversationStore
   limits: Pick<SessionLimitsService, 'get' | 'countOutbound'>
@@ -55,9 +56,28 @@ export class ConversationAutomation {
       const states = new Map<string, ConversationState>()
       const configs = new Map<string, ConversationConfig>()
       const occupied = new Set<string>()
+      const existing = new Set(sessions.map((s) => s.id))
       for (const s of sessions) {
         const state = await this.opts.store.state(s.id)
         const config = await this.opts.store.config(s.id)
+        // Sessão excluída: libera quem estava em par com ela e desativa pares fixos que apontavam para ela.
+        const lostPartner = state.partnerId !== undefined && !existing.has(state.partnerId)
+        const lostOwner = state.ownerId !== undefined && !existing.has(state.ownerId)
+        if (lostPartner || lostOwner) {
+          if (lostPartner) {
+            delete state.partnerId; delete state.pending; delete state.draft; delete state.halted; delete state.lastError
+            state.history = []; state.turns = 0; state.nextSenderId = s.id
+          }
+          if (lostOwner) delete state.ownerId
+          state.nextAt = this.now() + 30 * MINUTE
+          if (!await this.opts.store.renew(lease)) return
+          await this.opts.store.saveState(s.id, state)
+        }
+        if (config.mode === 'fixed' && config.targetSessionId && !existing.has(config.targetSessionId)) {
+          config.enabled = false; config.targetSessionId = null
+          if (!await this.opts.store.renew(lease)) return
+          await this.opts.store.saveConfig(s.id, config)
+        }
         states.set(s.id, state); configs.set(s.id, config)
         if (state.partnerId) { occupied.add(s.id); occupied.add(state.partnerId) }
         if (state.ownerId) { occupied.add(s.id); occupied.add(state.ownerId) }
@@ -102,6 +122,10 @@ export class ConversationAutomation {
       }
     } finally { await this.opts.store.release(lease) }
   }
+  /** Sessão excluída: apaga a configuração e o estado dela. Os parceiros são liberados no próximo distribute. */
+  async forget(id: string) {
+    await this.opts.store.remove(id)
+  }
   private async finishRotation(id: string, state: ConversationState, now: number) {
     const partnerId = state.partnerId
     if (!partnerId) return
@@ -109,7 +133,7 @@ export class ConversationAutomation {
     delete peer.ownerId
     peer.nextAt = now + 30 * MINUTE
     await this.opts.store.saveState(partnerId, peer)
-    delete state.partnerId; delete state.draft
+    delete state.partnerId; delete state.draft; delete state.offlineSince
     state.history = []; state.turns = 0; state.nextSenderId = id; state.nextAt = now + 30 * MINUTE
     await this.opts.store.saveState(id, state)
   }
@@ -188,8 +212,19 @@ export class ConversationAutomation {
     return !this.stopped && config.enabled && matches &&
       (await Promise.all([id, targetId].map(async (s) => this.opts.manager.isConnected(s) && SENDABLE_STATES.includes((await this.opts.manager.get(s)).status)))).every(Boolean)
   }
+  /** O par continua válido (ambas ativas no rodízio, estado de envio) e só falta conexão em alguma das contas. */
+  private async onlyDisconnected(id: string, targetId: string) {
+    if (this.stopped) return false
+    const [config, peer, state] = await Promise.all([this.opts.store.config(id), this.opts.store.config(targetId), this.opts.store.state(id)])
+    if (!config.enabled || !peer.enabled || peer.mode !== 'rotating' || state.partnerId !== targetId) return false
+    try {
+      const sessions = await Promise.all([id, targetId].map((s) => this.opts.manager.get(s)))
+      return sessions.every((s) => SENDABLE_STATES.includes(s.status)) && sessions.some((s) => !this.opts.manager.isConnected(s.id))
+    } catch { return false }
+  }
   private async hasCapacity(account: SessionView, config: ConversationConfig) {
-    if (!await this.opts.allowed(account.phone)) return false
+    // Sem número (sessão ainda não conectou pela primeira vez) não há como conversar.
+    if (!account.phone || !await this.opts.allowed(account.phone)) return false
     const limits = await this.opts.limits.get(account.id)
     for (const [window, maximum] of [[MINUTE, limits.effective.perMinute], [60 * MINUTE, limits.effective.perHour], [DAY, Math.min(config.maxMessagesPerDay, limits.effective.perDay)]]) {
       if (await this.opts.limits.countOutbound(account.id, new Date(this.now() - window!)) >= maximum!) return false
@@ -207,8 +242,20 @@ export class ConversationAutomation {
       if (!targetId) return
       const isActive = await this.active(id, targetId)
       if (!isActive && !state.pending) {
-        if (config.mode === 'rotating' && !state.pending && !state.halted) await this.finishRotation(id, state, this.now())
+        if (config.mode === 'rotating' && !state.halted) {
+          // Queda momentânea (restart do worker, reconexão): o par espera até 10 min antes de ser desfeito.
+          const now = this.now()
+          if (await this.onlyDisconnected(id, targetId) && now - (state.offlineSince ??= now) < OFFLINE_GRACE) {
+            await this.opts.store.saveState(id, state)
+            return
+          }
+          await this.finishRotation(id, state, now)
+        }
         return
+      }
+      if (state.offlineSince !== undefined) {
+        delete state.offlineSince
+        await this.opts.store.saveState(id, state)
       }
       const peerConfig = config.mode === 'rotating' ? await this.opts.store.config(targetId) : config
       const interval = Math.max(config.intervalMinutes, peerConfig.intervalMinutes)
@@ -263,12 +310,14 @@ export class ConversationAutomation {
       }
       if (!await this.active(id, targetId)) return
       if (!await this.hasCapacity(a, config) || !await this.hasCapacity(b, peerConfig)) return
+      if (!sender.phone || !receiver.phone) return
       if (!await this.opts.store.renew(lease)) return
-      state.pending = { ...state.draft, receiverId: receiver.id, sourcePhone: sender.phone, reservedAt: this.now() }
+      const pending: ConversationPending = { ...state.draft, receiverId: receiver.id, sourcePhone: sender.phone, reservedAt: this.now() }
+      state.pending = pending
       await this.opts.store.saveState(id, state)
       try {
-        const message = await this.opts.pipeline.send({ sessionId: sender.id, phone: receiver.phone, content: { text: state.pending.text }, actor: 'session-conversations' })
-        state.pending.messageId = message.id
+        const message = await this.opts.pipeline.send({ sessionId: sender.id, phone: receiver.phone, content: { text: pending.text }, actor: 'session-conversations' })
+        pending.messageId = message.id
         delete state.draft
         delete state.lastError
         await this.opts.store.saveState(id, state)
@@ -279,7 +328,8 @@ export class ConversationAutomation {
         state.lastError = 'Envio rejeitado ou incerto. Verifique os contatos, os limites e a fila.'
         await this.opts.store.saveState(id, state)
       }
-    } catch {
+    } catch (error) {
+      this.opts.logger.warn({ session_id: id, err: error instanceof Error ? error.message : String(error) }, 'conversation turn failed')
       const state = await this.opts.store.state(id)
       state.lastError = 'Falha no ciclo. Verifique a IA, os contatos e a fila.'
       await this.opts.store.saveState(id, state)

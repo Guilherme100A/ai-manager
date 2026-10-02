@@ -38,7 +38,7 @@ export function Sessions() {
                   {s.name}
                 </a>
               </td>
-              <td className="mono">{s.phone}</td>
+              <td className="mono">{s.phone ?? '—'}</td>
               <td className={s.proxy ? 'mono' : 'muted'} data-testid="session-proxy">{proxyAddress(s.proxy)}</td>
               <td className="muted">{formatDateTime(s.lastConnectedAt)}</td>
               <td className="muted">{s.note ?? ''}</td>

@@ -7,6 +7,7 @@ import {
   connectSession,
   logger as coreLogger,
   ProxyError,
+  SessionError,
   SessionStore,
   toSessionView,
   usePostgresAuthState,
@@ -240,8 +241,12 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
 
   /** POST /pairing-code: conecta pedindo código de pareamento para `phone` (default: telefone da sessão). */
   async requestPairingCode(id: string, phone?: string): Promise<{ code: string }> {
+    // O pairing code é gerado para um número: sem número na sessão nem na requisição, use o QR.
+    if (!phone && !(await this.store.get(id)).phone) {
+      throw new SessionError('VALIDATION_ERROR', 'informe o número para gerar o pairing code (ou conecte por QR Code)', 'phone')
+    }
     const row = await this.prepareAuth(id)
-    const pairingPhone = phone ?? row.phone
+    const pairingPhone = phone ?? row.phone!
     let rt = this.runtimes.get(id)
     if (rt && rt.pairingPhone === pairingPhone && rt.pairingCode) return { code: rt.pairingCode }
     if (rt && rt.pairingPhone !== pairingPhone) {
@@ -302,6 +307,29 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     await auth.clear()
     await this.store.recordHealthEvent(id, 'logged_out', { manual: true })
     return this.applyTransition(id, 'DISCONNECTED')
+  }
+
+  /**
+   * Exclui a sessão: desvincula o aparelho (se conectado), fecha a conexão e apaga a sessão do banco
+   * (credenciais e histórico caem em cascata). Válido em qualquer estado.
+   */
+  async remove(id: string): Promise<{ deletedProxyId: string | null }> {
+    await this.store.get(id)
+    const rt = this.runtimes.get(id)
+    if (rt) {
+      rt.closing = true
+      if (rt.connected) {
+        try {
+          await rt.transport.logout()
+        } catch (err) {
+          this.log.warn({ session_id: id, err }, 'transport logout failed')
+        }
+      }
+      await this.dispose(rt, 'local')
+    }
+    const result = await this.store.delete(id)
+    this.log.info({ session_id: id }, 'session removed')
+    return result
   }
 
   // ---- internos ---------------------------------------------------------------------
@@ -465,6 +493,12 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       await this.store.update(sessionId, { lastConnectedAt: now })
     }
     await this.store.recordHealthEvent(sessionId, 'connected', { state })
+    // Cadastro por QR sem número (ou número digitado errado): vale o número da conta que de fato conectou.
+    const ownPhone = rt.transport.ownPhone?.()
+    if (ownPhone && ownPhone !== row.phone) {
+      await this.store.update(sessionId, { phone: ownPhone })
+      if (row.phone) this.log.warn({ session_id: sessionId }, 'session phone replaced by the connected account number')
+    }
     this.log.info({ session_id: sessionId, state }, 'session connected')
     const ctx: ConnectedContext = { sessionId, transport: rt.transport, state }
     rt.monitoring = true

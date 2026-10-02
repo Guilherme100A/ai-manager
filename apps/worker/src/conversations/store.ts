@@ -7,17 +7,21 @@ export interface ConversationStore {
   saveConfig(id: string, config: ConversationConfig): Promise<void>
   state(id: string): Promise<ConversationState>
   saveState(id: string, state: ConversationState): Promise<void>
+  /** Apaga configuração e estado da conta (sessão excluída). */
+  remove(id: string): Promise<void>
   claim(): Promise<string | undefined>
   renew(token: string): Promise<boolean>
   release(token: string): Promise<void>
 }
 export class RedisConversationStore implements ConversationStore {
-  constructor(private readonly redis: Redis) {}
+  /** autoRotate: contas sem configuração salva entram no rodízio automaticamente (CONVERSATIONS_AUTO_ROTATE). */
+  constructor(private readonly redis: Redis, private readonly autoRotate = false) {}
   private key(kind: string, id: string) { return `wsm:conversations:${kind}:${id}` }
   async config(id: string) {
     const raw = await this.redis.get(this.key('config', id))
     // Configurações existentes continuam como pares fixos até o operador escolher rodízio.
-    return raw ? { ...DEFAULT_CONVERSATION_CONFIG, mode: 'fixed', ...JSON.parse(raw) } : { ...DEFAULT_CONVERSATION_CONFIG }
+    return raw ? { ...DEFAULT_CONVERSATION_CONFIG, mode: 'fixed', ...JSON.parse(raw) }
+      : { ...DEFAULT_CONVERSATION_CONFIG, enabled: this.autoRotate }
   }
   async saveConfig(id: string, config: ConversationConfig) { await this.redis.set(this.key('config', id), JSON.stringify(config)) }
   async state(id: string): Promise<ConversationState> {
@@ -25,6 +29,7 @@ export class RedisConversationStore implements ConversationStore {
     return raw ? JSON.parse(raw) : { history: [], turns: 0 }
   }
   async saveState(id: string, state: ConversationState) { await this.redis.set(this.key('state', id), JSON.stringify(state)) }
+  async remove(id: string) { await this.redis.del(this.key('config', id), this.key('state', id)) }
   async claim() {
     const token = randomUUID()
     return await this.redis.set('wsm:conversations:lease', token, 'PX', 120_000, 'NX') === 'OK' ? token : undefined

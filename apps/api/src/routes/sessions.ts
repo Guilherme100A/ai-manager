@@ -34,6 +34,8 @@ export interface SessionsControl {
   resume(id: string): Promise<SessionView>
   restart(id: string): Promise<SessionView>
   logout(id: string): Promise<SessionView>
+  /** Exclui a sessão (desvincula o aparelho, apaga histórico, fila e automações). */
+  remove(id: string): Promise<{ deletedProxyId: string | null }>
 }
 
 declare module '../types' {
@@ -58,7 +60,8 @@ export const inlineProxySchema = z.object({
 export const createSessionSchema = z
   .object({
     name: z.string().trim().min(1).max(200),
-    phone,
+    // Opcional: no QR o worker preenche com o número da conta ao conectar. O pairing code exige número.
+    phone: phone.nullable().optional(),
     proxyId: z.uuid().nullable().optional(),
     note: optionalText,
     proxy: inlineProxySchema.nullable().optional(),
@@ -141,6 +144,8 @@ export function dbOnlySessions(store: SessionStore): SessionsControl {
     resume: unavailable,
     restart: unavailable,
     logout: unavailable,
+    // Sem o worker não dá para fechar a conexão nem limpar a fila: excluir fica indisponível.
+    remove: unavailable,
   }
 }
 
@@ -155,7 +160,7 @@ export function sessionsRoutes(deps: Pick<AppDeps, 'db' | 'sessions'>) {
     .get('/api/sessions', async (c) => c.json({ items: await withProxies(deps.db, await run(() => sessions.list())) }))
     .post('/api/sessions', validate('json', createSessionSchema), async (c) => {
       const body = c.req.valid('json')
-      const input: CreateSessionInput = { name: body.name, phone: body.phone }
+      const input: CreateSessionInput = { name: body.name, phone: body.phone ?? null }
       if (body.note !== undefined) input.note = body.note
       if (body.proxyId !== undefined) input.proxyId = body.proxyId
       // T17: proxy inline → criado e vinculado na mesma transação da sessão (SessionStore.create).
@@ -202,6 +207,18 @@ export function sessionsRoutes(deps: Pick<AppDeps, 'db' | 'sessions'>) {
       const session = await withProxy(deps.db, await run(() => sessions.startQr(id)))
       setAudit(c, { action: 'session.connect', targetType: 'session', targetId: id, detail: { method: 'qr' } })
       return c.json(session, 202)
+    })
+    .delete('/api/sessions/:id', async (c) => {
+      const id = sessionId(c)
+      const before = await run(() => sessions.get(id))
+      const res = await run(() => sessions.remove(id))
+      setAudit(c, {
+        action: 'session.delete',
+        targetType: 'session',
+        targetId: id,
+        detail: { name: before.name, status: before.status, deletedProxyId: res.deletedProxyId },
+      })
+      return c.body(null, 204)
     })
     .get('/api/sessions/:id/qr', async (c) => c.json(await run(() => sessions.getQr(sessionId(c)))))
     .post('/api/sessions/:id/pairing-code', async (c) => {
