@@ -96,32 +96,18 @@ describe('conversas entre duas contas', () => {
     expect(s.pipeline.send).toHaveBeenCalledTimes(1) // a primeira não saiu: não enfileira a segunda
     expect(s.states.get(A)!.pending?.parts).toHaveLength(1)
   })
-  it('rajada: a mesma conta envia várias falas seguidas antes de passar a vez', async () => {
-    const s = setup({ random: () => 0.99 }) // burstSize sempre no máximo (3)
+  it('cada disparo (1 a 3 mensagens) passa a vez: as contas sempre alternam; abertura sorteada', async () => {
+    const s = setup({ random: () => 0.99 }) // disparos de 3 mensagens; sorteio de abertura cai na outra conta
     s.configs.set(A, { ...s.config, turnsPerConversation: 6 })
+    s.model.message.mockResolvedValue('opa\nviu o jogo novo?\nachei top')
     s.received.mockResolvedValue(true)
-    await s.automation.run(A) // fala 1: A → B
-    expect(s.pipeline.send).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: A, phone: s.sessions.get(B)!.phone }))
-    await s.automation.run(A) // confirma fala 1
-    expect(s.states.get(A)!.turns).toBe(1)
-    s.advance(5 * 60_000)
-    await s.automation.run(A) // fala 2: AINDA A → B (rajada), não alternou
-    expect(s.pipeline.send).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: A, phone: s.sessions.get(B)!.phone }))
-    await s.automation.run(A) // confirma fala 2
-    expect(s.states.get(A)!.turns).toBe(2)
-    expect(s.states.get(A)!.nextSenderId).toBe(A)
-  })
-  it('rajada nunca fica com a última fala da rodada: quem só ouviu responde antes da pausa; abertura sorteada', async () => {
-    const s = setup({ random: () => 0.99 }) // rajadas sempre de 3; sorteio de abertura cai na outra conta
-    s.configs.set(A, { ...s.config, turnsPerConversation: 6 })
-    s.received.mockResolvedValue(true)
-    for (let fala = 0; fala < 6; fala++) {
-      await s.automation.run(A) // envia
+    for (let disparo = 0; disparo < 6; disparo++) {
+      await s.automation.run(A) // envia as 3 mensagens
       await s.automation.run(A) // confirma
       s.advance(5 * 60_000)
     }
     const senders = s.pipeline.send.mock.calls.map((c) => (c[0] as { sessionId: string }).sessionId)
-    expect(senders).toEqual([A, A, A, B, B, A]) // a rajada de B é cortada para A responder por último
+    expect(senders).toEqual([A, B, A, B, A, B].flatMap((who) => [who, who, who]))
     expect(s.states.get(A)!.turns).toBe(0)
     s.advance(30 * 60_000)
     await s.automation.run(A)

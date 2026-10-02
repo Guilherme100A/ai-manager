@@ -25,10 +25,7 @@ export interface ConversationOptions {
   sleep?: (ms: number) => Promise<void>
 }
 
-/** Tamanho de uma rajada: quantas falas seguidas a mesma conta envia antes de passar a vez. */
-const BURST_MIN = 1
-const BURST_MAX = 3
-/** Uma fala pode sair quebrada em até PARTS_MAX mensagens curtas, cada uma depois de "digitando…". */
+/** Cada disparo sai em até PARTS_MAX mensagens curtas (sorteado), cada uma depois de "digitando…". */
 const PARTS_MAX = 3
 /** Quanto esperar a parte anterior sair antes de desistir das seguintes. */
 const PART_SEND_TIMEOUT = 60_000
@@ -44,8 +41,6 @@ export class ConversationAutomation {
     this.now = opts.now ?? Date.now; this.random = opts.random ?? Math.random
     this.sleep = opts.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)))
   }
-  /** Sorteia o tamanho da próxima rajada em [BURST_MIN, BURST_MAX]. */
-  private burstSize(): number { return BURST_MIN + Math.floor(this.random() * (BURST_MAX - BURST_MIN + 1)) }
   /** Sorteia em quantas mensagens a próxima fala sai: 1 (40%), 2 (40%) ou 3 (20%). */
   private partsCount(): number { const r = this.random(); return r < 0.4 ? 1 : r < 0.8 ? 2 : PARTS_MAX }
   /** "Digitando…" proporcional ao tamanho do texto (1,5 s a ~9 s). Falha de presença não impede o envio. */
@@ -170,7 +165,7 @@ export class ConversationAutomation {
     delete peer.ownerId
     peer.nextAt = now + 30 * MINUTE
     await this.opts.store.saveState(partnerId, peer)
-    delete state.partnerId; delete state.draft; delete state.offlineSince; delete state.burstLeft
+    delete state.partnerId; delete state.draft; delete state.offlineSince
     state.history = []; state.turns = 0; state.nextSenderId = id; state.nextAt = now + 30 * MINUTE
     await this.opts.store.saveState(id, state)
   }
@@ -205,7 +200,7 @@ export class ConversationAutomation {
           if (['queued', 'retrying', 'processing'].includes(message.status)) throw new SessionError('VALIDATION_ERROR', 'A mensagem anterior ainda está na fila. Aguarde ou cancele antes de reativar.')
           state.history = [...state.history, { senderId: state.pending.senderId, text: state.pending.text }].slice(-10)
         }
-        delete state.pending; delete state.draft; delete state.halted; delete state.lastError; delete state.burstLeft
+        delete state.pending; delete state.draft; delete state.halted; delete state.lastError
         state.turns = 0; state.nextSenderId = id; state.nextAt = this.now() + input.intervalMinutes * MINUTE
         await this.opts.store.saveState(id, state)
       }
@@ -316,15 +311,8 @@ export class ConversationAutomation {
             (await Promise.all(parts.map((part) => this.opts.received(pending.receiverId, pending.sourcePhone, part.text, pending.reservedAt)))).every(Boolean)) {
             state.history = [...state.history, { senderId: pending.senderId, text: pending.text }].slice(-10)
             state.turns++
-            // Rajada: a mesma conta envia um número aleatório de falas antes de passar a vez. A rajada nunca
-            // fica com a última fala da rodada: quem só ouviu sempre responde antes da pausa.
-            state.burstLeft = (state.burstLeft ?? this.burstSize()) - 1
-            if (state.burstLeft <= 0 || turnsPerRound - state.turns <= 1) {
-              state.nextSenderId = pending.receiverId // passa a vez para a outra conta
-              state.burstLeft = this.burstSize()      // nova rajada aleatória para ela
-            } else {
-              state.nextSenderId = pending.senderId   // a mesma conta continua
-            }
+            // Cada disparo (1 a 3 mensagens com "digitando…") passa a vez: as contas sempre alternam.
+            state.nextSenderId = pending.receiverId
             state.nextAt = now + interval * MINUTE
             delete state.pending
             delete state.lastError
@@ -332,7 +320,7 @@ export class ConversationAutomation {
               if (!await this.opts.store.renew(lease)) return
               await this.finishRotation(id, state, now)
             } else if (state.turns >= turnsPerRound) {
-              state.turns = 0; state.history = []; state.nextSenderId = this.random() < 0.5 ? id : targetId; state.nextAt = now + 30 * MINUTE; delete state.burstLeft
+              state.turns = 0; state.history = []; state.nextSenderId = this.random() < 0.5 ? id : targetId; state.nextAt = now + 30 * MINUTE
             }
           } else if (now - (message.sentAt ? Date.parse(message.sentAt) : pending.reservedAt) > 2 * 60 * MINUTE) {
             state.halted = true; state.lastError = 'Sem confirmação de recebimento em duas horas. Conversa interrompida.'

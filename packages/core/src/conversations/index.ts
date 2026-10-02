@@ -29,8 +29,6 @@ export function splitConversationParts(text: string, max: number): string[] {
 export interface ConversationState {
   partnerId?: string; ownerId?: string; lastPartnerId?: string; lastPairedAt?: number;
   history: ConversationTurn[]; turns: number; nextSenderId?: string; nextAt?: number;
-  /** Falas restantes na rajada do remetente atual antes de passar a vez (aleatório por rajada). */
-  burstLeft?: number;
   pending?: ConversationPending; draft?: ConversationTurn; lastError?: string; halted?: boolean
   /** Desde quando o par está sem conexão (tolerância antes de desfazer o par no rodízio). */
   offlineSince?: number
@@ -46,7 +44,7 @@ export class SmallConversationModel implements ConversationModel {
   async message(topic: string, senderId: string, history: ConversationTurn[], parts = 1): Promise<string> {
     const settings = await this.settings()
     if (!settings.enabled || !settings.config.apiKey) throw new Error('Habilite a IA e configure sua chave.')
-    // Autor relativo a quem fala: com rajadas, a última fala pode ser do próprio remetente.
+    // Autor relativo a quem fala: a última fala pode ser do próprio remetente (ex.: disparo incompleto).
     const turns = history.slice(-10).map((t) => ({ autor: t.senderId === senderId ? 'você' : 'outra conta', texto: t.text }))
     const last = turns.at(-1)
     const task = !last ? 'abrir o assunto' : last.autor === 'você' ? 'continuar a sua própria fala' : 'responder à outra conta'
