@@ -33,6 +33,8 @@ export class FakeTransport extends TransportEmitter implements WaTransport {
   /** Chamadas a addGroupParticipant, em ordem (T20). */
   readonly groupAdds: Array<{ groupId: string; jid: string }> = []
   private readonly groupAddFailures: Error[] = []
+  /** Chamadas a sendTyping ("digitando…"), em ordem. */
+  readonly typing: Array<{ to: string; typing: boolean }> = []
 
   connected = false
   loggedOut = false
@@ -121,6 +123,11 @@ export class FakeTransport extends TransportEmitter implements WaTransport {
     const messageId = `FAKE-OUT-${++this.seq}`
     this.sent.push({ messageId, to, content, at: new Date() })
     return { messageId }
+  }
+
+  async sendTyping(to: string, typing: boolean): Promise<void> {
+    if (!this.connected) throw new TransportNotConnectedError()
+    this.typing.push({ to, typing })
   }
 
   async fetchGroups(): Promise<GroupSummary[]> {

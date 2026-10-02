@@ -22,6 +22,7 @@ function mockSocket() {
   const sock = {
     ev,
     sendMessage: vi.fn(async () => ({ key: { id: 'WAMID-1' } })),
+    sendPresenceUpdate: vi.fn(async () => undefined),
     groupFetchAllParticipating: vi.fn(async () => ({
       'g1@g.us': { id: 'g1@g.us', subject: 'Grupo 1', size: 5, announce: true, linkedParent: 'c@g.us' },
       'g2@g.us': { id: 'g2@g.us', subject: 'Grupo 2', participants: [{}, {}] },
@@ -229,6 +230,17 @@ describe('BaileysTransport', () => {
     await flush()
     await expect(transport.sendMessage('x@s.whatsapp.net', { text: 'a' })).resolves.toEqual({ messageId: 'WAMID-1' })
     expect(sockets[0]!.sendMessage).toHaveBeenCalledWith('x@s.whatsapp.net', { text: 'a' })
+  })
+
+  it('sendTyping mostra e encerra o "digitando…" pelo presence do Baileys', async () => {
+    const { transport, sockets, auth } = setup()
+    await expect(transport.sendTyping('x@s.whatsapp.net', true)).rejects.toBeInstanceOf(TransportNotConnectedError)
+    await transport.connect({ sessionId: 's', auth })
+    sockets[0]!.ev.emit('connection.update', { connection: 'open' })
+    await flush()
+    await transport.sendTyping('x@s.whatsapp.net', true)
+    await transport.sendTyping('x@s.whatsapp.net', false)
+    expect(sockets[0]!.sendPresenceUpdate.mock.calls).toEqual([['composing', 'x@s.whatsapp.net'], ['paused', 'x@s.whatsapp.net']])
   })
 
   it('fetchGroups resume os grupos', async () => {

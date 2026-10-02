@@ -33,7 +33,7 @@ function setup(over: { random?: () => number } = {}) {
   const received = vi.fn(async (..._args: unknown[]) => false)
   const allowed = vi.fn(async (_phone: string) => true)
   const manager = { list: async () => [...sessions.values()], get: async (id: string) => sessions.get(id)!, isConnected: (id: string) => connected.has(id), getTransport: () => undefined }
-  const options = { manager, store, limits: limits as never, pipeline: pipeline as never, messages: messages as never, model, received, allowed, audit: vi.fn(async () => undefined), logger: { warn: vi.fn() }, now: () => now, random: over.random ?? (() => 0) }
+  const options = { manager, store, limits: limits as never, pipeline: pipeline as never, messages: messages as never, model, received, allowed, audit: vi.fn(async () => undefined), logger: { warn: vi.fn() }, now: () => now, random: over.random ?? (() => 0), sleep: async () => undefined }
   const automation = new ConversationAutomation(options)
   return { automation, options, store, configs, states, config, sessions, connected, limits, pipeline, messages, model, received, allowed, advance: (ms: number) => { now += ms } }
 }
@@ -54,7 +54,47 @@ describe('conversas entre duas contas', () => {
     s.advance(5 * 60_000)
     await s.automation.run(A)
     expect(s.pipeline.send).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: B, phone: s.sessions.get(A)!.phone }))
-    expect(s.model.message).toHaveBeenLastCalledWith(s.config.topic, B, [{ senderId: A, text: 'Qual jogo você recomenda?' }])
+    expect(s.model.message).toHaveBeenLastCalledWith(s.config.topic, B, [{ senderId: A, text: 'Qual jogo você recomenda?' }], 1)
+  })
+  it('fala em partes: cada mensagem curta sai em ordem, depois de "digitando…", e a vez só anda quando todas chegam', async () => {
+    const s = setup({ random: () => 0.9 }) // 3 partes
+    const typing = vi.fn(async (_to: string, _typing: boolean) => undefined)
+    s.options.manager.getTransport = (() => ({ sendTyping: typing })) as never
+    s.model.message.mockResolvedValue('opa\ntudo certo?\nviu o trailer novo?')
+    let n = 0
+    s.pipeline.send.mockImplementation(async () => ({ id: `out-${++n}` }))
+    await s.automation.run(A)
+    expect(s.model.message).toHaveBeenCalledWith(s.config.topic, A, [], 3)
+    expect(s.pipeline.send.mock.calls.map((c) => (c[0] as { content: { text: string } }).content.text)).toEqual(['opa', 'tudo certo?', 'viu o trailer novo?'])
+    expect(typing).toHaveBeenCalledTimes(3)
+    expect(typing).toHaveBeenCalledWith(expect.stringContaining('@s.whatsapp.net'), true)
+    expect(await s.automation.handlesInbound(B, s.sessions.get(A)!.phone!, 'tudo certo?')).toBe(true)
+    s.received.mockImplementation(async (...args: unknown[]) => args[2] !== 'viu o trailer novo?')
+    await s.automation.run(A)
+    expect(s.states.get(A)!.turns).toBe(0) // falta a última parte chegar
+    s.received.mockResolvedValue(true)
+    await s.automation.run(A)
+    expect(s.states.get(A)!.turns).toBe(1)
+    expect(s.states.get(A)!.history.at(-1)).toEqual({ senderId: A, text: 'opa\ntudo certo?\nviu o trailer novo?' })
+  })
+  it('fala em partes: gate que recusa uma parte seguinte encerra a fala com as partes que saíram', async () => {
+    const s = setup({ random: () => 0.5 }) // 2 partes
+    s.model.message.mockResolvedValue('opa\ntudo certo?')
+    s.pipeline.send.mockResolvedValueOnce({ id: 'out-1' }).mockRejectedValueOnce(Object.assign(new Error('limite'), { name: 'SendRejectedError' }))
+    await s.automation.run(A)
+    expect(s.states.get(A)!.pending).toMatchObject({ text: 'opa', parts: [{ text: 'opa', messageId: 'out-1' }] })
+    expect(s.states.get(A)!.halted).toBeUndefined()
+    s.received.mockResolvedValue(true)
+    await s.automation.run(A)
+    expect(s.states.get(A)!.history.at(-1)).toEqual({ senderId: A, text: 'opa' })
+  })
+  it('fala em partes: só digita a próxima depois que a anterior saiu', async () => {
+    const s = setup({ random: () => 0.5 })
+    s.model.message.mockResolvedValue('opa\ntudo certo?')
+    s.messages.get.mockResolvedValue({ status: 'queued', sentAt: '' } as never)
+    await s.automation.run(A)
+    expect(s.pipeline.send).toHaveBeenCalledTimes(1) // a primeira não saiu: não enfileira a segunda
+    expect(s.states.get(A)!.pending?.parts).toHaveLength(1)
   })
   it('rajada: a mesma conta envia várias falas seguidas antes de passar a vez', async () => {
     const s = setup({ random: () => 0.99 }) // burstSize sempre no máximo (3)

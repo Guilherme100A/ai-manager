@@ -1,5 +1,5 @@
 import {
-  conversationConfigSchema, SENDABLE_STATES, SessionError,
+  conversationConfigSchema, phoneToUserJid, SENDABLE_STATES, SessionError, splitConversationParts,
   type ConversationConfig, type ConversationModel, type ConversationPending, type ConversationState, type MessageQueue,
   type SendPipeline, type SessionLimitsService, type SessionView,
 } from '@wsm/core'
@@ -21,11 +21,17 @@ export interface ConversationOptions {
   now?: () => number
   /** Fonte de aleatoriedade (injetável nos testes). Default: Math.random. */
   random?: () => number
+  /** Espera (injetável nos testes). Default: setTimeout. */
+  sleep?: (ms: number) => Promise<void>
 }
 
 /** Tamanho de uma rajada: quantas falas seguidas a mesma conta envia antes de passar a vez. */
 const BURST_MIN = 1
 const BURST_MAX = 3
+/** Uma fala pode sair quebrada em até PARTS_MAX mensagens curtas, cada uma depois de "digitando…". */
+const PARTS_MAX = 3
+/** Quanto esperar a parte anterior sair antes de desistir das seguintes. */
+const PART_SEND_TIMEOUT = 60_000
 
 export class ConversationAutomation {
   private timer?: ReturnType<typeof setInterval>
@@ -33,9 +39,30 @@ export class ConversationAutomation {
   private stopped = false
   private readonly now: () => number
   private readonly random: () => number
-  constructor(private readonly opts: ConversationOptions) { this.now = opts.now ?? Date.now; this.random = opts.random ?? Math.random }
+  private readonly sleep: (ms: number) => Promise<void>
+  constructor(private readonly opts: ConversationOptions) {
+    this.now = opts.now ?? Date.now; this.random = opts.random ?? Math.random
+    this.sleep = opts.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)))
+  }
   /** Sorteia o tamanho da próxima rajada em [BURST_MIN, BURST_MAX]. */
   private burstSize(): number { return BURST_MIN + Math.floor(this.random() * (BURST_MAX - BURST_MIN + 1)) }
+  /** Sorteia em quantas mensagens a próxima fala sai: 1 (40%), 2 (40%) ou 3 (20%). */
+  private partsCount(): number { const r = this.random(); return r < 0.4 ? 1 : r < 0.8 ? 2 : PARTS_MAX }
+  /** "Digitando…" proporcional ao tamanho do texto (1,5 s a ~9 s). Falha de presença não impede o envio. */
+  private async typing(senderId: string, phone: string, text: string) {
+    await this.opts.manager.getTransport(senderId)?.sendTyping?.(phoneToUserJid(phone), true).catch(() => undefined)
+    await this.sleep(Math.min(8_000, Math.max(1_500, 1_200 + text.length * 55)) + Math.floor(this.random() * 800))
+  }
+  /** Espera a mensagem sair (sentAt) para manter a ordem das partes; false se falhar ou demorar demais. */
+  private async waitSent(messageId: string) {
+    for (let waited = 0; waited < PART_SEND_TIMEOUT; waited += 1_000) {
+      const message = await this.opts.messages.get(messageId)
+      if (message.sentAt) return true
+      if (['failed', 'cancelled'].includes(message.status)) return false
+      await this.sleep(1_000)
+    }
+    return false
+  }
   start() {
     this.timer = setInterval(() => this.launch(), MINUTE)
     this.timer.unref?.()
@@ -208,7 +235,8 @@ export class ConversationAutomation {
   async handlesInbound(receiverId: string, phone: string, text: string) {
     for (const s of await this.opts.manager.list()) {
       const pending = (await this.opts.store.state(s.id)).pending
-      if (pending?.receiverId === receiverId && pending.sourcePhone === phone && pending.text === text) return true
+      if (pending?.receiverId === receiverId && pending.sourcePhone === phone &&
+        (pending.text === text || pending.parts?.some((part) => part.text === text))) return true
     }
     return false
   }
@@ -275,10 +303,16 @@ export class ConversationAutomation {
         const pending = state.pending
         if (!pending.messageId) { state.halted = true; state.lastError = 'Envio com resultado incerto: conversa interrompida para evitar duplicação.' }
         else {
-          const message = await this.opts.messages.get(pending.messageId)
-          if (['failed', 'cancelled'].includes(message.status)) {
+          // Fala em partes: todas precisam ter saído e chegado. Pendências antigas têm uma parte só.
+          const parts = pending.parts?.length ? pending.parts : [{ text: pending.text, messageId: pending.messageId }]
+          const sent = parts.every((part) => part.messageId) ? await Promise.all(parts.map((part) => this.opts.messages.get(part.messageId!))) : undefined
+          const message = sent?.at(-1)
+          if (!sent || !message) {
+            state.halted = true; state.lastError = 'Envio com resultado incerto: conversa interrompida para evitar duplicação.'
+          } else if (sent.some((m) => ['failed', 'cancelled'].includes(m.status))) {
             state.halted = true; state.lastError = 'A mensagem falhou ou foi cancelada. Conversa interrompida.'
-          } else if (message.sentAt && await this.opts.received(pending.receiverId, pending.sourcePhone, pending.text, pending.reservedAt)) {
+          } else if (sent.every((m) => m.sentAt) &&
+            (await Promise.all(parts.map((part) => this.opts.received(pending.receiverId, pending.sourcePhone, part.text, pending.reservedAt)))).every(Boolean)) {
             state.history = [...state.history, { senderId: pending.senderId, text: pending.text }].slice(-10)
             state.turns++
             // Rajada: a mesma conta envia um número aleatório de falas antes de passar a vez.
@@ -319,7 +353,7 @@ export class ConversationAutomation {
       state.nextAt = now + interval * MINUTE
       await this.opts.store.saveState(id, state)
       if (!state.draft || state.draft.senderId !== sender.id) {
-        const text = await this.opts.model.message(config.topic, sender.id, state.history)
+        const text = await this.opts.model.message(config.topic, sender.id, state.history, this.partsCount())
         if (!await this.opts.store.renew(lease)) return
         state.draft = { senderId: sender.id, text }
         await this.opts.store.saveState(id, state)
@@ -328,21 +362,38 @@ export class ConversationAutomation {
       if (!await this.hasCapacity(a, config) || !await this.hasCapacity(b, peerConfig)) return
       if (!sender.phone || !receiver.phone) return
       if (!await this.opts.store.renew(lease)) return
-      const pending: ConversationPending = { ...state.draft, receiverId: receiver.id, sourcePhone: sender.phone, reservedAt: this.now() }
+      const texts = splitConversationParts(state.draft.text, PARTS_MAX)
+      const pending: ConversationPending = { ...state.draft, text: '', parts: [], receiverId: receiver.id, sourcePhone: sender.phone, reservedAt: this.now() }
+      const parts = pending.parts!
       state.pending = pending
       await this.opts.store.saveState(id, state)
-      try {
-        const message = await this.opts.pipeline.send({ sessionId: sender.id, phone: receiver.phone, content: { text: pending.text }, actor: 'session-conversations' })
-        pending.messageId = message.id
-        delete state.draft
-        delete state.lastError
+      // Cada parte: espera a anterior sair (mantém a ordem), mostra "digitando…" e enfileira. A parte é gravada
+      // na pendência antes do envio, para o recebimento ser reconhecido como desta conversa.
+      for (const [index, text] of texts.entries()) {
+        if (index > 0 && (!await this.waitSent(parts[index - 1]!.messageId!) || !await this.opts.store.renew(lease) || !await this.active(id, targetId))) break
+        await this.typing(sender.id, receiver.phone, text)
+        parts.push({ text })
+        pending.text = parts.map((part) => part.text).join('\n')
         await this.opts.store.saveState(id, state)
-        await this.opts.audit(id, { action: 'turn_queued', senderId: sender.id, receiverId: receiver.id, messageId: message.id })
-      } catch (error) {
-        if (error instanceof Error && error.name === 'SendRejectedError') delete state.pending
-        else state.halted = true
-        state.lastError = 'Envio rejeitado ou incerto. Verifique os contatos, os limites e a fila.'
-        await this.opts.store.saveState(id, state)
+        try {
+          const message = await this.opts.pipeline.send({ sessionId: sender.id, phone: receiver.phone, content: { text }, actor: 'session-conversations' })
+          parts[index]!.messageId = message.id
+          pending.messageId = message.id
+          delete state.draft
+          delete state.lastError
+          await this.opts.store.saveState(id, state)
+          await this.opts.audit(id, { action: 'turn_queued', senderId: sender.id, receiverId: receiver.id, messageId: message.id, part: index + 1, parts: texts.length })
+        } catch (error) {
+          const rejected = error instanceof Error && error.name === 'SendRejectedError'
+          if (rejected && index > 0) {
+            // Gate recusou uma parte seguinte: a fala segue só com as partes que já saíram.
+            parts.pop(); pending.text = parts.map((part) => part.text).join('\n')
+          } else if (rejected) delete state.pending
+          else state.halted = true
+          state.lastError = 'Envio rejeitado ou incerto. Verifique os contatos, os limites e a fila.'
+          await this.opts.store.saveState(id, state)
+          break
+        }
       }
     } catch (error) {
       this.opts.logger.warn({ session_id: id, err: error instanceof Error ? error.message : String(error) }, 'conversation turn failed')

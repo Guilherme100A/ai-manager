@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { SmallConversationModel } from './index'
+import { SmallConversationModel, splitConversationParts } from './index'
 function setup(text = 'Qual jogo você recomenda?') {
   const create = vi.fn(async (..._args: unknown[]) => ({ stop_reason: 'end_turn', content: [{ type: 'text', text }] }))
   const settings = vi.fn(async () => ({ enabled: true, config: { apiKey: 'test', smallModel: 'small', largeModel: 'large', timeoutMs: 1000 } }))
@@ -25,6 +25,18 @@ describe('modelo de conversas', () => {
     const payload = JSON.parse((s.create.mock.calls[0]![0] as { messages: { content: string }[] }).messages[0]!.content)
     expect(payload.task).toBe(task)
     expect(payload.history.map((t: { autor: string }) => t.autor)).toEqual(history.map((t) => (t.senderId === 'a' ? 'você' : 'outra conta')))
+  })
+  it('pede a fala no número de partes sorteado (default 1)', async () => {
+    const s = setup()
+    await s.model.message('jogos', 'a', [], 3)
+    await s.model.message('jogos', 'a', [])
+    const partes = s.create.mock.calls.map((c) => JSON.parse((c[0] as { messages: { content: string }[] }).messages[0]!.content).partes)
+    expect(partes).toEqual([3, 1])
+  })
+  it('quebra a fala em partes por linha, sem linhas vazias e juntando o excedente na última', () => {
+    expect(splitConversationParts('opa\n\n tudo certo? \nviu o trailer?', 3)).toEqual(['opa', 'tudo certo?', 'viu o trailer?'])
+    expect(splitConversationParts('a\nb\nc\nd', 3)).toEqual(['a', 'b', 'c d'])
+    expect(splitConversationParts('uma fala só', 3)).toEqual(['uma fala só'])
   })
   it.each(['', 'x'.repeat(301), 'https://example.com'])('rejeita fala inválida', async (text) => {
     await expect(setup(text).model.message('jogos', 'a', [])).rejects.toThrow('inválida')

@@ -104,6 +104,8 @@ export interface WaTransport {
   on(event: 'message', cb: (m: IncomingMessage) => void): void
   on(event: 'receipt', cb: (r: ReceiptUpdate) => void): void
   sendMessage(to: string, content: OutgoingContent): Promise<{ messageId: string }>
+  /** Mostra (`true`) ou encerra (`false`) o "digitando…" para o JID. Opcional; falhar não impede o envio. */
+  sendTyping?(to: string, typing: boolean): Promise<void>
   fetchGroups(): Promise<GroupSummary[]>
   inspectGroupInvite?(code: string): Promise<GroupSummary & { description?: string }>
   groupInviteCode?(groupId: string): Promise<string>

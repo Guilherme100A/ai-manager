@@ -93,6 +93,7 @@ export interface BaileysSocketLike {
   groupGetInviteInfo?(code: string): Promise<BaileysGroupLike & { desc?: string }>
   groupInviteCode?(jid: string): Promise<string | undefined>
   groupAcceptInvite?(code: string): Promise<string | undefined>
+  sendPresenceUpdate?(type: 'composing' | 'paused', jid?: string): Promise<void>
   /** Conta autenticada (para saber se é admin dos grupos). */
   user?: { id?: string; lid?: string } | null
 }
@@ -330,6 +331,10 @@ export class BaileysTransport extends TransportEmitter implements WaTransport {
     const messageId = result?.key?.id
     if (!messageId) throw new Error('Baileys não devolveu o ID da mensagem enviada')
     return { messageId }
+  }
+
+  async sendTyping(to: string, typing: boolean): Promise<void> {
+    await this.requireSocket().sendPresenceUpdate?.(typing ? 'composing' : 'paused', to)
   }
 
   ownPhone(): string | undefined {
