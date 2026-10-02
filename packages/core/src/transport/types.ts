@@ -105,6 +105,7 @@ export interface WaTransport {
   on(event: 'receipt', cb: (r: ReceiptUpdate) => void): void
   sendMessage(to: string, content: OutgoingContent): Promise<{ messageId: string }>
   fetchGroups(): Promise<GroupSummary[]>
+  inspectGroupInvite?(code: string): Promise<GroupSummary & { description?: string }>
   groupInviteCode?(groupId: string): Promise<string>
   groupAcceptInvite?(code: string): Promise<string | undefined>
   off?(event: 'message', cb: (message: IncomingMessage) => void): void

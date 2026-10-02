@@ -37,7 +37,7 @@ export interface MessageEventView {
 
 export interface EnqueueMessageInput {
   sessionId: string
-  /** Telefone E.164 do destinatário. */
+  /** Telefone E.164 ou JID de grupo autorizado pelo SendPipeline.sendGroup. */
   phone: string
   content: OutgoingContent
   contactId?: string | null
@@ -106,7 +106,8 @@ export class MessageStore {
 
   /** Grava a mensagem em `queued` junto com o evento inicial (from = null). */
   async create(input: EnqueueMessageInput): Promise<MessageRow> {
-    if (!E164_REGEX.test(input.phone)) throw new SessionError('VALIDATION_ERROR', 'phone must be E.164 (e.g. +5511999999999)')
+    if (!E164_REGEX.test(input.phone) && !/^[^\s@]+@g\.us$/.test(input.phone)) throw new SessionError('VALIDATION_ERROR', 'phone must be E.164 (e.g. +5511999999999)')
+    if (input.phone.endsWith('@g.us') && input.contactId) throw new SessionError('VALIDATION_ERROR', 'group messages cannot reference an individual contact')
     if (!isUuid(input.sessionId)) throw new SessionError('SESSION_NOT_FOUND', `session ${input.sessionId} not found`)
     return this.db.transaction(async (tx) => {
       const [session] = await tx.select({ id: sessions.id }).from(sessions).where(eq(sessions.id, input.sessionId))

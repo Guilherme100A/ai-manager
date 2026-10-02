@@ -90,6 +90,7 @@ export interface BaileysSocketLike {
   end(error: Error | undefined): void | Promise<void>
   /** T20 — `groupParticipantsUpdate(jid, participants, 'add')`. Opcional nos mocks antigos. */
   groupParticipantsUpdate?(jid: string, participants: string[], action: 'add'): Promise<Array<{ status?: string; jid?: string }>>
+  groupGetInviteInfo?(code: string): Promise<BaileysGroupLike & { desc?: string }>
   groupInviteCode?(jid: string): Promise<string | undefined>
   groupAcceptInvite?(code: string): Promise<string | undefined>
   /** Conta autenticada (para saber se é admin dos grupos). */
@@ -329,6 +330,13 @@ export class BaileysTransport extends TransportEmitter implements WaTransport {
     const groups = await this.requireSocket().groupFetchAllParticipating()
     const own = new Set([this.sock?.user?.id, this.sock?.user?.lid].filter((v): v is string => typeof v === 'string').map(normalizeJid))
     return Object.values(groups).map((g) => toGroupSummary(g, own))
+  }
+
+  async inspectGroupInvite(code: string): Promise<GroupSummary & { description?: string }> {
+    const sock = this.requireSocket()
+    if (!sock.groupGetInviteInfo) throw new Error('groupGetInviteInfo not available')
+    const group = await sock.groupGetInviteInfo(code)
+    return { ...toGroupSummary(group), ...(group.desc ? { description: group.desc } : {}) }
   }
 
   async groupInviteCode(groupId: string): Promise<string> {

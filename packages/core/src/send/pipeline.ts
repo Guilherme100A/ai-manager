@@ -44,6 +44,8 @@ export interface SendRequest {
   sessionId: string
   /** Telefone E.164 do destinatário. */
   phone: string
+  /** Preenchido apenas por sendGroup: destino explícito de grupo. */
+  groupId?: string
   content: OutgoingContent
   /** Quem pediu o envio (autenticado). Sem actor, o gate auth rejeita. */
   actor?: string
@@ -117,6 +119,11 @@ export class SendPipeline {
     return ctx.message as MessageView
   }
 
+  async sendGroup(req: { sessionId: string; groupId: string; content: OutgoingContent; actor: string }): Promise<MessageView> {
+    if (!/^[^\s@]+@g\.us$/.test(req.groupId)) throw new SendRejectedError('VALIDATION_ERROR', 'invalid group id')
+    return this.send({ ...req, phone: req.groupId })
+  }
+
   private defaultGates(): Record<GateName, Gate> {
     return {
       auth: async (req) => {
@@ -139,6 +146,16 @@ export class SendPipeline {
         }
       },
       contactAllowed: async (req, ctx) => {
+        if (req.groupId) {
+          if (req.phone !== req.groupId || !/^[^\s@]+@g\.us$/.test(req.groupId) || req.contactId) {
+            throw new SendRejectedError('VALIDATION_ERROR', 'invalid group recipient')
+          }
+          const transport = ctx.transport ?? this.opts.getTransport?.(req.sessionId)
+          if (!transport) throw new SendRejectedError('SESSION_NOT_CONNECTED', 'group transport unavailable')
+          const group = (await transport.fetchGroups()).find((g) => g.id === req.groupId)
+          if (!group || (group.announce && !group.isAdmin)) throw new SendRejectedError('CONTACT_NOT_ALLOWED', 'not a member or group only allows admins to send')
+          return
+        }
         const contact = await this.contacts.findByPhone(req.phone)
         const verdict = canMessage(contact)
         if (!verdict.ok) throw new SendRejectedError('CONTACT_NOT_ALLOWED', `contact not allowed: ${verdict.reason}`, { reason: verdict.reason })

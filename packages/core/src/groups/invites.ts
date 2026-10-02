@@ -41,7 +41,7 @@ export class GroupInviteService {
   private readonly reserved = new Map<string, number>()
   constructor(private readonly opts: GroupInviteServiceOptions) {}
 
-  async run(input: GroupInviteInput): Promise<GroupInviteOutcome> {
+  async run(input: GroupInviteInput, publicInvite?: { groupId: string; code: string }): Promise<GroupInviteOutcome> {
     const { sourceSessionId, targetSessionId, actor } = input
     if (!actor?.trim() || sourceSessionId === targetSessionId || !input.groupIds.length) {
       throw new GroupInviteError('VALIDATION_ERROR', 'Escolha duas sessões diferentes e pelo menos um grupo.')
@@ -70,19 +70,20 @@ export class GroupInviteService {
       if (!sourceSession.phone || !targetSession.phone || sourceSession.phone === targetSession.phone) {
         throw new GroupInviteError('VALIDATION_ERROR', 'As sessões precisam ter números diferentes e válidos.')
       }
-      if (!source.groupInviteCode || !target.groupAcceptInvite || !target.off) {
+      if ((!publicInvite && !source.groupInviteCode) || !target.groupAcceptInvite || !target.off) {
         throw new GroupInviteError('GROUP_INVITE_FAILED', 'O transporte não suporta convites entre sessões.')
       }
       const [sourceGroups, targetGroups] = await Promise.all([source.fetchGroups(), target.fetchGroups()])
       const pool = new Set(input.groupIds)
       const existing = new Set(targetGroups.map((g) => g.id))
-      const candidates = sourceGroups.filter((g) => pool.has(g.id) && g.isAdmin === true &&
+      const candidates = sourceGroups.filter((g) => pool.has(g.id) && (publicInvite ? g.id === publicInvite.groupId : g.isAdmin === true) &&
         g.id.endsWith('@g.us') && !existing.has(g.id))
       if (!candidates.length) {
         throw new GroupInviteError('VALIDATION_ERROR', 'Nenhum grupo elegível: A precisa ser admin e B ainda não pode ser membro.')
       }
       groupId = candidates[randomInt(candidates.length)]!.id
-      const code = await source.groupInviteCode(groupId)
+      const code = publicInvite?.code ?? await source.groupInviteCode!(groupId)
+      if (publicInvite && (await target.inspectGroupInvite?.(code))?.id !== groupId) throw new GroupInviteError('GROUP_INVITE_FAILED', 'Convite público não corresponde ao grupo.')
       const link = `https://chat.whatsapp.com/${code}`
       const expectedSender = phoneToUserJid(sourceSession.phone)
       const receipt = new Promise<boolean>((resolve) => {

@@ -9,7 +9,7 @@ import { rootPath } from '../helpers/exec'
 // Montado por partes para este arquivo não conter o nome proibido literalmente.
 const FORBIDDEN = ['group', 'Accept', 'Invite'].join('')
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', '.turbo', 'coverage'])
-const INVITE_FILES = new Set(['packages/core/src/transport/baileys.ts', 'packages/core/src/transport/types.ts', 'packages/core/src/groups/invites.ts'])
+const INVITE_FILES = new Set(['packages/core/src/transport/baileys.ts', 'packages/core/src/transport/types.ts', 'packages/core/src/groups/invites.ts', 'apps/worker/src/groups/automation.ts'])
 const EXTS = /\.(ts|tsx|js|mjs|cjs)$/
 
 function walk(dir: string, out: string[] = []): string[] {
@@ -22,7 +22,7 @@ function walk(dir: string, out: string[] = []): string[] {
   return out
 }
 
-describe('T14 — sem entrada automática em grupos', () => {
+describe('T14 — entradas limitadas aos fluxos autorizados', () => {
   const ctx = useSessions()
 
   it(`AC-T14-03 aceitar convite só aparece nos módulos do fluxo explícito (apps/**, packages/**)`, () => {
@@ -51,7 +51,7 @@ describe('T14 — sem entrada automática em grupos', () => {
     expect(coreJoin).toEqual([])
   })
 
-  it('AC-T14-03 a API não oferece rota de entrada em grupo (join/invite → 404)', async () => {
+  it('AC-T14-03 a API não oferece rota genérica para aceitar qualquer convite (join/invite → 404)', async () => {
     const { id } = await sessionWithGroups(ctx)
     const gid = '120363000000000002@g.us'
     const attempts: Array<[string, string, unknown?]> = [

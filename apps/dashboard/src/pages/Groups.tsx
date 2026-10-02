@@ -2,6 +2,7 @@
 // T20: em grupos em que a sessão é admin, "Adicionar número" adiciona UMA sessão do sistema, com confirmação.
 import { useState } from 'react'
 import { GroupAddDialog } from '../components/GroupAddDialog'
+import { GroupAutomationPanel } from '../components/GroupAutomationPanel'
 import { ErrorText, PageHeader } from '../components/ui'
 import { api } from '../lib/api'
 import { POLL, usePoll } from '../lib/hooks'
@@ -78,6 +79,7 @@ export function Groups() {
         </button>
       </div>
       <ErrorText error={error} testId="groups-error" />
+      {sessionId ? <GroupAutomationPanel key={sessionId} sessionId={sessionId} sessions={sessions.data ?? []} /> : null}
       {groups && sessionId ? (
         <div className="panel">
           <h2>Convite entre sessões</h2>

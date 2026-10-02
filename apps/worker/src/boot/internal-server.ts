@@ -6,12 +6,15 @@ import { timingSafeEqual } from 'node:crypto'
 import type { AddressInfo } from 'node:net'
 import { serve, type ServerType } from '@hono/node-server'
 import { Hono, type Context } from 'hono'
-import { TransportNotConnectedError, type GroupInviteInput, type EnqueueMessageInput, type GroupSummary, type ListMessagesFilter, type WaTransport } from '@wsm/core'
+import { TransportNotConnectedError, type GroupAutomationConfig, type GroupInviteInput, type EnqueueMessageInput, type GroupSummary, type ListMessagesFilter, type WaTransport } from '@wsm/core'
 import type { FakeControl } from './fake-control'
 
 /** Operações do worker expostas à API. */
 export interface BridgeTargets {
   sessions: {
+    getGroupAutomation?(id: string): Promise<unknown>
+    configureGroupAutomation?(id: string, config: GroupAutomationConfig): Promise<unknown>
+    tickGroupAutomation?(id: string): Promise<unknown>
     runGroupInvite?(input: GroupInviteInput): Promise<unknown>
     create(input: never): Promise<unknown>
     list(): Promise<unknown>
@@ -47,6 +50,18 @@ export function bridgeHandlers(t: BridgeTargets): Record<string, Record<string, 
   const str = (v: unknown) => String(v)
   return {
     sessions: {
+      getGroupAutomation: async ([id]) => {
+        if (!s.getGroupAutomation) throw new Error('group automation unavailable')
+        return s.getGroupAutomation(str(id))
+      },
+      configureGroupAutomation: async ([id, input]) => {
+        if (!s.configureGroupAutomation) throw new Error('group automation unavailable')
+        return s.configureGroupAutomation(str(id), input as GroupAutomationConfig)
+      },
+      tickGroupAutomation: async ([id]) => {
+        if (!s.tickGroupAutomation) throw new Error('group automation unavailable')
+        return s.tickGroupAutomation(str(id))
+      },
       runGroupInvite: async ([input]) => {
         if (!s.runGroupInvite) throw new Error('runGroupInvite not available')
         return s.runGroupInvite(input as GroupInviteInput)

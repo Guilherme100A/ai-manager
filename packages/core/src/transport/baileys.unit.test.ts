@@ -26,6 +26,7 @@ function mockSocket() {
       'g2@g.us': { id: 'g2@g.us', subject: 'Grupo 2', participants: [{}, {}] },
     })),
     groupInviteCode: vi.fn(async () => 'TEST_CODE'),
+    groupGetInviteInfo: vi.fn(async () => ({ id: 'g1@g.us', subject: 'Grupo 1', desc: 'Tema do grupo', size: 5 })),
     groupAcceptInvite: vi.fn(async () => 'g1@g.us'),
     requestPairingCode: vi.fn(async () => 'PAIR1234'),
     logout: vi.fn(async () => {
@@ -86,6 +87,7 @@ describe('BaileysTransport', () => {
     await transport.connect({ sessionId: 's', auth })
     sockets[0]!.ev.emit('connection.update', { connection: 'open' })
     await expect(transport.groupInviteCode('g1@g.us')).resolves.toBe('TEST_CODE')
+    await expect(transport.inspectGroupInvite('TEST_CODE')).resolves.toMatchObject({ id: 'g1@g.us', name: 'Grupo 1', description: 'Tema do grupo' })
     await expect(transport.groupAcceptInvite('TEST_CODE')).resolves.toBe('g1@g.us')
     expect(sockets[0]!.groupInviteCode).toHaveBeenCalledWith('g1@g.us')
     expect(sockets[0]!.groupAcceptInvite).toHaveBeenCalledWith('TEST_CODE')

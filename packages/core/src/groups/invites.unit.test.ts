@@ -38,6 +38,18 @@ function setup() {
 afterEach(() => vi.restoreAllMocks())
 
 describe('convite entre sessões', () => {
+  it('encaminha convite público confirmado sem exigir que A seja admin', async () => {
+    const s = setup()
+    s.a.groups.forEach((g) => { g.isAdmin = false })
+    Object.assign(s.b, { inspectGroupInvite: vi.fn(async () => ({ id: 'one@g.us', name: 'One', announce: false, participants: 1 })) })
+    s.accept.mockImplementation(async () => {
+      s.b.setGroups([{ id: 'one@g.us', name: 'One', announce: false, participants: 2 }])
+      return 'one@g.us'
+    })
+    await expect(s.service.run({ ...input, groupIds: ['one@g.us'] }, { groupId: 'one@g.us', code: 'TEST_CODE' })).resolves.toMatchObject({ result: 'joined' })
+    expect(s.code).not.toHaveBeenCalled()
+    expect(s.accept).toHaveBeenCalledWith('TEST_CODE')
+  })
   it('sorteia somente do pool e aceita após B receber de A; envia pelo pipeline e remove listener', async () => {
     const s = setup()
     const out = await s.service.run({ ...input, groupIds: ['two@g.us'] })

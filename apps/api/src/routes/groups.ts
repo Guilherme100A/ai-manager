@@ -8,6 +8,7 @@ import {
   GROUP_ADD_AUDIT_ACTION,
   GroupInviteError,
   SendRejectedError,
+  type GroupAutomationConfig,
   type GroupInviteInput,
   type GroupInviteOutcome,
   GroupAddError,
@@ -26,6 +27,9 @@ import { validate } from '../validate'
 
 declare module './sessions' {
   interface SessionsControl {
+    getGroupAutomation?(id: string): Promise<unknown>
+    configureGroupAutomation?(id: string, config: GroupAutomationConfig): Promise<unknown>
+    tickGroupAutomation?(id: string): Promise<unknown>
     runGroupInvite?(input: GroupInviteInput): Promise<GroupInviteOutcome>
     /** Transporte vivo da sessão (SessionManager.getTransport). */
     getTransport?(sessionId: string): WaTransport | undefined
@@ -47,6 +51,11 @@ export const addParticipantSchema = z.object({ targetSessionId: z.uuid() }).stri
 export const inviteFlowSchema = z.object({
   targetSessionId: z.uuid(),
   groupIds: z.array(z.string().regex(/^[^\s@]+@g\.us$/).max(200)).min(1).max(100),
+}).strict()
+
+export const groupAutomationSchema = z.object({
+  enabled: z.boolean(), query: z.string().trim().min(1).max(300),
+  maxEntriesPerDay: z.number().int().min(1).max(20), targetSessionId: z.uuid().nullable(),
 }).strict()
 
 const uuid = z.uuid()
@@ -82,6 +91,25 @@ export function groupsRoutes(deps: Pick<AppDeps, 'db' | 'sessions' | 'groupAddNo
   }
 
   return new Hono<AppEnv>()
+    .get('/api/sessions/:id/groups/automation', async (c) => {
+      if (!deps.sessions?.getGroupAutomation) throw new ApiError('INTERNAL_ERROR', 'Automação indisponível no worker.')
+      try { return c.json(await deps.sessions.getGroupAutomation(sessionId(c)) as object) } catch (err) { throw toApiError(err) }
+    })
+    .put('/api/sessions/:id/groups/automation', validate('json', groupAutomationSchema), async (c) => {
+      const id = sessionId(c)
+      const config = c.req.valid('json')
+      if (config.targetSessionId === id) throw new ApiError('VALIDATION_ERROR', 'Escolha outra sessão como destinatária.')
+      if (!deps.sessions?.configureGroupAutomation) throw new ApiError('INTERNAL_ERROR', 'Automação indisponível no worker.')
+      try {
+        const result = await deps.sessions.configureGroupAutomation(id, config)
+        setAudit(c, { action: 'group.automation.configure', targetType: 'session', targetId: id, detail: { ...config } })
+        return c.json(result as object)
+      } catch (err) { throw toApiError(err) }
+    })
+    .post('/api/sessions/:id/groups/automation/run', async (c) => {
+      if (!deps.sessions?.tickGroupAutomation) throw new ApiError('INTERNAL_ERROR', 'Automação indisponível no worker.')
+      try { return c.json(await deps.sessions.tickGroupAutomation(sessionId(c)) as object, 202) } catch (err) { throw toApiError(err) }
+    })
     .post('/api/sessions/:id/groups/invite-flow', validate('json', inviteFlowSchema), async (c) => {
       const sourceSessionId = sessionId(c)
       const body = c.req.valid('json')

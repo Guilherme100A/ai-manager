@@ -81,3 +81,6 @@ export async function listSessionGroups(opts: ListSessionGroupsOptions): Promise
 export * from './participants'
 
 export * from './invites'
+
+export * from './automation'
+export * from './web-model'

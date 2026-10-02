@@ -8,6 +8,7 @@ import { Redis } from 'ioredis'
 import {
   AiAssistant,
   AiSettingsService,
+  SmallGroupModel,
   AlertDispatcher,
   attachMetrics,
   bindTransportSession,
@@ -36,6 +37,8 @@ import { loadWorkerConfig, type WorkerConfig } from './config'
 import { FakeControl } from './fake-control'
 import { startInternalServer, type InternalServer } from './internal-server'
 import { createBridgeTargets } from './bridge-targets'
+import { GroupAutomation } from '../groups/automation'
+import { RedisGroupAutomationStore } from '../groups/store'
 import { recoverOrphanJobs, type RecoverOrphanJobsResult } from './orphan-jobs'
 import { reconcileProcessing, type ReconcileResult } from './reconcile'
 import { createGuardedDeliver, redisInflightStore, type InflightStore } from './send-guard'
@@ -211,6 +214,25 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
       await ai.idle()
     })
 
+    const bridgeTargets = createBridgeTargets({ manager, queue, health: monitor, db })
+    const groupSettings = new AiSettingsService({ db, env })
+    const groupAutomation = new GroupAutomation({
+      manager, store: new RedisGroupAutomationStore(redis, config.queuePrefix), limits,
+      pipeline: routingPipeline, messages: queue, model: new SmallGroupModel(() => groupSettings.resolve()),
+      invites: bridgeTargets.groupInvites, logger,
+      audit: async (sessionId, detail) => {
+        const { auditLogs } = await import('@wsm/db')
+        await db.insert(auditLogs).values({ actor: 'group-automation', action: 'group.automation', targetType: 'session', targetId: sessionId, detail })
+      },
+    })
+    bridgeTargets.sessions.getGroupAutomation = (id) => groupAutomation.view(id)
+    bridgeTargets.sessions.configureGroupAutomation = (id, input) => groupAutomation.configure(id, input)
+    bridgeTargets.sessions.tickGroupAutomation = async (id) => {
+      await manager.get(id)
+      return groupAutomation.requestTick(id)
+    }
+    onStop('group-automation', () => groupAutomation.stop())
+
     // ---- proxies (T06) + alertas (T11) + métricas (T15) --------------------------------------
     const proxyMonitor: ProxyMonitor = startProxyMonitor({ db, logger, ...(opts.proxyCheckIntervalMs ? { intervalMs: opts.proxyCheckIntervalMs } : {}) })
     onStop('proxy-monitor', () => proxyMonitor.stop())
@@ -237,7 +259,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
       port: config.internalPort,
       host: config.internalHost,
       token: config.internalToken,
-      targets: createBridgeTargets({ manager, queue, health: monitor, db }),
+      targets: bridgeTargets,
       ...(fake ? { fake } : {}),
       logger,
     })
@@ -246,6 +268,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     // ---- reconexão das sessões (AC-T05-04) e retomada das filas -----------------------------
     await manager.start()
     await resumeQueues(db, queue, logger)
+    await groupAutomation.start()
 
     logger.info(
       { boot_id: bootId, wa_transport: config.transport, health_port: observability.port, internal_port: internal.port, reconciled: counts(reconciled) },

@@ -15,7 +15,7 @@ export interface CreateBridgeTargetsOptions {
   groupAddNow?: () => number
 }
 
-export function createBridgeTargets(opts: CreateBridgeTargetsOptions): BridgeTargets & { groupParticipants: GroupParticipantService } {
+export function createBridgeTargets(opts: CreateBridgeTargetsOptions): BridgeTargets & { groupParticipants: GroupParticipantService; groupInvites: GroupInviteService } {
   const { manager } = opts
   const groupParticipants = new GroupParticipantService({
     db: opts.db,
@@ -51,5 +51,5 @@ export function createBridgeTargets(opts: CreateBridgeTargetsOptions): BridgeTar
     isConnected: (id) => manager.isConnected(id),
     addGroupParticipant: (adminSessionId, groupId, targetSessionId) => groupParticipants.add({ adminSessionId, groupId, targetSessionId }),
   }
-  return { sessions, messages: opts.queue, health: opts.health, groupParticipants }
+  return { sessions, messages: opts.queue, health: opts.health, groupParticipants, groupInvites: invites }
 }

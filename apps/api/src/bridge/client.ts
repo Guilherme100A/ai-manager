@@ -15,6 +15,7 @@ import {
   TransportNotConnectedError,
   type EnqueueMessageInput,
   type GroupAddOutcome,
+  type GroupAutomationConfig,
   type GroupInviteInput,
   type GroupInviteOutcome,
   type GroupSummary,
@@ -98,6 +99,9 @@ export interface WorkerBridge {
   call<T>(target: string, method: string, ...args: unknown[]): Promise<T>
   sessions: SessionsControl & {
     getTransport(sessionId: string): WaTransport
+    getGroupAutomation(id: string): Promise<unknown>
+    configureGroupAutomation(id: string, config: GroupAutomationConfig): Promise<unknown>
+    tickGroupAutomation(id: string): Promise<unknown>
     runGroupInvite(input: GroupInviteInput): Promise<GroupInviteOutcome>
     addGroupParticipant(adminSessionId: string, groupId: string, targetSessionId: string): Promise<GroupAddOutcome>
   }
@@ -154,6 +158,9 @@ export function createWorkerBridge(opts: WorkerBridgeOptions): WorkerBridge {
   }
 
   const sessions: WorkerBridge['sessions'] = {
+    getGroupAutomation: (id) => call('sessions', 'getGroupAutomation', id),
+    configureGroupAutomation: (id, input) => call('sessions', 'configureGroupAutomation', id, input),
+    tickGroupAutomation: (id) => call('sessions', 'tickGroupAutomation', id),
     runGroupInvite: (input) => call('sessions', 'runGroupInvite', input),
     create: (input) => call('sessions', 'create', input),
     list: () => call('sessions', 'list'),
