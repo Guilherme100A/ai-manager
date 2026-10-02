@@ -3,13 +3,14 @@ import { z } from 'zod'
 import type { ResolvedAiSettings } from '../ai/settings'
 
 export const conversationConfigSchema = z.object({
+  mode: z.enum(['fixed', 'rotating']).default('fixed'),
   enabled: z.boolean(), targetSessionId: z.uuid().nullable(), topic: z.string().trim().min(1).max(300),
   maxMessagesPerDay: z.number().int().min(1).max(800),
   turnsPerConversation: z.number().int().min(2).max(10), intervalMinutes: z.number().int().min(1).max(60),
-}).strict().refine((c) => !c.enabled || c.targetSessionId !== null, { message: 'Selecione a outra conta.' })
+}).strict().refine((c) => !c.enabled || c.mode === 'rotating' || c.targetSessionId !== null, { message: 'Selecione a outra conta.' })
 export type ConversationConfig = z.infer<typeof conversationConfigSchema>
 export const DEFAULT_CONVERSATION_CONFIG: ConversationConfig = {
-  enabled: false, targetSessionId: null, topic: 'Jogos e tecnologia', maxMessagesPerDay: 20,
+  mode: 'rotating', enabled: false, targetSessionId: null, topic: 'Jogos e tecnologia', maxMessagesPerDay: 20,
   turnsPerConversation: 6, intervalMinutes: 5,
 }
 export interface ConversationTurn { senderId: string; text: string }
@@ -17,6 +18,7 @@ export interface ConversationPending extends ConversationTurn {
   receiverId: string; sourcePhone: string; reservedAt: number; messageId?: string
 }
 export interface ConversationState {
+  partnerId?: string; ownerId?: string; lastPartnerId?: string; lastPairedAt?: number;
   history: ConversationTurn[]; turns: number; nextSenderId?: string; nextAt?: number;
   pending?: ConversationPending; draft?: ConversationTurn; lastError?: string; halted?: boolean
 }

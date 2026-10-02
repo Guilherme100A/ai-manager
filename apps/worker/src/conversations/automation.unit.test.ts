@@ -9,7 +9,7 @@ const C = '33333333-3333-4333-8333-333333333333'
 function setup() {
   let now = 1_800_000_000_000
   let locked = false
-  const config: ConversationConfig = { ...DEFAULT_CONVERSATION_CONFIG, enabled: true, targetSessionId: B, turnsPerConversation: 2 }
+  const config: ConversationConfig = { ...DEFAULT_CONVERSATION_CONFIG, mode: 'fixed', enabled: true, targetSessionId: B, turnsPerConversation: 2 }
   const configs = new Map([[A, config]])
   const states = new Map<string, ConversationState>()
   const store: ConversationStore = {
@@ -132,5 +132,76 @@ describe('conversas entre duas contas', () => {
     // Uma falha depois da reserva sem messageId exige revisão humana, sem novo envio automático.
     await uncertain.automation.configure(A, { ...uncertain.config, enabled: false })
     await expect(uncertain.automation.configure(A, uncertain.config)).rejects.toThrow('incerto')
+  })
+  function rotation(s: ReturnType<typeof setup>, ids = [A, B, C]) {
+    for (const id of ids) s.configs.set(id, { ...s.config, mode: 'rotating', targetSessionId: null })
+  }
+  async function finish(s: ReturnType<typeof setup>, owner: string) {
+    s.received.mockResolvedValue(true)
+    await s.automation.run(owner); await s.automation.run(owner)
+    s.advance(5 * 60_000)
+    await s.automation.run(owner); await s.automation.run(owner)
+  }
+  it('com três contas, quem ficou esperando inicia o próximo par', async () => {
+    const s = setup(); rotation(s)
+    await s.automation.distribute()
+    expect(s.states.get(A)!.partnerId).toBe(B)
+    expect(s.states.get(C)?.partnerId).toBeUndefined()
+    await finish(s, A)
+    await s.automation.distribute()
+    expect(s.states.get(C)?.partnerId).toBeUndefined()
+    s.advance(30 * 60_000); await s.automation.distribute()
+    expect(s.states.get(C)!.partnerId).toBe(A)
+    expect(s.states.get(A)!.ownerId).toBe(C)
+    expect(s.states.get(B)!.ownerId).toBeUndefined()
+  })
+  it('com quatro contas, forma dois pares sem sobreposição e troca os parceiros', async () => {
+    const s = setup()
+    const D = '44444444-4444-4444-8444-444444444444'
+    s.sessions.set(D, { id: D, phone: '+5511999990003', status: 'WARMING' } as SessionView); s.connected.add(D)
+    rotation(s, [A, B, C, D]); await s.automation.distribute()
+    expect(s.states.get(A)!.partnerId).toBe(B); expect(s.states.get(C)!.partnerId).toBe(D)
+    await finish(s, A); await finish(s, C)
+    s.advance(30 * 60_000); await s.automation.distribute()
+    expect(s.states.get(A)!.partnerId).toBe(C); expect(s.states.get(B)!.partnerId).toBe(D)
+  })
+  it('não troca parceiro nem reenvia enquanto há mensagem pendente, inclusive após restart', async () => {
+    const s = setup(); rotation(s); await s.automation.distribute(); await s.automation.run(A)
+    const restart = new ConversationAutomation(s.options)
+    await restart.distribute(); await restart.run(B)
+    expect(s.states.get(A)!.partnerId).toBe(B); expect(s.pipeline.send).toHaveBeenCalledTimes(1)
+    expect((await restart.view(B)).activePartnerId).toBe(A)
+    expect((await restart.view(B)).state.pending).toMatchObject({ senderId: A, receiverId: B })
+  })
+  it('permite habilitar várias contas no rodízio e aplica a cota própria do parceiro', async () => {
+    const s = setup(); rotation(s)
+    await s.automation.configure(B, s.configs.get(B)!)
+    s.configs.set(B, { ...s.configs.get(B)!, maxMessagesPerDay: 1 })
+    s.limits.countOutbound.mockImplementation(async (id) => id === B ? 1 : 0)
+    await s.automation.distribute()
+    expect(s.states.get(A)!.partnerId).toBe(C)
+    expect(s.states.get(B)?.ownerId).toBeUndefined()
+  })
+  it('remove desabilitadas/offline da distribuição e preserva pares fixos', async () => {
+    const s = setup(); rotation(s); s.connected.delete(B)
+    await s.automation.distribute(); expect(s.states.get(A)!.partnerId).toBe(C)
+    const fixed = setup(); fixed.configs.set(C, { ...fixed.config, mode: 'rotating', targetSessionId: null })
+    await fixed.automation.distribute(); expect(fixed.states.size).toBe(0)
+  })
+  it('desativar o parceiro não perde confirmação da fala já enviada', async () => {
+    const s = setup(); rotation(s); await s.automation.distribute(); await s.automation.run(A)
+    s.configs.get(B)!.enabled = false
+    await s.automation.distribute(); expect(s.states.get(A)!.partnerId).toBe(B)
+    s.received.mockResolvedValue(true); await s.automation.run(A)
+    expect(s.states.get(A)!.pending).toBeUndefined(); expect(s.states.get(A)!.partnerId).toBeUndefined()
+    expect(s.states.get(B)!.ownerId).toBeUndefined(); expect(s.pipeline.send).toHaveBeenCalledTimes(1)
+  })
+  it('repara reserva parcialmente gravada sem formar outro par para a mesma conta', async () => {
+    const s = setup(); rotation(s)
+    s.states.set(A, { history: [], turns: 0, partnerId: B, lastPairedAt: s.options.now() })
+    await s.automation.distribute()
+    expect(s.states.get(B)!.ownerId).toBe(A)
+    expect(s.states.get(C)?.partnerId).toBeUndefined()
+    expect((await s.automation.view(B)).activePartnerId).toBe(A)
   })
 })

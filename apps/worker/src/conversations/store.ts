@@ -16,7 +16,8 @@ export class RedisConversationStore implements ConversationStore {
   private key(kind: string, id: string) { return `wsm:conversations:${kind}:${id}` }
   async config(id: string) {
     const raw = await this.redis.get(this.key('config', id))
-    return raw ? { ...DEFAULT_CONVERSATION_CONFIG, ...JSON.parse(raw) } : { ...DEFAULT_CONVERSATION_CONFIG }
+    // Configurações existentes continuam como pares fixos até o operador escolher rodízio.
+    return raw ? { ...DEFAULT_CONVERSATION_CONFIG, mode: 'fixed', ...JSON.parse(raw) } : { ...DEFAULT_CONVERSATION_CONFIG }
   }
   async saveConfig(id: string, config: ConversationConfig) { await this.redis.set(this.key('config', id), JSON.stringify(config)) }
   async state(id: string): Promise<ConversationState> {

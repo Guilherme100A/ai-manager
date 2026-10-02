@@ -6,7 +6,7 @@ const A = '11111111-1111-4111-8111-111111111111'
 const B = '22222222-2222-4222-8222-222222222222'
 function setup() {
   const { db, audits } = fakeDb()
-  const config = { ...DEFAULT_CONVERSATION_CONFIG, enabled: true, targetSessionId: B }
+  const config = { ...DEFAULT_CONVERSATION_CONFIG, mode: 'fixed' as const, enabled: true, targetSessionId: B }
   const sessions = { getConversation: vi.fn(async () => ({ config })), configureConversation: vi.fn(async () => ({ config })), tickConversation: vi.fn(async () => ({ queued: true })) }
   const app = createApp({ db, redis: fakeRedis(), apiToken: 'token', logger: captureLogger().logger, sessions: sessions as never })
   const request = (method: string, body?: unknown, authorized = true, suffix = '') => app.request(`/api/sessions/${A}/conversation${suffix}`, {
@@ -30,5 +30,11 @@ describe('API de conversas', () => {
       expect((await s.request('PUT', config)).status).toBe(400)
     }
     expect(s.sessions.configureConversation).not.toHaveBeenCalled()
+  })
+  it('rodízio permite habilitar conta sem destinatário fixo', async () => {
+    const s = setup()
+    const config = { ...s.config, mode: 'rotating', targetSessionId: null }
+    expect((await s.request('PUT', config)).status).toBe(200)
+    expect(s.sessions.configureConversation).toHaveBeenCalledWith(A, config)
   })
 })
