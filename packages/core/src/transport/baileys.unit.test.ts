@@ -25,6 +25,8 @@ function mockSocket() {
       'g1@g.us': { id: 'g1@g.us', subject: 'Grupo 1', size: 5, announce: true, linkedParent: 'c@g.us' },
       'g2@g.us': { id: 'g2@g.us', subject: 'Grupo 2', participants: [{}, {}] },
     })),
+    groupInviteCode: vi.fn(async () => 'TEST_CODE'),
+    groupAcceptInvite: vi.fn(async () => 'g1@g.us'),
     requestPairingCode: vi.fn(async () => 'PAIR1234'),
     logout: vi.fn(async () => {
       ev.emit('connection.update', { connection: 'close', lastDisconnect: { error: boom(401) } })
@@ -78,6 +80,17 @@ describe('createProxyAgent (AC-T04-03)', () => {
 })
 
 describe('BaileysTransport', () => {
+  it('convites usam o socket conectado e preservam o código e o grupo retornado', async () => {
+    const { transport, sockets, auth } = setup()
+    await expect(transport.groupAcceptInvite('TEST_CODE')).rejects.toBeInstanceOf(TransportNotConnectedError)
+    await transport.connect({ sessionId: 's', auth })
+    sockets[0]!.ev.emit('connection.update', { connection: 'open' })
+    await expect(transport.groupInviteCode('g1@g.us')).resolves.toBe('TEST_CODE')
+    await expect(transport.groupAcceptInvite('TEST_CODE')).resolves.toBe('g1@g.us')
+    expect(sockets[0]!.groupInviteCode).toHaveBeenCalledWith('g1@g.us')
+    expect(sockets[0]!.groupAcceptInvite).toHaveBeenCalledWith('TEST_CODE')
+    expect(toIncomingMessage({ key: { id: 'm', remoteJid: '123@lid', remoteJidAlt: '5511@s.whatsapp.net' }, message: { conversation: 'oi' } })).toMatchObject({ fromAlt: '5511@s.whatsapp.net' })
+  })
   it('sem proxyUrl não passa agent nem fetchAgent', async () => {
     const { transport, configs, auth } = setup()
     await transport.connect({ sessionId: 's', auth })

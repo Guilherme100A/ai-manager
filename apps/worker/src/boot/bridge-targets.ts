@@ -1,7 +1,7 @@
 // Alvos da ponte interna (T16) montados a partir das peças do worker. T20: sessions.addGroupParticipant usa o
 // GroupParticipantService (checagens, admin, freio de 1/min e transporte da sessão admin).
-import { GroupParticipantService, type MessageQueue } from '@wsm/core'
-import type { Database } from '@wsm/db'
+import { GroupInviteService, GroupParticipantService, SendPipeline, SessionStore, type MessageQueue } from '@wsm/core'
+import { auditLogs, type Database } from '@wsm/db'
 import type { HealthMonitor } from '../health'
 import type { SessionManager } from '../sessions'
 import type { BridgeTargets } from './internal-server'
@@ -22,7 +22,21 @@ export function createBridgeTargets(opts: CreateBridgeTargetsOptions): BridgeTar
     getTransport: (id) => (manager.isConnected(id) ? manager.getTransport(id) : undefined),
     ...(opts.groupAddNow ? { now: opts.groupAddNow } : {}),
   })
+  const getTransport = (id: string) => manager.isConnected(id) ? manager.getTransport(id) : undefined
+  const invites = new GroupInviteService({
+    sessions: new SessionStore(opts.db),
+    getTransport,
+    pipeline: new SendPipeline({ db: opts.db, queue: opts.queue, getTransport }),
+    cancelMessage: (id) => opts.queue.cancel(id),
+    audit: async (input, detail) => {
+      await opts.db.insert(auditLogs).values({
+        actor: input.actor, action: 'group.invite.flow', targetType: 'session', targetId: input.sourceSessionId,
+        detail: { targetSessionId: input.targetSessionId, ...detail },
+      })
+    },
+  })
   const sessions: BridgeTargets['sessions'] = {
+    runGroupInvite: (input) => invites.run(input),
     create: (input) => manager.create(input),
     list: () => manager.list(),
     get: (id) => manager.get(id),

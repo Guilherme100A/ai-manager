@@ -28,6 +28,8 @@ export interface IncomingMessage {
   id: string
   /** JID do chat (contato ou grupo). */
   from: string
+  /** JID alternativo (telefone quando o chat usa LID). */
+  fromAlt?: string
   /** Autor dentro de um grupo. */
   participant?: string
   fromMe: boolean
@@ -103,6 +105,9 @@ export interface WaTransport {
   on(event: 'receipt', cb: (r: ReceiptUpdate) => void): void
   sendMessage(to: string, content: OutgoingContent): Promise<{ messageId: string }>
   fetchGroups(): Promise<GroupSummary[]>
+  groupInviteCode?(groupId: string): Promise<string>
+  groupAcceptInvite?(code: string): Promise<string | undefined>
+  off?(event: 'message', cb: (message: IncomingMessage) => void): void
   /** T20 — adiciona UM participante a um grupo (ação manual do admin). Só lança TransportNotConnectedError. */
   addGroupParticipant(groupId: string, jid: string): Promise<GroupParticipantResult[]>
   logout(): Promise<void>

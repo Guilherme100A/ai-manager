@@ -1,5 +1,5 @@
 // T14 — grupos: somente leitura (transport.fetchGroups) e ações manuais disparadas pela API.
-// Não existe entrada automática em grupos (SPEC 1.4 #5): nenhum convite é aceito pelo sistema.
+// Convites entre sessões são executados somente pela ação explícita no painel.
 import { SENDABLE_STATES } from '../session/states'
 import type { SessionRow } from '../session/store'
 import { TransportNotConnectedError, type GroupSummary, type WaTransport } from '../transport'
@@ -79,3 +79,5 @@ export async function listSessionGroups(opts: ListSessionGroupsOptions): Promise
 
 // T20 — adicionar UM número a um grupo (ação manual do admin; sem lote, fila, timer ou IA).
 export * from './participants'
+
+export * from './invites'

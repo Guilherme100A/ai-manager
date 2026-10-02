@@ -6,12 +6,13 @@ import { timingSafeEqual } from 'node:crypto'
 import type { AddressInfo } from 'node:net'
 import { serve, type ServerType } from '@hono/node-server'
 import { Hono, type Context } from 'hono'
-import { TransportNotConnectedError, type EnqueueMessageInput, type GroupSummary, type ListMessagesFilter, type WaTransport } from '@wsm/core'
+import { TransportNotConnectedError, type GroupInviteInput, type EnqueueMessageInput, type GroupSummary, type ListMessagesFilter, type WaTransport } from '@wsm/core'
 import type { FakeControl } from './fake-control'
 
 /** Operações do worker expostas à API. */
 export interface BridgeTargets {
   sessions: {
+    runGroupInvite?(input: GroupInviteInput): Promise<unknown>
     create(input: never): Promise<unknown>
     list(): Promise<unknown>
     get(id: string): Promise<unknown>
@@ -46,6 +47,10 @@ export function bridgeHandlers(t: BridgeTargets): Record<string, Record<string, 
   const str = (v: unknown) => String(v)
   return {
     sessions: {
+      runGroupInvite: async ([input]) => {
+        if (!s.runGroupInvite) throw new Error('runGroupInvite not available')
+        return s.runGroupInvite(input as GroupInviteInput)
+      },
       create: ([input]) => s.create(input as never),
       list: () => s.list(),
       get: ([id]) => s.get(str(id)),

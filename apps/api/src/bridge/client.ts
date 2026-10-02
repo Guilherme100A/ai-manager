@@ -4,6 +4,8 @@
 // domínio são recriados com as classes originais para que o mapeamento HTTP das rotas não mude.
 import {
   GroupAddError,
+  GroupInviteError,
+  SendRejectedError,
   InvalidTransitionError,
   MessageNotFoundError,
   MessageTransitionError,
@@ -13,6 +15,8 @@ import {
   TransportNotConnectedError,
   type EnqueueMessageInput,
   type GroupAddOutcome,
+  type GroupInviteInput,
+  type GroupInviteOutcome,
   type GroupSummary,
   type MessagesControl,
   type MessageView,
@@ -75,6 +79,10 @@ export function reviveError(e: RemoteErrorPayload): Error {
       return new SessionNotConnectedError(e.sessionId ?? '', msg)
     case 'TransportNotConnectedError':
       return new TransportNotConnectedError(msg)
+    case 'GroupInviteError':
+      return new GroupInviteError(e.code as never, msg)
+    case 'SendRejectedError':
+      return new SendRejectedError(e.code as never, msg, e.details as never)
     case 'GroupAddError':
       return new GroupAddError(e.code as never, msg, (e.details ?? { result: 'failed', attempted: false, jid: null }) as never)
     default: {
@@ -90,6 +98,7 @@ export interface WorkerBridge {
   call<T>(target: string, method: string, ...args: unknown[]): Promise<T>
   sessions: SessionsControl & {
     getTransport(sessionId: string): WaTransport
+    runGroupInvite(input: GroupInviteInput): Promise<GroupInviteOutcome>
     addGroupParticipant(adminSessionId: string, groupId: string, targetSessionId: string): Promise<GroupAddOutcome>
   }
   messages: MessagesControl & SendQueue
@@ -145,6 +154,7 @@ export function createWorkerBridge(opts: WorkerBridgeOptions): WorkerBridge {
   }
 
   const sessions: WorkerBridge['sessions'] = {
+    runGroupInvite: (input) => call('sessions', 'runGroupInvite', input),
     create: (input) => call('sessions', 'create', input),
     list: () => call('sessions', 'list'),
     get: (id) => call('sessions', 'get', id),

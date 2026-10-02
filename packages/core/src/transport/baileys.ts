@@ -90,6 +90,8 @@ export interface BaileysSocketLike {
   end(error: Error | undefined): void | Promise<void>
   /** T20 — `groupParticipantsUpdate(jid, participants, 'add')`. Opcional nos mocks antigos. */
   groupParticipantsUpdate?(jid: string, participants: string[], action: 'add'): Promise<Array<{ status?: string; jid?: string }>>
+  groupInviteCode?(jid: string): Promise<string | undefined>
+  groupAcceptInvite?(code: string): Promise<string | undefined>
   /** Conta autenticada (para saber se é admin dos grupos). */
   user?: { id?: string; lid?: string } | null
 }
@@ -129,7 +131,7 @@ async function defaultSocketFactory(): Promise<BaileysSocketFactory> {
 }
 
 interface RawMessage {
-  key?: { id?: string | null; remoteJid?: string | null; fromMe?: boolean | null; participant?: string | null }
+  key?: { id?: string | null; remoteJid?: string | null; remoteJidAlt?: string | null; fromMe?: boolean | null; participant?: string | null }
   message?: Record<string, unknown> | null
   messageTimestamp?: number | { toNumber(): number } | null
   pushName?: string | null
@@ -165,6 +167,7 @@ export function toIncomingMessage(raw: RawMessage): IncomingMessage | undefined 
     timestamp: seconds !== undefined ? seconds * 1000 : Date.now(),
     type,
   }
+  if (raw.key?.remoteJidAlt) msg.fromAlt = raw.key.remoteJidAlt
   if (raw.key?.participant) msg.participant = raw.key.participant
   if (raw.pushName) msg.pushName = raw.pushName
   if (text !== undefined) msg.text = text
@@ -326,6 +329,20 @@ export class BaileysTransport extends TransportEmitter implements WaTransport {
     const groups = await this.requireSocket().groupFetchAllParticipating()
     const own = new Set([this.sock?.user?.id, this.sock?.user?.lid].filter((v): v is string => typeof v === 'string').map(normalizeJid))
     return Object.values(groups).map((g) => toGroupSummary(g, own))
+  }
+
+  async groupInviteCode(groupId: string): Promise<string> {
+    const sock = this.requireSocket()
+    if (!sock.groupInviteCode) throw new Error('groupInviteCode not available')
+    const code = await sock.groupInviteCode(groupId)
+    if (!code || !/^[A-Za-z0-9_-]+$/.test(code)) throw new Error('invalid group invite code')
+    return code
+  }
+
+  async groupAcceptInvite(code: string): Promise<string | undefined> {
+    const sock = this.requireSocket()
+    if (!sock.groupAcceptInvite) throw new Error('groupAcceptInvite not available')
+    return sock.groupAcceptInvite(code)
   }
 
   /** T20 — adiciona UM participante (`groupParticipantsUpdate(..., 'add')`). Erros do grupo viram status. */

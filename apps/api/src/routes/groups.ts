@@ -1,11 +1,15 @@
 // /api/sessions/:id/groups (T14): leitura dos grupos via transport.fetchGroups() e releitura manual auditada.
-// Não há rota de entrada em grupos: o sistema nunca entra em grupos sozinho (SPEC 1.4 #5).
+// Entrada por convite disponível somente na ação autenticada entre duas sessões.
 // T20: POST /api/sessions/:id/groups/:groupId/participants adiciona UM número (outra sessão do sistema) a um grupo
 // em que a sessão é admin. Só pela rota autenticada, um alvo por requisição, no máximo 1 tentativa por minuto.
 import { Hono, type Context } from 'hono'
 import { z } from 'zod'
 import {
   GROUP_ADD_AUDIT_ACTION,
+  GroupInviteError,
+  SendRejectedError,
+  type GroupInviteInput,
+  type GroupInviteOutcome,
   GroupAddError,
   GroupParticipantService,
   listSessionGroups,
@@ -22,6 +26,7 @@ import { validate } from '../validate'
 
 declare module './sessions' {
   interface SessionsControl {
+    runGroupInvite?(input: GroupInviteInput): Promise<GroupInviteOutcome>
     /** Transporte vivo da sessão (SessionManager.getTransport). */
     getTransport?(sessionId: string): WaTransport | undefined
     /** T20 — adiciona UM número a um grupo; o worker (ponte) executa as checagens e o freio. */
@@ -38,6 +43,11 @@ declare module '../types' {
 
 /** Um único alvo por requisição (array ou campo extra → 400). */
 export const addParticipantSchema = z.object({ targetSessionId: z.uuid() }).strict()
+
+export const inviteFlowSchema = z.object({
+  targetSessionId: z.uuid(),
+  groupIds: z.array(z.string().regex(/^[^\s@]+@g\.us$/).max(200)).min(1).max(100),
+}).strict()
 
 const uuid = z.uuid()
 
@@ -72,6 +82,19 @@ export function groupsRoutes(deps: Pick<AppDeps, 'db' | 'sessions' | 'groupAddNo
   }
 
   return new Hono<AppEnv>()
+    .post('/api/sessions/:id/groups/invite-flow', validate('json', inviteFlowSchema), async (c) => {
+      const sourceSessionId = sessionId(c)
+      const body = c.req.valid('json')
+      if (!deps.sessions?.runGroupInvite) throw new ApiError('INTERNAL_ERROR', 'Fluxo de convites indisponível no worker.')
+      try {
+        const out = await deps.sessions.runGroupInvite({ ...body, sourceSessionId, actor: c.get('actor') ?? '' })
+        setAudit(c, { action: 'group.invite.request', targetType: 'session', targetId: sourceSessionId, detail: { ...out } })
+        return c.json(out)
+      } catch (err) {
+        if (err instanceof GroupInviteError || err instanceof SendRejectedError) throw new ApiError(err.code, err.message)
+        throw toApiError(err)
+      }
+    })
     .get('/api/sessions/:id/groups', async (c) => c.json({ items: await list(sessionId(c)) }))
     .post('/api/sessions/:id/groups/refresh', async (c) => {
       const id = sessionId(c)

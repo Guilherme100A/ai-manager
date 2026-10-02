@@ -18,6 +18,7 @@ export const ERROR_STATUS = {
   // Genéricos (fora da tabela 3.4): rota inexistente e falha inesperada.
   NOT_FOUND: 404,
   INTERNAL_ERROR: 500,
+  GROUP_INVITE_FAILED: 502,
 } as const satisfies Record<string, ContentfulStatusCode>
 
 export type ErrorCode = keyof typeof ERROR_STATUS

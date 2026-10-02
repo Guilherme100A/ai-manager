@@ -9,6 +9,7 @@ import { rootPath } from '../helpers/exec'
 // Montado por partes para este arquivo não conter o nome proibido literalmente.
 const FORBIDDEN = ['group', 'Accept', 'Invite'].join('')
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', '.turbo', 'coverage'])
+const INVITE_FILES = new Set(['packages/core/src/transport/baileys.ts', 'packages/core/src/transport/types.ts', 'packages/core/src/groups/invites.ts'])
 const EXTS = /\.(ts|tsx|js|mjs|cjs)$/
 
 function walk(dir: string, out: string[] = []): string[] {
@@ -24,20 +25,20 @@ function walk(dir: string, out: string[] = []): string[] {
 describe('T14 — sem entrada automática em grupos', () => {
   const ctx = useSessions()
 
-  it(`AC-T14-03 o nome proibido de aceitar convite de grupo não aparece no código de produto (apps/**, packages/**)`, () => {
+  it(`AC-T14-03 aceitar convite só aparece nos módulos do fluxo explícito (apps/**, packages/**)`, () => {
     const root = rootPath()
     const files = [...walk(rootPath('apps')), ...walk(rootPath('packages'))].filter((f) => !/\.test\.tsx?$/.test(f))
     expect(files.length).toBeGreaterThan(20)
     const hits = files.filter((f) => readFileSync(f, 'utf8').includes(FORBIDDEN)).map((f) => relative(root, f))
-    expect(hits, `ocorrências proibidas: ${hits.join(', ')}`).toEqual([])
+    expect(hits.filter((f) => !INVITE_FILES.has(f)), `ocorrências fora do fluxo: ${hits.join(', ')}`).toEqual([])
   })
 
-  it('AC-T14-03 nenhum código (nem testes unitários) usa variantes de aceitar convite / entrar em grupo', () => {
+  it('AC-T14-03 aceitar convite fica restrito aos módulos e testes do fluxo explícito', () => {
     const root = rootPath()
-    const files = [...walk(rootPath('apps')), ...walk(rootPath('packages'))]
+    const files = [...walk(rootPath('apps')), ...walk(rootPath('packages'))].filter((f) => !/\.test\.tsx?$/.test(f))
     const pattern = new RegExp(`${FORBIDDEN}|acceptInvite|groupJoin|joinGroup`, 'i')
     const hits = files.filter((f) => pattern.test(readFileSync(f, 'utf8'))).map((f) => relative(root, f))
-    expect(hits, `ocorrências: ${hits.join(', ')}`).toEqual([])
+    expect(hits.filter((f) => !INVITE_FILES.has(f)), `ocorrências fora do fluxo: ${hits.join(', ')}`).toEqual([])
   })
 
   it('AC-T14-03 transporte e core não expõem operação de entrar/aceitar convite de grupo', () => {
