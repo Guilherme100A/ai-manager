@@ -28,7 +28,7 @@ function setup() {
   const accept = vi.fn(async (_code: string) => { a.setGroups([...a.groups, group]); return group.id })
   Object.assign(a, { inspectGroupInvite: inspect, groupAcceptInvite: accept })
   const transports = new Map([['a', a], ['b', b]])
-  const sessions = new Map(['a', 'b'].map((id) => [id, { id, status: 'WARMING', phone: id === 'a' ? '+5511111111111' : '+5522222222222' } as SessionView]))
+  const sessions = new Map(['a', 'b'].map((id) => [id, { id, status: 'WARMING', proxyId: `proxy-${id}`, phone: id === 'a' ? '+5511111111111' : '+5522222222222' } as SessionView]))
   const emitter = new EventEmitter()
   const manager = Object.assign(emitter, {
     list: async () => [...sessions.values()], get: async (id: string) => sessions.get(id)!,
@@ -56,6 +56,16 @@ describe('entrada automática e mensagem diária', () => {
     expect(s.sendGroup).toHaveBeenCalledWith({ sessionId: 'a', groupId: group.id, content: { text: 'Qual jogo vocês estão curtindo hoje?' }, actor: 'group-automation' })
     expect(s.states.get('a')?.groups[0]?.state).toBe('joined')
     expect(s.leases.size).toBe(0)
+  })
+  it('chip sem proxy não entra nem posta no grupo: descobre o link e encaminha para um chip com proxy', async () => {
+    const s = setup()
+    s.sessions.set('a', { ...s.sessions.get('a')!, proxyId: null }) // chip "normal" sem IP
+    s.configs.set('b', { ...DEFAULT_GROUP_AUTOMATION, enabled: true }) // B tem proxy e recebe a entrada
+    await s.service.run('a')
+    expect(s.accept).not.toHaveBeenCalled()    // nunca entra em grupo
+    expect(s.sendGroup).not.toHaveBeenCalled() // nunca posta no grupo
+    expect(s.model.discover).toHaveBeenCalled() // mas descobre o link público
+    expect(s.invites.run).toHaveBeenCalledWith(expect.objectContaining({ sourceSessionId: 'a', targetSessionId: 'b' }), { groupId: group.id, code: CODE })
   })
   it('não repete pesquisa ou mensagem no dia, inclusive após recriar o serviço', async () => {
     const s = setup()

@@ -33,6 +33,9 @@ export class GroupAutomation {
   private readonly now: () => number
   constructor(private readonly opts: GroupAutomationOptions) { this.now = opts.now ?? Date.now }
 
+  /** Chip "normal" sem proxy (IP) não entra em grupos automaticamente; só chips com proxy entram. O envio continua liberado. */
+  private hasProxy(session: SessionView): boolean { return session.proxyId != null }
+
   async start() {
     this.timer = setInterval(() => void this.tickAll(), 60_000)
     this.timer.unref?.()
@@ -113,8 +116,11 @@ export class GroupAutomation {
       await this.opts.store.saveState(id, state)
 
       // O limite é de entradas por 24 h; o volume recebido nos grupos não participa desta decisão.
+      // Chip com proxy (IP) entra em grupo quando tem vaga. Chip sem proxy NUNCA entra: só descobre o link
+      // público para encaminhar aos chips com proxy (e também nunca posta no grupo, mais abaixo).
       const capacity = await this.capacity(id)
-      if (capacity.canEnter) {
+      const proxied = this.hasProxy(session)
+      if ((proxied && capacity.canEnter) || !proxied) {
         try {
           if (!state.discovery || state.discovery.query !== config.query || now - state.discovery.at >= DAY) {
             // Persiste antes da chamada para evitar repetir pesquisas pagas em caso de falha/restart.
@@ -133,23 +139,29 @@ export class GroupAutomation {
           const candidate = randomItem(candidates)
           if (!candidate) { state.lastError = 'Nenhum novo convite público encontrado no cache da busca. A pesquisa será renovada após 24 h.'; await this.opts.store.saveState(id, state) }
           const code = candidate && inviteCodeFromUrl(candidate.inviteUrl)
-          if (candidate && code && transport.inspectGroupInvite && transport.groupAcceptInvite) {
+          if (candidate && code && transport.inspectGroupInvite) {
             const group = await transport.inspectGroupInvite(code)
-            const latest = await this.capacity(id)
-            if (!actualIds.has(group.id) && latest.canEnter && await this.active(id, transport)) {
-              const managed: ManagedGroup = { id: group.id, name: group.name,
-                topic: [group.name, group.description, candidate.topic].filter(Boolean).join(' — ').slice(0, 800),
-                inviteCode: code, joinedAt: now, state: 'pending' }
-              state.groups.push(managed)
-              state.lastJoinAt = now
-              state.entryTimes.push(now)
+            const topic = [group.name, group.description, candidate.topic].filter(Boolean).join(' — ').slice(0, 800)
+            if (proxied && transport.groupAcceptInvite) {
+              const latest = await this.capacity(id)
+              if (!actualIds.has(group.id) && latest.canEnter && await this.active(id, transport)) {
+                const managed: ManagedGroup = { id: group.id, name: group.name, topic, inviteCode: code, joinedAt: now, state: 'pending' }
+                state.groups.push(managed)
+                state.lastJoinAt = now
+                state.entryTimes.push(now)
+                await this.opts.store.saveState(id, state)
+                await this.opts.audit(id, { action: 'join_started', groupId: group.id })
+                const accepted = await transport.groupAcceptInvite(code)
+                if (accepted && accepted !== group.id) throw new Error('group mismatch')
+                if ((await transport.fetchGroups()).some((g) => g.id === group.id)) managed.state = 'joined'
+                await this.opts.store.saveState(id, state)
+                await this.opts.audit(id, { action: 'join_result', groupId: group.id, state: managed.state })
+              }
+            } else if (!proxied && !state.groups.some((g) => g.inviteCode === code)) {
+              // Chip sem proxy: registra o grupo descoberto apenas para encaminhar; NUNCA entra.
+              state.groups.push({ id: group.id, name: group.name, topic, inviteCode: code, joinedAt: now, state: 'pending' })
               await this.opts.store.saveState(id, state)
-              await this.opts.audit(id, { action: 'join_started', groupId: group.id })
-              const accepted = await transport.groupAcceptInvite(code)
-              if (accepted && accepted !== group.id) throw new Error('group mismatch')
-              if ((await transport.fetchGroups()).some((g) => g.id === group.id)) managed.state = 'joined'
-              await this.opts.store.saveState(id, state)
-              await this.opts.audit(id, { action: 'join_result', groupId: group.id, state: managed.state })
+              await this.opts.audit(id, { action: 'group_discovered', groupId: group.id })
             }
           }
         } catch {
@@ -158,6 +170,12 @@ export class GroupAutomation {
         }
       }
       if (!(await this.active(id, transport))) return
+      if (!proxied) {
+        // Chip sem proxy: só encaminha os grupos descobertos aos chips com proxy; nunca entra nem posta no grupo.
+        for (const group of state.groups.filter((g) => !g.forwardedTo)) await this.forward(id, group, config)
+        await this.opts.store.saveState(id, state)
+        return
+      }
       for (const group of state.groups.filter((g) => g.state === 'joined').sort((a, b) => (a.lastPostDay ?? '').localeCompare(b.lastPostDay ?? ''))) {
         if (!group.forwardedTo) await this.forward(id, group, config)
         if (group.lastPostDay === automationDay(now)) continue
@@ -227,7 +245,8 @@ export class GroupAutomation {
     const candidates = (await this.opts.manager.list()).filter((s) => s.id !== id && (!config.targetSessionId || s.id === config.targetSessionId))
     const eligible = []
     for (const candidate of candidates) {
-      if (SENDABLE_STATES.includes(candidate.status) && this.opts.manager.isConnected(candidate.id) && (await this.opts.store.config(candidate.id)).enabled) eligible.push(candidate)
+      // Só encaminha a entrada para chips com proxy (IP): chip sem proxy não recebe grupo automático.
+      if (this.hasProxy(candidate) && SENDABLE_STATES.includes(candidate.status) && this.opts.manager.isConnected(candidate.id) && (await this.opts.store.config(candidate.id)).enabled) eligible.push(candidate)
     }
     const target = randomItem(eligible)
     if (!target) return
