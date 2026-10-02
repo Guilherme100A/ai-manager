@@ -131,3 +131,18 @@ export interface Webhook {
 }
 
 export const ALERT_EVENTS = ['forbidden_403', 'disconnected', 'error_burst', 'proxy_unavailable', 'warmup_paused', 'health_degraded'] as const
+export interface SessionLink {
+  id: string
+  sourceSessionId: string
+  targetSessionId: string
+  enabled: boolean
+  rules: { matchText: string; replyText: string }
+}
+
+export interface SessionRouteRun {
+  linkId: string
+  inboundId: string
+  status: string
+  messageId: string | null
+  error: string | null
+}

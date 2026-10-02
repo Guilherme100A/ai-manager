@@ -24,7 +24,7 @@
     "@wsm/core": "workspace:*",
     "@wsm/db": "workspace:*",
     "drizzle-orm": "^0.45.3",
-    "hono": "^4.13.9",
+    "hono": "4.13.8",
     "ioredis": "^6.0.0",
     "pg": "^8.23.0",
     "pino": "^10.3.1",

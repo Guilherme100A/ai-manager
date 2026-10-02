@@ -29,6 +29,13 @@
       "when": 1790272817586,
       "tag": "0003_ai_settings",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1790285985966,
+      "tag": "0004_session_router",
+      "breakpoints": true
     }
   ]
 }

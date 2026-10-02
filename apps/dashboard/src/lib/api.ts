@@ -12,6 +12,8 @@ import type {
   MessageStatus,
   QrInfo,
   Session,
+  SessionLink,
+  SessionRouteRun,
   SessionHealth,
   Webhook,
   WebhookChannel,
@@ -82,6 +84,13 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
 const enc = encodeURIComponent
 
 export const api = {
+  sessionLinks: () => request<{ items: SessionLink[] }>('/api/session-links').then((r) => r.items),
+  sessionRouteRuns: () => request<{ items: SessionRouteRun[] }>('/api/session-links/runs').then((r) => r.items),
+  createSessionLink: (input: Pick<SessionLink, 'sourceSessionId' | 'targetSessionId' | 'rules'>) =>
+    request<SessionLink>('/api/session-links', { body: input }),
+  enableSessionLink: (id: string, enabled: boolean) =>
+    request<SessionLink>(`/api/session-links/${enc(id)}`, { method: 'PATCH', body: { enabled } }),
+  deleteSessionLink: (id: string) => request<void>(`/api/session-links/${enc(id)}`, { method: 'DELETE' }),
   /** Login do administrador (AC-T18-01). Um 401 aqui não limpa o token salvo. */
   login: (username: string, password: string) =>
     request<LoginResult>('/api/auth/login', { body: { username, password }, keepTokenOn401: true }),

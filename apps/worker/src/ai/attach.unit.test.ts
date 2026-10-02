@@ -1,7 +1,7 @@
 // attachAi + SessionManager (T05) com Postgres local (banco descartável), FakeTransport e provedor fake.
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { eq } from 'drizzle-orm'
-import { AiAssistant, generateCredentialsKey, resetCredentialsCrypto, type AiGenerateRequest, type AiProvider } from '@wsm/core'
+import { AiAssistant, generateCredentialsKey, resetCredentialsCrypto, SessionLinkStore, SessionRouter, SendPipeline, MessageStore, toMessageView, type AiGenerateRequest, type AiProvider } from '@wsm/core'
 import { contacts, createDb, createTempDatabase, messages, sessions, suggestions, type Database, type TempDatabase } from '@wsm/db'
 import { SessionManager } from '../sessions/manager'
 import { createFakeTransportFactory, type FakeTransportFactory } from '../sessions/transport-factory'
@@ -68,6 +68,44 @@ const suggestionRows = () => db.select().from(suggestions)
 const inboundRows = () => db.select().from(messages).where(eq(messages.direction, 'inbound'))
 
 describe('attachAi (T13)', () => {
+  it('roteador integrado: A recebe, B enfileira para o contato; duplicata e opt-out não enviam', async () => {
+    const a = await connected()
+    const b = await connected()
+    await db.insert(contacts).values({ phone: '+5511988887777', consent: true })
+    const links = new SessionLinkStore(db)
+    await links.create({ sourceSessionId: a, targetSessionId: b, enabled: true, rules: { matchText: 'oi', replyText: 'Olá!' }, createdBy: 'test' })
+    const store = new MessageStore(db)
+    const pipeline = new SendPipeline({ db, queue: { enqueue: async (input) => toMessageView(await store.create(input)) } })
+    const router = new SessionRouter(links.dependencies((request) => pipeline.send(request)))
+    attachment = attachAi(manager, { db, assistant: assistant(), logger: quiet, routeIncoming: (event) => router.route(event) })
+    await attachment.idle()
+    const msg = fakes.last(a)!.receive({ from: FROM, text: 'oi' })
+    await attachment.idle()
+    const rows = await db.select().from(messages).where(eq(messages.direction, 'outbound'))
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ sessionId: b, phone: '+5511988887777', content: { text: 'Olá!' } })
+    expect(await suggestionRows()).toHaveLength(0)
+    expect((await links.runs())[0]).toMatchObject({ status: 'queued', messageId: rows[0]!.id })
+    await attachment.handleIncoming(a, msg)
+    fakes.last(a)!.receive({ from: FROM, text: 'SAIR' })
+    await attachment.idle()
+    fakes.last(a)!.receive({ from: FROM, text: 'oi' })
+    await attachment.idle()
+    expect(await db.select().from(messages).where(eq(messages.direction, 'outbound'))).toHaveLength(1)
+  })
+
+  it('não chama roteador para mensagem própria, grupo ou opt-out', async () => {
+    const routeIncoming = vi.fn(async () => 1)
+    attachment = attachAi(manager, { db, assistant: assistant(), logger: quiet, routeIncoming })
+    const id = await connected()
+    const t = fakes.last(id)!
+    t.receive({ from: FROM, text: 'oi', fromMe: true })
+    t.receive({ from: '123@g.us', text: 'oi' })
+    t.receive({ from: FROM, text: 'SAIR' })
+    await attachment.idle()
+    expect(routeIncoming).not.toHaveBeenCalled()
+  })
+
   it('mensagem recebida → persiste inbound → sugestão pending_approval; nada é enviado', async () => {
     attachment = attachAi(manager, { db, assistant: assistant(), logger: quiet })
     const id = await connected()

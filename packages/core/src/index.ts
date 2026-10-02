@@ -43,3 +43,4 @@ export * from './safety'
 
 // T13 — IA assistiva (AiAssistant, AnthropicProvider, SuggestionService, aiConfigFromEnv)
 export * from './ai'
+export * from './session-router'

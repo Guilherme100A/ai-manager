@@ -1,6 +1,7 @@
 // T13 — IA assistiva no worker. Único gatilho: o evento `message` do transporte (mensagem recebida real, AC-T13-06).
 // Para cada mensagem recebida: persiste (direction inbound) → opt-out do T07 → classifica e grava a sugestão
-// como pending_approval. Nada é enviado aqui: o envio só acontece na aprovação humana (API → SendPipeline).
+// como pending_approval. Vínculos explicitamente habilitados podem antes enfileirar uma resposta fixa
+// pelo SessionRouter → SendPipeline; sugestões de IA continuam exigindo aprovação humana.
 import { EventEmitter } from 'node:events'
 import {
   AiAssistant,
@@ -9,6 +10,7 @@ import {
   type IncomingMessage,
   type SuggestionView,
   type WaTransport,
+  type RouteEvent,
 } from '@wsm/core'
 import type { Database } from '@wsm/db'
 import { createOptOutHandler, type OptOutHandlerResult } from '../optout'
@@ -34,6 +36,8 @@ export interface AttachAiOptions {
   logger?: AiLogger
   /** Palavras de opt-out (default do T07). */
   optOutKeywords?: readonly string[]
+  /** Central routing after persistence and opt-out, before optional AI suggestions. */
+  routeIncoming?: (event: RouteEvent) => Promise<number>
 }
 
 export type InboundOutcome =
@@ -41,6 +45,7 @@ export type InboundOutcome =
   | { kind: 'duplicate'; messageId: string }
   | { kind: 'opt_out'; messageId: string }
   | { kind: 'no_text'; messageId: string }
+  | { kind: 'routed'; messageId: string; queued: number }
   | { kind: 'suggested'; messageId: string; suggestion: SuggestionView }
   | { kind: 'error'; error: string }
 
@@ -154,9 +159,13 @@ export class AiAttachment extends EventEmitter<AiAttachmentEvents> {
       return { kind: 'opt_out', messageId: inbound.id }
     }
 
-    // (3) Classifica e grava a sugestão como pending_approval. Nada é enviado.
+    // (3) Regras habilitadas têm prioridade; sem envio roteado, gera sugestão com aprovação humana.
     const text = msg.text?.trim()
     if (!text) return { kind: 'no_text', messageId: inbound.id }
+    if (this.opts.routeIncoming) {
+      const queued = await this.opts.routeIncoming({ sessionId, inboundId: msg.id, phone: inbound.phone, text })
+      if (queued > 0) return { kind: 'routed', messageId: inbound.id, queued }
+    }
     const s = await this.opts.assistant.suggest(text)
     const suggestion = await this.suggestions.create(inbound, s)
     this.log.info(

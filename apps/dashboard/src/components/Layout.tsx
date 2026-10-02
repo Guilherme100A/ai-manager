@@ -7,6 +7,7 @@ import { IconBell, IconClose, IconGroups, IconHome, IconLogout, IconMenu, IconMo
 const LINKS: Array<{ route: Route['name']; href: string; label: string; testId: string; icon: () => ReactNode }> = [
   { route: 'home', href: '#/', label: 'Início', testId: 'nav-home', icon: IconHome },
   { route: 'sessions', href: '#/sessions', label: 'Sessões', testId: 'nav-sessions', icon: IconPhone },
+  { route: 'session-links', href: '#/session-links', label: 'Vínculos de sessões', testId: 'nav-session-links', icon: IconPhone },
   { route: 'contacts', href: '#/contacts', label: 'Contatos', testId: 'nav-contacts', icon: IconUsers },
   { route: 'groups', href: '#/groups', label: 'Grupos', testId: 'nav-groups', icon: IconGroups },
   { route: 'alerts', href: '#/alerts', label: 'Alertas', testId: 'nav-alerts', icon: IconBell },

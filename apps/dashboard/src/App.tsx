@@ -12,6 +12,7 @@ import { Login } from './pages/Login'
 import { NewSession } from './pages/NewSession'
 import { SessionDetail } from './pages/SessionDetail'
 import { Sessions } from './pages/Sessions'
+import { SessionLinks } from './pages/SessionLinks'
 
 function Page({ route }: { route: Route }) {
   switch (route.name) {
@@ -19,6 +20,8 @@ function Page({ route }: { route: Route }) {
       return <Home />
     case 'sessions':
       return <Sessions />
+    case 'session-links':
+      return <SessionLinks />
     case 'new-session':
       return <NewSession />
     case 'session':

@@ -18,6 +18,9 @@ import {
   MessageQueue,
   MessageStore,
   SessionLimitsService,
+  SessionLinkStore,
+  SessionRouter,
+  SendPipeline,
   toConnectionOptions,
   type Logger,
 } from '@wsm/core'
@@ -187,10 +190,13 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
 
     // ---- inbound + opt-out (T07) + IA assistiva (T13) ------------------------------------------
     // attachAi assina `message` de cada transporte conectado: persiste o inbound, aplica o opt-out ANTES de tudo
-    // e só então gera sugestões (pending_approval; nada é enviado sem aprovação humana).
+    // e só então aplica vínculos habilitados ou gera sugestões (pending_approval para respostas de IA).
+    const routingPipeline = new SendPipeline({ db, queue, limits, getTransport: (id) => manager.getTransport(id) })
+    const sessionRouter = new SessionRouter(new SessionLinkStore(db).dependencies((request) => routingPipeline.send(request)))
     const ai = attachAi(manager, {
       db,
       logger,
+      routeIncoming: (event) => sessionRouter.route(event),
       // T19 — configuração dinâmica: tabela ai_settings (painel) com fallback no ambiente AI_*, relida a cada
       // AI_SETTINGS_REFRESH_MS (default 5 s) sem restart. Sem chave ou enabled=false → só o fallback determinístico.
       assistant: new AiAssistant({
