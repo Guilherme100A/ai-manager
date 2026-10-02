@@ -83,7 +83,7 @@ type EventHandler = (payload: unknown) => void
 /** Subconjunto do socket do Baileys usado pelo transporte (facilita mocks). */
 export interface BaileysSocketLike {
   ev: { on(event: string, listener: EventHandler): void }
-  sendMessage(jid: string, content: Record<string, unknown>): Promise<{ key?: { id?: string | null } } | undefined>
+  sendMessage(jid: string, content: Record<string, unknown>, options?: { ephemeralExpiration?: number }): Promise<{ key?: { id?: string | null } } | undefined>
   groupFetchAllParticipating(): Promise<Record<string, BaileysGroupLike>>
   requestPairingCode(phoneNumber: string): Promise<string>
   logout(msg?: string): Promise<void>
@@ -120,12 +120,31 @@ export interface BaileysGroupLike {
 export type BaileysSocketConfig = UserFacingSocketConfig
 export type BaileysSocketFactory = (config: BaileysSocketConfig) => BaileysSocketLike
 
+/** Guarda, por conversa (JID), o tempo das mensagens temporárias em segundos (0 = desligado). */
+export interface DisappearingStore {
+  load(): Promise<Record<string, number>>
+  save(jid: string, seconds: number): Promise<void>
+}
+
 export interface BaileysTransportOptions {
   /** Factory do socket; default: `makeWASocket` do Baileys (carregado sob demanda). */
   makeSocket?: BaileysSocketFactory
   /** Opções extras repassadas ao `makeWASocket` (ex.: logger, browser). */
   socketConfig?: Partial<Omit<BaileysSocketConfig, 'auth' | 'agent' | 'fetchAgent'>>
+  /** Persistência dos tempos de mensagens temporárias (sobrevive a reinícios). Sem ela, só em memória. */
+  disappearing?: DisappearingStore
 }
+
+/** `contextInfo.expiration` de qualquer conteúdo da mensagem (mensagens em conversas temporárias o trazem). */
+export function messageExpiration(content: Record<string, unknown> | null | undefined): number | undefined {
+  for (const body of Object.values(content ?? {})) {
+    const expiration = (body as { contextInfo?: { expiration?: unknown } } | null)?.contextInfo?.expiration
+    if (typeof expiration === 'number' && expiration > 0) return expiration
+  }
+  return undefined
+}
+
+interface ChatEphemeralLike { id?: string | null; pnJid?: string | null; lidJid?: string | null; ephemeralExpiration?: number | null }
 
 async function defaultSocketFactory(): Promise<BaileysSocketFactory> {
   const mod = await import('@whiskeysockets/baileys')
@@ -229,9 +248,32 @@ export function mapGroupErrorStatus(code: number | undefined): GroupParticipantS
 export class BaileysTransport extends TransportEmitter implements WaTransport {
   private sock: BaileysSocketLike | undefined
   private connected = false
+  /** JID (normalizado) → segundos das mensagens temporárias da conversa. */
+  private readonly ephemeral = new Map<string, number>()
+  private ephemeralLoad?: Promise<void>
 
   constructor(private readonly options: BaileysTransportOptions = {}) {
     super()
+  }
+
+  /** Atualiza o tempo das temporárias para todos os JIDs da conversa (telefone e LID). 0/null desliga. */
+  private rememberEphemeral(jids: Array<string | null | undefined>, seconds: number | null | undefined) {
+    const value = seconds && seconds > 0 ? seconds : 0
+    for (const raw of jids) {
+      if (!raw) continue
+      const jid = normalizeJid(raw)
+      if ((this.ephemeral.get(jid) ?? 0) === value) continue
+      if (value) this.ephemeral.set(jid, value)
+      else this.ephemeral.delete(jid)
+      void this.options.disappearing?.save(jid, value).catch((err) => this.onListenerError(err, 'connection'))
+    }
+  }
+
+  private rememberChats(chats: ChatEphemeralLike[] | undefined) {
+    // Só conversas que trazem o campo: ausência não significa que as temporárias estão desligadas.
+    for (const chat of chats ?? []) {
+      if (chat && 'ephemeralExpiration' in chat) this.rememberEphemeral([chat.id, chat.pnJid, chat.lidJid], chat.ephemeralExpiration)
+    }
   }
 
   get isConnected(): boolean {
@@ -240,6 +282,10 @@ export class BaileysTransport extends TransportEmitter implements WaTransport {
 
   async connect(opts: ConnectOptions): Promise<void> {
     if (this.sock) await this.close()
+    this.ephemeralLoad ??= (async () => {
+      const saved = (await this.options.disappearing?.load()) ?? {}
+      for (const [jid, seconds] of Object.entries(saved)) if (seconds > 0 && !this.ephemeral.has(jid)) this.ephemeral.set(jid, seconds)
+    })().catch((err) => { this.ephemeralLoad = undefined; this.onListenerError(err, 'connection') })
 
     const config: BaileysSocketConfig = { ...this.options.socketConfig, auth: opts.auth }
     if (opts.proxyUrl) {
@@ -296,6 +342,11 @@ export class BaileysTransport extends TransportEmitter implements WaTransport {
     sock.ev.on(
       'messages.upsert',
       guard<{ messages?: RawMessage[]; type?: string }>((u) => {
+        // Mensagem com contextInfo.expiration: a conversa tem temporárias ligadas com esse tempo.
+        for (const raw of u.messages ?? []) {
+          const expiration = messageExpiration(raw.message)
+          if (expiration) this.rememberEphemeral([raw.key?.remoteJid, raw.key?.remoteJidAlt], expiration)
+        }
         if (u.type !== 'notify') return
         for (const raw of u.messages ?? []) {
           const msg = toIncomingMessage(raw)
@@ -303,6 +354,11 @@ export class BaileysTransport extends TransportEmitter implements WaTransport {
         }
       }),
     )
+
+    // Ligar/desligar temporárias (inclusive pelo celular) chega como chats.update; o histórico inicial traz o estado.
+    sock.ev.on('chats.upsert', guard<ChatEphemeralLike[]>((chats) => this.rememberChats(chats)))
+    sock.ev.on('chats.update', guard<ChatEphemeralLike[]>((chats) => this.rememberChats(chats)))
+    sock.ev.on('messaging-history.set', guard<{ chats?: ChatEphemeralLike[] }>((h) => this.rememberChats(h.chats)))
 
     sock.ev.on(
       'messages.update',
@@ -327,7 +383,12 @@ export class BaileysTransport extends TransportEmitter implements WaTransport {
 
   async sendMessage(to: string, content: OutgoingContent): Promise<{ messageId: string }> {
     const sock = this.requireSocket()
-    const result = await sock.sendMessage(to, content as Record<string, unknown>)
+    await this.ephemeralLoad
+    // Em conversa com temporárias, envia com o mesmo tempo (senão o WhatsApp avisa "Esta mensagem não desaparecerá").
+    const ephemeralExpiration = this.ephemeral.get(normalizeJid(to))
+    const result = ephemeralExpiration
+      ? await sock.sendMessage(to, content as Record<string, unknown>, { ephemeralExpiration })
+      : await sock.sendMessage(to, content as Record<string, unknown>)
     const messageId = result?.key?.id
     if (!messageId) throw new Error('Baileys não devolveu o ID da mensagem enviada')
     return { messageId }

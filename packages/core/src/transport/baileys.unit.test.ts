@@ -12,6 +12,7 @@ import {
   toIncomingMessage,
   type BaileysSocketConfig,
   type BaileysSocketLike,
+  type DisappearingStore,
 } from './baileys'
 import { TransportNotConnectedError, type AuthenticationState, type ConnectionUpdate } from './types'
 
@@ -230,6 +231,58 @@ describe('BaileysTransport', () => {
     await flush()
     await expect(transport.sendMessage('x@s.whatsapp.net', { text: 'a' })).resolves.toEqual({ messageId: 'WAMID-1' })
     expect(sockets[0]!.sendMessage).toHaveBeenCalledWith('x@s.whatsapp.net', { text: 'a' })
+  })
+
+  describe('mensagens temporárias', () => {
+    async function open(disappearing?: DisappearingStore) {
+      const sockets: ReturnType<typeof mockSocket>[] = []
+      const transport = new BaileysTransport({ makeSocket: () => { const s = mockSocket(); sockets.push(s); return s }, ...(disappearing ? { disappearing } : {}) })
+      await transport.connect({ sessionId: 's', auth: setup().auth })
+      const sock = sockets.at(-1)!
+      sock.ev.emit('connection.update', { connection: 'open' })
+      await flush()
+      return { transport, sock }
+    }
+    const sendOpts = (sock: ReturnType<typeof mockSocket>) => (sock.sendMessage.mock.calls.at(-1) as unknown[])[2]
+
+    it('segue o tempo ligado/desligado na conversa (chats.update, inclusive pelo LID/telefone)', async () => {
+      const { transport, sock } = await open()
+      await transport.sendMessage('5511@s.whatsapp.net', { text: 'a' })
+      expect(sendOpts(sock)).toBeUndefined()
+      sock.ev.emit('chats.update', [{ id: '99@lid', pnJid: '5511@s.whatsapp.net', ephemeralExpiration: 86_400 }])
+      await flush()
+      await transport.sendMessage('5511:3@s.whatsapp.net', { text: 'b' })
+      expect(sendOpts(sock)).toEqual({ ephemeralExpiration: 86_400 })
+      sock.ev.emit('chats.update', [{ id: '99@lid', pnJid: '5511@s.whatsapp.net', ephemeralExpiration: 0 }])
+      sock.ev.emit('chats.update', [{ id: '77@s.whatsapp.net', unreadCount: 2 }]) // sem o campo: não mexe
+      await flush()
+      await transport.sendMessage('5511@s.whatsapp.net', { text: 'c' })
+      expect(sendOpts(sock)).toBeUndefined()
+    })
+    it('aprende pelo histórico inicial e pelo contextInfo.expiration das mensagens recebidas', async () => {
+      const { transport, sock } = await open()
+      sock.ev.emit('messaging-history.set', { chats: [{ id: '1@s.whatsapp.net', ephemeralExpiration: 604_800 }] })
+      sock.ev.emit('messages.upsert', { type: 'notify', messages: [{
+        key: { id: 'm1', remoteJid: '55@lid', remoteJidAlt: '2@s.whatsapp.net' },
+        message: { extendedTextMessage: { text: 'oi', contextInfo: { expiration: 7_776_000 } } },
+      }] })
+      await flush()
+      await transport.sendMessage('1@s.whatsapp.net', { text: 'a' })
+      expect(sendOpts(sock)).toEqual({ ephemeralExpiration: 604_800 })
+      await transport.sendMessage('2@s.whatsapp.net', { text: 'b' })
+      expect(sendOpts(sock)).toEqual({ ephemeralExpiration: 7_776_000 })
+    })
+    it('persiste e recarrega os tempos ao reconectar', async () => {
+      const saved: Record<string, number> = {}
+      const store: DisappearingStore = { load: vi.fn(async () => ({ ...saved })), save: vi.fn(async (jid, seconds) => { saved[jid] = seconds }) }
+      const first = await open(store)
+      first.sock.ev.emit('chats.update', [{ id: '1@s.whatsapp.net', ephemeralExpiration: 86_400 }])
+      await flush()
+      expect(store.save).toHaveBeenCalledWith('1@s.whatsapp.net', 86_400)
+      const second = await open(store)
+      await second.transport.sendMessage('1@s.whatsapp.net', { text: 'a' })
+      expect(sendOpts(second.sock)).toEqual({ ephemeralExpiration: 86_400 })
+    })
   })
 
   it('sendTyping mostra e encerra o "digitando…" pelo presence do Baileys', async () => {

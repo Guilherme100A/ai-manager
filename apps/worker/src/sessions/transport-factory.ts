@@ -1,5 +1,5 @@
 // Factories de transporte do SessionManager. WA_TRANSPORT=fake usa o FakeTransport (testes, sem WhatsApp real).
-import { BaileysTransport, FakeTransport, browserForSession, type BaileysTransportOptions, type WaTransport } from '@wsm/core'
+import { BaileysTransport, FakeTransport, browserForSession, type BaileysTransportOptions, type DisappearingStore, type WaTransport } from '@wsm/core'
 import type { TransportFactory } from './manager'
 
 export type TransportKind = 'baileys' | 'fake'
@@ -29,13 +29,14 @@ export function createFakeTransportFactory(): FakeTransportFactory {
 
 /** Factory a partir do ambiente: `WA_TRANSPORT=fake` → FakeTransport; senão BaileysTransport. */
 export function createTransportFactory(
-  opts: { kind?: TransportKind; baileys?: BaileysTransportOptions } = {},
+  opts: { kind?: TransportKind; baileys?: BaileysTransportOptions; disappearing?: (sessionId: string) => DisappearingStore } = {},
 ): TransportFactory {
   const kind = opts.kind ?? transportKindFromEnv()
   if (kind === 'fake') return createFakeTransportFactory().factory
   return (sessionId): WaTransport =>
     new BaileysTransport({
       ...opts.baileys,
+      ...(opts.disappearing ? { disappearing: opts.disappearing(sessionId) } : {}),
       socketConfig: {
         ...opts.baileys?.socketConfig,
         browser: browserForSession(sessionId),

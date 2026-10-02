@@ -38,7 +38,7 @@ import { createWorkerLogger, startObservabilityServer, type ObservabilityServer 
 import { attachAi } from '../ai'
 import { startProxyMonitor, type ProxyMonitor } from '../proxy'
 import { attachQueueToSessions } from '../queue'
-import { createTransportFactory, SessionManager, type TransportFactory } from '../sessions'
+import { createTransportFactory, disappearingKey, redisDisappearingStore, SessionManager, type TransportFactory } from '../sessions'
 import { loadWorkerConfig, type WorkerConfig } from './config'
 import { FakeControl } from './fake-control'
 import { startInternalServer, type InternalServer } from './internal-server'
@@ -109,7 +109,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
 
     // ---- transporte ------------------------------------------------------------------------
     const fake = config.transport === 'fake' ? new FakeControl({ redis, prefix: config.queuePrefix, bootId, logger }) : undefined
-    const baseFactory = opts.transportFactory ?? fake?.factory ?? createTransportFactory({ kind: config.transport })
+    const baseFactory = opts.transportFactory ?? fake?.factory ?? createTransportFactory({ kind: config.transport, disappearing: (id) => redisDisappearingStore(redis, id, config.queuePrefix) })
     const transportFactory: TransportFactory = (sessionId) => {
       const t = baseFactory(sessionId)
       bindTransportSession(t, sessionId)
@@ -263,7 +263,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     const removeSession = bridgeTargets.sessions.remove
     bridgeTargets.sessions.remove = async (id) => {
       const result = await removeSession(id)
-      await Promise.allSettled([conversations.forget(id), groupAutomation.forget(id)])
+      await Promise.allSettled([conversations.forget(id), groupAutomation.forget(id), redis.del(disappearingKey(id, config.queuePrefix))])
       return result
     }
 

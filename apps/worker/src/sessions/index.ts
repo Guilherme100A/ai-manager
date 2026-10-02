@@ -2,3 +2,4 @@
 export * from './manager'
 export * from './transport-factory'
 export { toQrDataUrl } from './qr'
+export * from './disappearing-store'
