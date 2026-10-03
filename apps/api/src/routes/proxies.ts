@@ -1,7 +1,7 @@
 // /api/proxies (T06): CRUD com senha cifrada/URL mascarada e vínculo 1:1 com sessão.
 import { Hono, type Context } from 'hono'
 import { z } from 'zod'
-import { ProxyError, ProxyService, ProxyUrlError, parseProxyUrl } from '@wsm/core'
+import { getProxySharing, MAX_SESSIONS_PER_IP_LIMIT, ProxyError, ProxyService, ProxyUrlError, parseProxyUrl, saveProxySharing } from '@wsm/core'
 import { ApiError } from '../errors'
 import { setAudit } from '../middleware/audit'
 import type { AppDeps, AppEnv } from '../types'
@@ -58,10 +58,19 @@ async function run<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
+const proxySharingSchema = z.object({ enabled: z.boolean(), maxSessionsPerIp: z.number().int().min(1).max(MAX_SESSIONS_PER_IP_LIMIT) }).strict()
+
 export function proxiesRoutes(deps: Pick<AppDeps, 'db'>) {
   const service = new ProxyService(deps.db)
 
   return new Hono<AppEnv>()
+    // Limite de chips por IP (botão no painel). Vale nos próximos cadastros/trocas de proxy; não desfaz vínculos atuais.
+    .get('/api/proxy-sharing', async (c) => c.json(await getProxySharing(deps.db)))
+    .put('/api/proxy-sharing', validate('json', proxySharingSchema), async (c) => {
+      const settings = await saveProxySharing(deps.db, c.req.valid('json'))
+      setAudit(c, { action: 'proxy.sharing.update', targetType: 'settings', targetId: 'proxy-sharing', detail: { ...settings } })
+      return c.json(settings)
+    })
     .get('/api/proxies', async (c) => c.json({ items: await run(() => service.list()) }))
     .post('/api/proxies', validate('json', createProxySchema), async (c) => {
       const proxy = await run(() => service.create(c.req.valid('json')))

@@ -240,6 +240,9 @@ export const API_ALLOWLIST: Array<[string, RegExp]> = [
   ['POST', /^\/api\/session-links$/],
   ['PATCH', /^\/api\/session-links\/[^/]+$/],
   ['DELETE', /^\/api\/session-links\/[^/]+$/],
+  // Limite de chips por IP (botão na página de sessões).
+  ['GET', /^\/api\/proxy-sharing$/],
+  ['PUT', /^\/api\/proxy-sharing$/],
   ['GET', /^\/api\/messages$/],
   ['GET', /^\/api\/messages\/[^/]+\/events$/],
   ['GET', /^\/api\/contacts$/],

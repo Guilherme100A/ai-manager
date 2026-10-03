@@ -30,6 +30,9 @@ export class ApiRequestError extends Error {
   }
 }
 
+/** Limite de chips por IP: ligado, no máximo `maxSessionsPerIp` sessões no mesmo IP/porta de proxy. */
+export interface ProxySharing { enabled: boolean; maxSessionsPerIp: number }
+
 export type FetchFn = (input: string, init?: RequestInit) => Promise<Response>
 
 export interface RequestOptions {
@@ -110,6 +113,9 @@ export const api = {
   pairingCode: (id: string, phone?: string) =>
     request<{ code: string }>(`/api/sessions/${enc(id)}/pairing-code`, { body: phone ? { phone } : {} }),
   deleteSession: (id: string) => request<void>(`/api/sessions/${enc(id)}`, { method: 'DELETE' }),
+  /** Limite de chips por IP do proxy (botão na página de sessões). */
+  proxySharing: () => request<ProxySharing>('/api/proxy-sharing'),
+  saveProxySharing: (input: ProxySharing) => request<ProxySharing>('/api/proxy-sharing', { method: 'PUT', body: input }),
   action: (id: string, action: 'pause' | 'resume' | 'restart' | 'logout') =>
     request<Session>(`/api/sessions/${enc(id)}/${action}`, { method: 'POST' }),
   health: (id: string) => request<SessionHealth>(`/api/sessions/${enc(id)}/health`),

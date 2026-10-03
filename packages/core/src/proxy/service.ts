@@ -5,6 +5,7 @@ import { proxies, sessions, type Database } from '@wsm/db'
 import { decrypt, encrypt } from '../crypto'
 import { isUniqueViolation, ProxyError } from './errors'
 import { buildProxyUrl, maskProxyUrl, parseProxyUrl, type ProxyProtocolName } from './url'
+import { checkProxySharing } from './sharing'
 
 export type ProxyRow = typeof proxies.$inferSelect
 type Executor = Pick<Database, 'select' | 'insert' | 'update' | 'delete'>
@@ -184,6 +185,9 @@ export class ProxyService {
         if (session.proxyId === proxyId) {
           return { proxy: toProxyView(row, sessionId), sessionId, previousProxyId: proxyId, changed: false }
         }
+        // Limite de chips por IP (quando ligado no painel).
+        const refused = await checkProxySharing(tx, row.host, row.port, sessionId)
+        if (refused) throw new ProxyError('PROXY_IN_USE', refused)
         const now = new Date()
         await tx.update(sessions).set({ proxyId, requiresRestart: true, updatedAt: now }).where(eq(sessions.id, sessionId))
         const [updated] = await tx

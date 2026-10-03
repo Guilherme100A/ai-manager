@@ -9,6 +9,7 @@ import {
   type NormalizedInlineProxy,
 } from '../proxy/inline'
 import { decryptProxyPassword } from '../proxy/service'
+import { checkProxySharing } from '../proxy/sharing'
 import { ProxyUrlError } from '../proxy/url'
 import { assertTransition, InvalidTransitionError, type SessionState } from './states'
 
@@ -117,11 +118,15 @@ export class SessionStore {
     try {
       return await this.db.transaction(async (tx) => {
         if (inline) {
+          const refused = await checkProxySharing(tx, inline.host, inline.port)
+          if (refused) throw new SessionError('VALIDATION_ERROR', refused, 'proxy')
           // T17: proxy e sessão na mesma transação; qualquer falha desfaz os dois.
           proxyId = (await insertInlineProxy(tx, inline)).id
         } else if (proxyId) {
-          const [proxy] = await tx.select({ id: proxies.id }).from(proxies).where(eq(proxies.id, proxyId)).for('update')
+          const [proxy] = await tx.select({ id: proxies.id, host: proxies.host, port: proxies.port }).from(proxies).where(eq(proxies.id, proxyId)).for('update')
           if (!proxy) throw new SessionError('PROXY_NOT_FOUND', `proxy ${proxyId} not found`)
+          const refused = await checkProxySharing(tx, proxy.host, proxy.port)
+          if (refused) throw new SessionError('VALIDATION_ERROR', refused, 'proxy')
           const [owner] = await tx.select({ id: sessions.id }).from(sessions).where(eq(sessions.proxyId, proxyId))
           if (owner) throw new SessionError('PROXY_IN_USE', `proxy ${proxyId} is already assigned to another session`)
           await tx.update(proxies).set({ lastChangedAt: new Date(), updatedAt: new Date() }).where(eq(proxies.id, proxyId))
@@ -184,6 +189,10 @@ export class SessionStore {
           // Senha só faz sentido com usuário (a URL do proxy é user:pass@host).
           const desired: NormalizedInlineProxy = { ...inline, password: inline.username ? (keepPassword ? kept : inline.password) : null }
           if (!old || !sameProxy(old, desired)) {
+            // Mesmo IP de antes (só mudou usuário/senha/protocolo) não conta de novo no limite.
+            const sameIp = old && old.host.toLowerCase() === desired.host.toLowerCase() && old.port === desired.port
+            const refused = sameIp ? undefined : await checkProxySharing(tx, desired.host, desired.port, id)
+            if (refused) throw new SessionError('VALIDATION_ERROR', refused, 'proxy')
             proxyChanged = true
             set.proxyId = (await insertInlineProxy(tx, desired)).id
           }

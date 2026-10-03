@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { ProxySharingBar } from '../components/ProxySharingBar'
 import { ErrorText, PageHeader, StateIndicator } from '../components/ui'
 import { formatDateTime } from '../lib/aggregate'
 import { api } from '../lib/api'
@@ -34,6 +35,7 @@ export function Sessions() {
       </PageHeader>
       <ErrorText error={error} />
       <ErrorText error={actionError} testId="action-error" />
+      <ProxySharingBar />
       <div className="table-wrap">
       <table>
         <thead>

@@ -40,6 +40,8 @@ const TABLES = [
   // migration 0004_session_router
   'session_links',
   'session_route_runs',
+  // migration 0006_proxy_settings
+  'proxy_settings',
 ]
 
 /** Quantidade de migrations declaradas no journal do drizzle (cresce a cada migration nova). */
