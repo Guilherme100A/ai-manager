@@ -52,7 +52,7 @@ describe('entrada automática e mensagem diária', () => {
     const s = setup()
     await s.service.run('a')
     expect(s.accept).toHaveBeenCalledWith(CODE)
-    expect(s.model.message).toHaveBeenCalledWith('Jogos', expect.stringContaining('Bate-papo sobre jogos'), undefined)
+    expect(s.model.message).toHaveBeenCalledWith('Jogos', expect.stringContaining('Bate-papo sobre jogos'), undefined, [])
     expect(s.sendGroup).toHaveBeenCalledWith({ sessionId: 'a', groupId: group.id, content: { text: 'Qual jogo vocês estão curtindo hoje?' }, actor: 'group-automation' })
     expect(s.states.get('a')?.groups[0]?.state).toBe('joined')
     expect(s.leases.size).toBe(0)
@@ -142,6 +142,31 @@ describe('entrada automática e mensagem diária', () => {
     await service.run('a')
     expect(s.states.get('a')?.groups[0]?.postAt).toEqual({ day: '2026-10-03', at: Date.parse('2026-10-03T15:00:00Z') })
     expect(s.sendGroup).toHaveBeenCalledTimes(1)
+  })
+  it('antes de postar lê as últimas mensagens do grupo e passa à IA; a própria postagem entra no histórico', async () => {
+    const s = setup()
+    const recent = [{ author: 'Ana', text: 'alguém jogando o lançamento novo?', at: 1 }]
+    const history = { recent: vi.fn(async () => recent), record: vi.fn(async () => undefined) }
+    const service = new GroupAutomation({ ...s.options, random: () => 0, history })
+    await service.run('a')
+    expect(history.recent).toHaveBeenCalledWith('a', group.id)
+    expect(s.model.message).toHaveBeenCalledWith('Jogos', expect.any(String), undefined, recent)
+    expect(history.record).toHaveBeenCalledWith('a', group.id, expect.objectContaining({ text: 'Qual jogo vocês estão curtindo hoje?', fromMe: true }))
+    // Falha ao ler o histórico não impede a postagem (usa só o tema).
+    const t = setup()
+    const broken = { recent: vi.fn(async () => { throw new Error('redis fora') }), record: vi.fn(async () => undefined) }
+    await new GroupAutomation({ ...t.options, random: () => 0, history: broken }).run('a')
+    expect(t.model.message).toHaveBeenCalledWith('Jogos', expect.any(String), undefined, [])
+    expect(t.sendGroup).toHaveBeenCalledTimes(1)
+  })
+  it('grupo repetido na lista (repasse + entrada própria) posta uma vez só no dia', async () => {
+    const s = setup()
+    s.a.setGroups([group])
+    const dup = { id: group.id, name: group.name, topic: 'tema', inviteCode: CODE, joinedAt: Date.parse('2026-10-02T11:00:00Z'), state: 'joined' as const }
+    s.states.set('a', { groups: [dup, { ...dup, forwardedTo: 'b' }], entryTimes: [Date.parse('2026-10-02T11:00:00Z')] })
+    await new GroupAutomation({ ...s.options, random: () => 0 }).run('a')
+    expect(s.sendGroup).toHaveBeenCalledTimes(1)
+    expect(s.states.get('a')!.groups.filter((g) => g.id === group.id)).toHaveLength(1)
   })
   it('envio atrasado (recusado pelo limite) não sai depois das 21 h', async () => {
     const s = setup()

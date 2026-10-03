@@ -3,7 +3,28 @@ import {
   type GroupAutomationConfig, type GroupInviteService, type GroupModel,
   type ManagedGroup, type MessageQueue, type SendPipeline, type SessionLimitsService, type SessionView, type WaTransport,
 } from '@wsm/core'
+import type { GroupHistory } from './history'
 import type { GroupAutomationStore } from './store'
+
+/** Campos da postagem diária: numa entrada repetida, valem os da cópia que postou por último. */
+const postingFields = (g: ManagedGroup) => ({ lastPostDay: g.lastPostDay, postAt: g.postAt, draft: g.draft, draftAttemptDay: g.draftAttemptDay, lastMessageId: g.lastMessageId })
+/** Um grupo por id na lista da conta: entrada repetida faria a mensagem do dia sair duas vezes. */
+function upsertGroup(groups: ManagedGroup[], entry: ManagedGroup): ManagedGroup {
+  const index = groups.findIndex((g) => g.id === entry.id)
+  if (index < 0) { groups.push(entry); return entry }
+  groups[index] = { ...entry, ...postingFields(groups[index]!), forwardedTo: groups[index]!.forwardedTo ?? entry.forwardedTo }
+  return groups[index]!
+}
+function dedupeGroups(groups: ManagedGroup[]): ManagedGroup[] {
+  const byId = new Map<string, ManagedGroup>()
+  for (const g of groups) {
+    const prev = byId.get(g.id)
+    if (!prev) { byId.set(g.id, g); continue }
+    const newer = (g.lastPostDay ?? '') > (prev.lastPostDay ?? '') ? g : prev
+    byId.set(g.id, { ...prev, ...g, ...postingFields(newer), state: prev.state === 'joined' || g.state === 'joined' ? 'joined' : 'pending', forwardedTo: prev.forwardedTo ?? g.forwardedTo })
+  }
+  return [...byId.values()]
+}
 
 const DAY = 86_400_000
 const LEASE = 300_000
@@ -26,6 +47,8 @@ export interface GroupAutomationOptions {
   now?: () => number
   /** Fonte de aleatoriedade (injetável nos testes). Default: Math.random. */
   random?: () => number
+  /** Últimas mensagens de cada grupo (contexto da postagem). Sem ele, a mensagem usa só o tema. */
+  history?: Pick<GroupHistory, 'recent' | 'record'>
 }
 
 const HOUR = 3_600_000
@@ -125,7 +148,7 @@ export class GroupAutomation {
       const now = this.now()
       const actualGroups = await transport.fetchGroups()
       const actualIds = new Set(actualGroups.map((g) => g.id))
-      state.groups = state.groups.filter((group) => actualIds.has(group.id) || (group.state === 'pending' && now - group.joinedAt < DAY))
+      state.groups = dedupeGroups(state.groups.filter((group) => actualIds.has(group.id) || (group.state === 'pending' && now - group.joinedAt < DAY)))
       for (const group of state.groups) if (actualIds.has(group.id)) group.state = 'joined'
       state.entryTimes = (state.entryTimes ?? []).filter((at) => at > now - DAY)
       state.discoveredTimes = (state.discoveredTimes ?? []).filter((at) => at > now - DAY)
@@ -165,8 +188,7 @@ export class GroupAutomation {
             if (proxied && transport.groupAcceptInvite) {
               const latest = await this.capacity(id)
               if (!actualIds.has(group.id) && latest.canEnter && await this.active(id, transport)) {
-                const managed: ManagedGroup = { id: group.id, name: group.name, topic, inviteCode: code, joinedAt: now, state: 'pending' }
-                state.groups.push(managed)
+                const managed = upsertGroup(state.groups, { id: group.id, name: group.name, topic, inviteCode: code, joinedAt: now, state: 'pending' })
                 state.lastJoinAt = now
                 state.entryTimes.push(now)
                 await this.opts.store.saveState(id, state)
@@ -234,7 +256,9 @@ export class GroupAutomation {
             group.draftAttemptDay = day
             await this.opts.store.saveState(id, state)
             const previous = group.draft?.text
-            group.draft = { day, text: await this.opts.model.message(group.name, group.topic, previous) }
+            // Contexto: últimas mensagens do grupo, lidas na hora de escrever (sem histórico, só o tema).
+            const recent = (await this.opts.history?.recent(id, group.id).catch(() => undefined)) ?? []
+            group.draft = { day, text: await this.opts.model.message(group.name, group.topic, previous, recent) }
             await this.opts.store.saveState(id, state)
           }
           const text = group.draft.text
@@ -246,6 +270,8 @@ export class GroupAutomation {
           group.lastMessageId = message.id
           delete state.lastError
           await this.opts.store.saveState(id, state)
+          // A própria postagem entra no histórico (o WhatsApp não a devolve como mensagem recebida).
+          await this.opts.history?.record(id, group.id, { author: '', text, at: now, fromMe: true }).catch(() => undefined)
           await this.opts.audit(id, { action: 'daily_message_queued', groupId: group.id, messageId: message.id })
         } catch (error) {
           // Gates rejeitados não criaram mensagem: permite reavaliar capacidade no próximo ciclo.
@@ -294,7 +320,7 @@ export class GroupAutomation {
       // Marca a tentativa antes do aceite; reinício não causa várias entradas seguidas.
       state.lastJoinAt = this.now()
       state.entryTimes = [...(state.entryTimes ?? []).filter((at) => at > this.now() - DAY), this.now()]
-      state.groups.push({ ...group, joinedAt: this.now(), state: 'pending', forwardedTo: id, lastPostDay: undefined, draft: undefined, draftAttemptDay: undefined, lastMessageId: undefined })
+      upsertGroup(state.groups, { ...group, joinedAt: this.now(), state: 'pending', forwardedTo: id, lastPostDay: undefined, postAt: undefined, draft: undefined, draftAttemptDay: undefined, lastMessageId: undefined })
       await this.opts.store.saveState(target.id, state)
       const out = await this.opts.invites.run({ sourceSessionId: id, targetSessionId: target.id, groupIds: [group.id], actor: 'group-automation' }, { groupId: group.id, code: group.inviteCode })
       const managed = state.groups.find((g) => g.id === group.id)!

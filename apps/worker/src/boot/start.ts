@@ -44,6 +44,7 @@ import { FakeControl } from './fake-control'
 import { startInternalServer, type InternalServer } from './internal-server'
 import { createBridgeTargets } from './bridge-targets'
 import { GroupAutomation } from '../groups/automation'
+import { groupHistoryEntry, redisGroupHistory } from '../groups/history'
 import { RedisGroupAutomationStore } from '../groups/store'
 import { recoverOrphanJobs, type RecoverOrphanJobsResult } from './orphan-jobs'
 import { reconcileProcessing, type ReconcileResult } from './reconcile'
@@ -110,9 +111,15 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     // ---- transporte ------------------------------------------------------------------------
     const fake = config.transport === 'fake' ? new FakeControl({ redis, prefix: config.queuePrefix, bootId, logger }) : undefined
     const baseFactory = opts.transportFactory ?? fake?.factory ?? createTransportFactory({ kind: config.transport, disappearing: (id) => redisDisappearingStore(redis, id, config.queuePrefix) })
+    // Últimas mensagens dos grupos (contexto da postagem automática): gravadas ao chegar, por sessão.
+    const groupHistory = redisGroupHistory(redis, config.queuePrefix)
     const transportFactory: TransportFactory = (sessionId) => {
       const t = baseFactory(sessionId)
       bindTransportSession(t, sessionId)
+      t.on('message', (msg) => {
+        const item = groupHistoryEntry(msg)
+        if (item) void groupHistory.record(sessionId, item.groupId, item.entry).catch(() => undefined)
+      })
       return t
     }
     if (fake) logger.warn({ wa_transport: 'fake' }, 'WA_TRANSPORT=fake: FakeTransport em uso (somente testes)')
@@ -253,7 +260,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     const groupAutomation = new GroupAutomation({
       manager, store: new RedisGroupAutomationStore(redis, config.queuePrefix, env.GROUP_AUTOMATION_AUTO_ENABLE?.trim().toLowerCase() !== 'false'), limits,
       pipeline: routingPipeline, messages: queue, model: new SmallGroupModel(() => groupSettings.resolve()),
-      invites: bridgeTargets.groupInvites, logger,
+      invites: bridgeTargets.groupInvites, logger, history: groupHistory,
       audit: async (sessionId, detail) => {
         const { auditLogs } = await import('@wsm/db')
         await db.insert(auditLogs).values({ actor: 'group-automation', action: 'group.automation', targetType: 'session', targetId: sessionId, detail })
@@ -270,7 +277,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     const removeSession = bridgeTargets.sessions.remove
     bridgeTargets.sessions.remove = async (id) => {
       const result = await removeSession(id)
-      await Promise.allSettled([conversations.forget(id), groupAutomation.forget(id), redis.del(disappearingKey(id, config.queuePrefix))])
+      await Promise.allSettled([conversations.forget(id), groupAutomation.forget(id), redis.del(disappearingKey(id, config.queuePrefix)), groupHistory.forget(id)])
       return result
     }
 
