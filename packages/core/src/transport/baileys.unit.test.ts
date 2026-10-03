@@ -285,6 +285,17 @@ describe('BaileysTransport', () => {
     })
   })
 
+  it('confirma (ack) stanzas <status> que o Baileys não trata, evitando a queda 500 "Stream Errored (ack)"', async () => {
+    const ws = new EventEmitter()
+    const sendNode = vi.fn(async () => undefined)
+    const transport = new BaileysTransport({ makeSocket: () => Object.assign(mockSocket(), { ws, sendNode }) })
+    await transport.connect({ sessionId: 's', auth: setup().auth })
+    ws.emit('CB:status', { tag: 'status', attrs: { id: '2A09AC3F', from: '5511@s.whatsapp.net', type: 'text' } })
+    ws.emit('CB:status', { tag: 'status', attrs: { from: '5511@s.whatsapp.net' } }) // sem id: ignora
+    await flush()
+    expect(sendNode.mock.calls).toEqual([[{ tag: 'ack', attrs: { id: '2A09AC3F', to: '5511@s.whatsapp.net', class: 'status', type: 'text' } }]])
+  })
+
   it('sendTyping mostra e encerra o "digitando…" pelo presence do Baileys', async () => {
     const { transport, sockets, auth } = setup()
     await expect(transport.sendTyping('x@s.whatsapp.net', true)).rejects.toBeInstanceOf(TransportNotConnectedError)

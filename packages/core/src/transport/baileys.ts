@@ -94,6 +94,9 @@ export interface BaileysSocketLike {
   groupInviteCode?(jid: string): Promise<string | undefined>
   groupAcceptInvite?(code: string): Promise<string | undefined>
   sendPresenceUpdate?(type: 'composing' | 'paused', jid?: string): Promise<void>
+  /** WebSocket do Baileys: emite `CB:<tag>` para cada stanza recebida. */
+  ws?: { on(event: string, listener: (node: BinaryNodeLike) => void): void }
+  sendNode?(node: BinaryNodeLike): Promise<void>
   /** Conta autenticada (para saber se é admin dos grupos). */
   user?: { id?: string; lid?: string } | null
 }
@@ -142,6 +145,16 @@ export function messageExpiration(content: Record<string, unknown> | null | unde
     if (typeof expiration === 'number' && expiration > 0) return expiration
   }
   return undefined
+}
+
+export interface BinaryNodeLike { tag: string; attrs: Record<string, string>; content?: unknown }
+
+/** Ack de uma stanza no formato do WhatsApp Web (`<ack id to class [type] [participant]>`). */
+export function ackFor(node: BinaryNodeLike): BinaryNodeLike {
+  const attrs: Record<string, string> = { id: node.attrs.id ?? '', to: node.attrs.from ?? '', class: node.tag }
+  if (node.attrs.type) attrs.type = node.attrs.type
+  if (node.attrs.participant) attrs.participant = node.attrs.participant
+  return { tag: 'ack', attrs }
 }
 
 interface ChatEphemeralLike { id?: string | null; pnJid?: string | null; lidJid?: string | null; ephemeralExpiration?: number | null }
@@ -354,6 +367,13 @@ export class BaileysTransport extends TransportEmitter implements WaTransport {
         }
       }),
     )
+
+    // O servidor entrega stanzas <status> (atualização de recado) e espera ack. O Baileys não as trata: sem ack, o
+    // servidor derruba a conexão (stream:error com <ack class="status">, código 500) e reentrega a mesma stanza no
+    // próximo login, numa queda a cada ~50 min. Confirmamos como o WhatsApp Web faz.
+    sock.ws?.on('CB:status', guard<BinaryNodeLike>(async (node) => {
+      if (node.attrs?.id && node.attrs.from) await sock.sendNode?.(ackFor(node))
+    }))
 
     // Ligar/desligar temporárias (inclusive pelo celular) chega como chats.update; o histórico inicial traz o estado.
     sock.ev.on('chats.upsert', guard<ChatEphemeralLike[]>((chats) => this.rememberChats(chats)))
