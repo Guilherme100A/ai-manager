@@ -106,6 +106,11 @@ export interface WaTransport {
   on(event: 'message', cb: (m: IncomingMessage) => void): void
   on(event: 'receipt', cb: (r: ReceiptUpdate) => void): void
   sendMessage(to: string, content: OutgoingContent): Promise<{ messageId: string }>
+  /**
+   * Garante que o transporte conhece o tempo das mensagens temporárias da conversa com o JID: se ainda não sabe,
+   * pede ao celular da conta (no máximo de tempos em tempos) e aprende pela resposta. Opcional; não lança.
+   */
+  syncChatSettings?(to: string): Promise<void>
   /** Mostra (`true`) ou encerra (`false`) o "digitando…" para o JID. Opcional; falhar não impede o envio. */
   sendTyping?(to: string, typing: boolean): Promise<void>
   fetchGroups(): Promise<GroupSummary[]>

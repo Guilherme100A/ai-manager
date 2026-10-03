@@ -272,6 +272,42 @@ describe('BaileysTransport', () => {
       await transport.sendMessage('2@s.whatsapp.net', { text: 'b' })
       expect(sendOpts(sock)).toEqual({ ephemeralExpiration: 7_776_000 })
     })
+    it('conversa com tempo desconhecido: pergunta ao celular (histórico sob demanda), espera a resposta e aprende', async () => {
+      const { transport, sock } = await open()
+      const fetchMessageHistory = vi.fn(async () => {
+        // O celular responde com a conversa e a configuração dela.
+        setTimeout(() => sock.ev.emit('messaging-history.set', { chats: [{ id: '77@lid', pnJid: '5511@s.whatsapp.net', ephemeralExpiration: 86_400 }] }), 10)
+        return 'req-1'
+      })
+      Object.assign(sock, { fetchMessageHistory })
+      await transport.syncChatSettings('5511@s.whatsapp.net') // sem âncora (conversa nova): nada a conferir
+      expect(fetchMessageHistory).not.toHaveBeenCalled()
+      await transport.sendMessage('5511@s.whatsapp.net', { text: 'a' })
+      const started = Date.now()
+      await transport.syncChatSettings('5511@s.whatsapp.net')
+      expect(Date.now() - started).toBeLessThan(2_000) // respondeu: não espera o tempo todo
+      expect(fetchMessageHistory).toHaveBeenCalledWith(1, { remoteJid: '5511@s.whatsapp.net', fromMe: true, id: 'WAMID-1' }, expect.any(Number))
+      await transport.sendMessage('5511@s.whatsapp.net', { text: 'b' })
+      expect(sendOpts(sock)).toEqual({ ephemeralExpiration: 86_400 })
+      await transport.syncChatSettings('5511@s.whatsapp.net') // já conhecida: não pergunta de novo
+      expect(fetchMessageHistory).toHaveBeenCalledTimes(1)
+    })
+    it('conversa sem temporárias: pergunta no máximo uma vez a cada 6 h', async () => {
+      const { transport, sock } = await open()
+      const fetchMessageHistory = vi.fn(async () => {
+        setTimeout(() => sock.ev.emit('messaging-history.set', { chats: [{ id: '5522@s.whatsapp.net' }] }), 10)
+        return 'req'
+      })
+      Object.assign(sock, { fetchMessageHistory })
+      sock.ev.emit('messages.upsert', { type: 'notify', messages: [{ key: { id: 'in-1', remoteJid: '5522@s.whatsapp.net' }, message: { conversation: 'oi' }, messageTimestamp: 1_000 }] })
+      await flush()
+      await transport.syncChatSettings('5522@s.whatsapp.net')
+      await transport.syncChatSettings('5522@s.whatsapp.net')
+      expect(fetchMessageHistory).toHaveBeenCalledTimes(1)
+      expect(fetchMessageHistory).toHaveBeenCalledWith(1, { remoteJid: '5522@s.whatsapp.net', fromMe: false, id: 'in-1' }, 1_000_000)
+      await transport.sendMessage('5522@s.whatsapp.net', { text: 'a' })
+      expect(sendOpts(sock)).toBeUndefined()
+    })
     it('persiste e recarrega os tempos ao reconectar', async () => {
       const saved: Record<string, number> = {}
       const store: DisappearingStore = { load: vi.fn(async () => ({ ...saved })), save: vi.fn(async (jid, seconds) => { saved[jid] = seconds }) }

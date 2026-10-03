@@ -94,6 +94,8 @@ export interface BaileysSocketLike {
   groupInviteCode?(jid: string): Promise<string | undefined>
   groupAcceptInvite?(code: string): Promise<string | undefined>
   sendPresenceUpdate?(type: 'composing' | 'paused', jid?: string): Promise<void>
+  /** Pede ao celular o histórico sob demanda de uma conversa (a resposta chega em messaging-history.set). */
+  fetchMessageHistory?(count: number, oldestMsgKey: { remoteJid: string; fromMe: boolean; id: string }, oldestMsgTimestamp: number): Promise<string>
   /** WebSocket do Baileys: emite `CB:<tag>` para cada stanza recebida. */
   ws?: { on(event: string, listener: (node: BinaryNodeLike) => void): void }
   sendNode?(node: BinaryNodeLike): Promise<void>
@@ -141,6 +143,11 @@ export interface BaileysTransportOptions {
   /** Baixa a mídia de uma mensagem recebida; default: `downloadMediaMessage` do Baileys. */
   downloadMedia?: (raw: unknown, sock: BaileysSocketLike) => Promise<Buffer>
 }
+
+/** Intervalo mínimo entre duas conferências da mesma conversa no celular. */
+export const CHAT_CHECK_INTERVAL = 6 * 3_600_000
+/** Quanto esperar a resposta do celular numa conferência. */
+export const CHAT_CHECK_WAIT = 8_000
 
 /** Figurinha recebida aproveitável: até 1 MB; id estável (hash do arquivo) para não guardar repetida. */
 export function receivedSticker(raw: { key?: { fromMe?: boolean | null } | null; message?: Record<string, unknown> | null }): string | undefined {
@@ -287,6 +294,12 @@ export class BaileysTransport extends TransportEmitter implements WaTransport {
   /** JID (normalizado) → segundos das mensagens temporárias da conversa. */
   private readonly ephemeral = new Map<string, number>()
   private ephemeralLoad?: Promise<void>
+  /** Última mensagem vista em cada conversa direta (âncora para pedir o histórico sob demanda ao celular). */
+  private readonly lastKey = new Map<string, { id: string; fromMe: boolean; at: number }>()
+  /** Quando cada conversa foi conferida pela última vez (evita pedir de novo a todo disparo). */
+  private readonly checkedAt = new Map<string, number>()
+  /** Conferências esperando a resposta do celular (resolvidas quando o histórico da conversa chega). */
+  private readonly chatAnswer = new Map<string, () => void>()
 
   constructor(private readonly options: BaileysTransportOptions = {}) {
     super()
@@ -309,6 +322,10 @@ export class BaileysTransport extends TransportEmitter implements WaTransport {
     // Só conversas que trazem o campo: ausência não significa que as temporárias estão desligadas.
     for (const chat of chats ?? []) {
       if (chat && 'ephemeralExpiration' in chat) this.rememberEphemeral([chat.id, chat.pnJid, chat.lidJid], chat.ephemeralExpiration)
+      // Resposta de uma conferência (com ou sem temporárias): libera quem estava esperando.
+      for (const jid of [chat?.id, chat?.pnJid, chat?.lidJid]) {
+        if (jid) this.chatAnswer.get(normalizeJid(jid))?.()
+      }
     }
   }
 
@@ -380,6 +397,13 @@ export class BaileysTransport extends TransportEmitter implements WaTransport {
       guard<{ messages?: RawMessage[]; type?: string }>((u) => {
         // Mensagem com contextInfo.expiration: a conversa tem temporárias ligadas com esse tempo.
         for (const raw of u.messages ?? []) {
+          if (u.type === 'notify') {
+            // Âncora da conversa (pelo telefone e pelo LID) para conferir as temporárias no celular depois.
+            const ts = raw.messageTimestamp
+            const at = (typeof ts === 'number' ? ts : ts ? ts.toNumber() : Date.now() / 1000) * 1000
+            this.rememberKey(raw.key?.remoteJidAlt, raw.key?.id, raw.key?.fromMe === true, at)
+            this.rememberKey(raw.key?.remoteJid, raw.key?.id, raw.key?.fromMe === true, at)
+          }
           const expiration = messageExpiration(raw.message)
           if (expiration) this.rememberEphemeral([raw.key?.remoteJid, raw.key?.remoteJidAlt], expiration)
           // Figurinha recebida: guarda o arquivo original (vira figurinha nativa ao reenviar). Falha não afeta nada.
@@ -442,7 +466,38 @@ export class BaileysTransport extends TransportEmitter implements WaTransport {
       : await sock.sendMessage(to, content as Record<string, unknown>)
     const messageId = result?.key?.id
     if (!messageId) throw new Error('Baileys não devolveu o ID da mensagem enviada')
+    this.rememberKey(to, messageId, true, Date.now())
     return { messageId }
+  }
+
+  private rememberKey(jid: string | null | undefined, id: string | null | undefined, fromMe: boolean, at: number) {
+    if (!jid || !id || !(jid.endsWith('@s.whatsapp.net') || jid.endsWith('@lid'))) return
+    this.lastKey.set(normalizeJid(jid), { id, fromMe, at })
+  }
+
+  /**
+   * Conversa com tempo de temporárias desconhecido: pede ao celular o histórico sob demanda (1 mensagem, ancorada na
+   * última vista); a resposta traz a configuração da conversa e é aprendida em messaging-history.set. No máximo uma
+   * vez a cada CHAT_CHECK_INTERVAL por conversa; sem âncora (conversa nova) não há o que conferir.
+   */
+  async syncChatSettings(to: string): Promise<void> {
+    try {
+      await this.ephemeralLoad
+      const jid = normalizeJid(to)
+      const sock = this.sock
+      if (this.ephemeral.has(jid) || !sock?.fetchMessageHistory || !this.connected) return
+      if (Date.now() - (this.checkedAt.get(jid) ?? 0) < CHAT_CHECK_INTERVAL) return
+      const anchor = this.lastKey.get(jid)
+      if (!anchor) return
+      this.checkedAt.set(jid, Date.now())
+      const answered = new Promise<void>((resolve) => { this.chatAnswer.set(jid, resolve) })
+      await sock.fetchMessageHistory(1, { remoteJid: jid, fromMe: anchor.fromMe, id: anchor.id }, anchor.at)
+      // Espera a resposta do celular (até CHAT_CHECK_WAIT), para a próxima mensagem já sair com o tempo certo.
+      await Promise.race([answered, new Promise((resolve) => setTimeout(resolve, CHAT_CHECK_WAIT).unref?.())])
+      this.chatAnswer.delete(jid)
+    } catch (err) {
+      this.onListenerError(err, 'connection')
+    }
   }
 
   async sendTyping(to: string, typing: boolean): Promise<void> {

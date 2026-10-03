@@ -395,6 +395,9 @@ export class ConversationAutomation {
       }
       const sender = state.nextSenderId === targetId ? b : a
       const receiver = sender.id === id ? b : a
+      // Confere no celular as temporárias desta conversa, se ainda não souber (espera a resposta por alguns segundos):
+      // assim a mensagem sai com o mesmo tempo da conversa e o WhatsApp não mostra "Esta mensagem não desaparecerá".
+      if (receiver.phone) await this.opts.manager.getTransport(sender.id)?.syncChatSettings?.(phoneToUserJid(receiver.phone))
       // Uma chamada por intervalo. A fala é reaproveitada se um gate rejeitar o envio.
       state.nextAt = now + interval * MINUTE
       await this.opts.store.saveState(id, state)
