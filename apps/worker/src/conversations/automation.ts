@@ -4,6 +4,7 @@ import {
   type SendPipeline, type SessionLimitsService, type SessionView,
 } from '@wsm/core'
 import type { AutomationManager } from '../groups/automation'
+import type { StickerPool } from './stickers'
 import type { ConversationStore } from './store'
 
 const MINUTE = 60_000
@@ -15,6 +16,8 @@ export interface ConversationOptions {
   pipeline: Pick<SendPipeline, 'send'>; messages: Pick<MessageQueue, 'get'> & Partial<Pick<MessageQueue, 'cancel'>>
   /** Procura na fila a mensagem enviada (resolve envio incerto após queda do processo). Sem ela, envio incerto interrompe. */
   findOutbound?(senderId: string, phone: string, text: string, since: number): Promise<string | undefined>
+  /** Figurinhas do aquecimento (pasta + recebidas). Sem ela, não manda figurinha. */
+  stickers?: Pick<StickerPool, 'pick'>
   model: ConversationModel
   allowed(phone: string): Promise<boolean>
   received(receiverId: string, sourcePhone: string, text: string, since: number): Promise<boolean>
@@ -29,6 +32,10 @@ export interface ConversationOptions {
 
 /** Cada disparo sai em até PARTS_MAX mensagens curtas (sorteado), cada uma depois de "digitando…". */
 const PARTS_MAX = 3
+/** Chance de um disparo terminar com figurinha (~1 a cada 7). */
+const STICKER_CHANCE = 1 / 7
+/** Como a figurinha aparece no histórico da conversa (a IA vê que foi mandada uma figurinha). */
+const STICKER_MARK = '[figurinha]'
 /** Quanto esperar a parte anterior sair antes de desistir das seguintes. */
 const PART_SEND_TIMEOUT = 60_000
 
@@ -54,18 +61,18 @@ export class ConversationAutomation {
    * Partes que de fato estão na fila. Parte sem id (o processo caiu ou a fila deu erro no envio) é procurada no banco:
    * se não foi gravada, não saiu — ela e as seguintes são descartadas. undefined: sem como verificar (incerto).
    */
-  private async queuedParts(pending: ConversationPending): Promise<Array<{ text: string; messageId: string }> | undefined> {
+  private async queuedParts(pending: ConversationPending): Promise<Array<{ text: string; messageId: string; sticker?: string }> | undefined> {
     const parts = pending.parts?.length ? pending.parts : pending.text ? [{ text: pending.text, messageId: pending.messageId }] : []
-    const queued: Array<{ text: string; messageId: string }> = []
+    const queued: Array<{ text: string; messageId: string; sticker?: string }> = []
     for (const part of parts) {
       let messageId = part.messageId
       if (!messageId) {
         if (!this.opts.findOutbound) return undefined
         const receiver = await this.opts.manager.get(pending.receiverId)
-        messageId = receiver.phone ? await this.opts.findOutbound(pending.senderId, receiver.phone, part.text, pending.reservedAt) : undefined
+        messageId = receiver.phone ? await this.opts.findOutbound(pending.senderId, receiver.phone, part.sticker ?? part.text, pending.reservedAt) : undefined
         if (!messageId) break
       }
-      queued.push({ text: part.text, messageId })
+      queued.push(part.sticker ? { text: part.text, messageId, sticker: part.sticker } : { text: part.text, messageId })
     }
     return queued
   }
@@ -285,6 +292,15 @@ export class ConversationAutomation {
     }
     return true
   }
+  /** Quantas mensagens a conta ainda pode mandar agora (menor folga entre minuto, hora e dia). */
+  private async room(account: SessionView, config: ConversationConfig) {
+    const limits = await this.opts.limits.get(account.id)
+    let room = Infinity
+    for (const [window, maximum] of [[MINUTE, limits.effective.perMinute], [60 * MINUTE, limits.effective.perHour], [DAY, Math.min(config.maxMessagesPerDay, limits.effective.perDay)]]) {
+      room = Math.min(room, maximum! - await this.opts.limits.countOutbound(account.id, new Date(this.now() - window!)))
+    }
+    return Math.max(0, room)
+  }
   async run(id: string) {
     const lease = await this.opts.store.claim()
     if (!lease) return
@@ -338,7 +354,8 @@ export class ConversationAutomation {
             state.nextAt = now + interval * MINUTE
             if (failedAt >= 0) state.lastError = 'A mensagem falhou ou foi cancelada; a conversa segue no próximo intervalo.'
           } else if (sent.slice(0, parts.length).every((m) => m.sentAt) &&
-            (await Promise.all(parts.map((part) => this.opts.received(pending.receiverId, pending.sourcePhone, part.text, pending.reservedAt)))).every(Boolean)) {
+            // Figurinha não tem texto para conferir no recebimento: basta ter saído.
+            (await Promise.all(parts.filter((part) => !part.sticker).map((part) => this.opts.received(pending.receiverId, pending.sourcePhone, part.text, pending.reservedAt)))).every(Boolean)) {
             state.history = [...state.history, { senderId: pending.senderId, text: pending.text }].slice(-10)
             state.turns++
             // Cada disparo (1 a 3 mensagens com "digitando…") passa a vez: as contas sempre alternam.
@@ -392,26 +409,34 @@ export class ConversationAutomation {
       if (!sender.phone || !receiver.phone) return
       if (!await this.opts.store.renew(lease)) return
       const texts = splitConversationParts(state.draft.text, PARTS_MAX)
+      // Às vezes (~1 a cada 7 disparos) o disparo termina com uma figurinha, como alguém reagindo no WhatsApp.
+      const sticker = this.opts.stickers && this.random() < STICKER_CHANCE ? await this.opts.stickers.pick(this.random) : undefined
+      // O disparo cabe na folga dos limites do remetente: corta do fim (a figurinha sai primeiro), sem passar do teto.
+      const room = await this.room(sender, sender.id === id ? config : peerConfig)
+      const items: Array<{ text: string; sticker?: string }> = [...texts.map((text) => ({ text })), ...(sticker ? [{ text: STICKER_MARK, sticker }] : [])].slice(0, Math.max(1, room))
       const pending: ConversationPending = { ...state.draft, text: '', parts: [], receiverId: receiver.id, sourcePhone: sender.phone, reservedAt: this.now() }
       const parts = pending.parts!
       state.pending = pending
       await this.opts.store.saveState(id, state)
       // Cada parte: espera a anterior sair (mantém a ordem), mostra "digitando…" e enfileira. A parte é gravada
       // na pendência antes do envio, para o recebimento ser reconhecido como desta conversa.
-      for (const [index, text] of texts.entries()) {
+      for (const [index, item] of items.entries()) {
         if (index > 0 && (!await this.waitSent(parts[index - 1]!.messageId!) || !await this.opts.store.renew(lease) || !await this.active(id, targetId))) break
-        await this.typing(sender.id, receiver.phone, text)
-        parts.push({ text })
+        // Figurinha não tem "digitando…": só uma pausa curta, como quem escolhe a figurinha.
+        if (item.sticker) await this.sleep(1_500 + Math.floor(this.random() * 2_500))
+        else await this.typing(sender.id, receiver.phone, item.text)
+        parts.push(item.sticker ? { text: item.text, sticker: item.sticker } : { text: item.text })
         pending.text = parts.map((part) => part.text).join('\n')
         await this.opts.store.saveState(id, state)
         try {
-          const message = await this.opts.pipeline.send({ sessionId: sender.id, phone: receiver.phone, content: { text }, actor: 'session-conversations' })
+          const content = item.sticker ? { sticker: { url: item.sticker } } : { text: item.text }
+          const message = await this.opts.pipeline.send({ sessionId: sender.id, phone: receiver.phone, content, actor: 'session-conversations' })
           parts[index]!.messageId = message.id
           pending.messageId = message.id
           delete state.draft
           delete state.lastError
           await this.opts.store.saveState(id, state)
-          await this.opts.audit(id, { action: 'turn_queued', senderId: sender.id, receiverId: receiver.id, messageId: message.id, part: index + 1, parts: texts.length })
+          await this.opts.audit(id, { action: 'turn_queued', senderId: sender.id, receiverId: receiver.id, messageId: message.id, part: index + 1, parts: items.length, sticker: Boolean(item.sticker) })
         } catch (error) {
           const rejected = error instanceof Error && error.name === 'SendRejectedError'
           if (rejected && index > 0) {

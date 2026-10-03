@@ -296,6 +296,30 @@ describe('BaileysTransport', () => {
     expect(sendNode.mock.calls).toEqual([[{ tag: 'ack', attrs: { id: '2A09AC3F', to: '5511@s.whatsapp.net', class: 'status', type: 'text' } }]])
   })
 
+  it('guarda as figurinhas recebidas (não as próprias, nem acima de 1 MB) e envia figurinha nativa', async () => {
+    const saved: Array<[string, string]> = []
+    const downloadMedia = vi.fn(async () => Buffer.from('webp-data'))
+    const sockets: ReturnType<typeof mockSocket>[] = []
+    const transport = new BaileysTransport({
+      makeSocket: () => { const s = mockSocket(); sockets.push(s); return s },
+      stickers: { save: async (id, data) => { saved.push([id, data.toString()]) } }, downloadMedia,
+    })
+    await transport.connect({ sessionId: 's', auth: setup().auth })
+    const sock = sockets[0]!
+    const sticker = (fromMe: boolean, fileLength: number, sha: number) => ({
+      key: { id: `m${sha}`, remoteJid: '5511@s.whatsapp.net', fromMe },
+      message: { stickerMessage: { fileSha256: new Uint8Array([sha, 1, 2, 3]), fileLength } },
+    })
+    sock.ev.emit('messages.upsert', { type: 'notify', messages: [sticker(false, 20_000, 10), sticker(true, 20_000, 11), sticker(false, 2_000_000, 12)] })
+    sock.ev.emit('messages.upsert', { type: 'append', messages: [sticker(false, 20_000, 13)] }) // histórico: ignora
+    await flush(); await flush()
+    expect(saved).toEqual([['0a010203', 'webp-data']])
+    sock.ev.emit('connection.update', { connection: 'open' })
+    await flush()
+    await transport.sendMessage('5511@s.whatsapp.net', { sticker: { url: '/app/stickers/a.webp' } })
+    expect(sock.sendMessage).toHaveBeenLastCalledWith('5511@s.whatsapp.net', { sticker: { url: '/app/stickers/a.webp' } })
+  })
+
   it('sendTyping mostra e encerra o "digitando…" pelo presence do Baileys', async () => {
     const { transport, sockets, auth } = setup()
     await expect(transport.sendTyping('x@s.whatsapp.net', true)).rejects.toBeInstanceOf(TransportNotConnectedError)

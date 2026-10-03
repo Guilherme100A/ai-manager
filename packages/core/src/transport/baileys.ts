@@ -136,6 +136,29 @@ export interface BaileysTransportOptions {
   socketConfig?: Partial<Omit<BaileysSocketConfig, 'auth' | 'agent' | 'fetchAgent'>>
   /** Persistência dos tempos de mensagens temporárias (sobrevive a reinícios). Sem ela, só em memória. */
   disappearing?: DisappearingStore
+  /** Guarda as figurinhas recebidas (de pessoas e grupos) para o aquecimento reaproveitar. */
+  stickers?: { save(id: string, data: Buffer): Promise<void> }
+  /** Baixa a mídia de uma mensagem recebida; default: `downloadMediaMessage` do Baileys. */
+  downloadMedia?: (raw: unknown, sock: BaileysSocketLike) => Promise<Buffer>
+}
+
+/** Figurinha recebida aproveitável: até 1 MB; id estável (hash do arquivo) para não guardar repetida. */
+export function receivedSticker(raw: { key?: { fromMe?: boolean | null } | null; message?: Record<string, unknown> | null }): string | undefined {
+  const sticker = raw.message?.stickerMessage as { fileSha256?: Uint8Array | string; fileLength?: number | { toNumber(): number } } | undefined
+  if (!sticker || raw.key?.fromMe) return undefined
+  const length = typeof sticker.fileLength === 'number' ? sticker.fileLength : sticker.fileLength?.toNumber?.() ?? 0
+  if (length > 1_000_000) return undefined
+  const sha = sticker.fileSha256
+  if (!sha) return undefined
+  return (typeof sha === 'string' ? Buffer.from(sha, 'base64') : Buffer.from(sha)).toString('hex').slice(0, 32)
+}
+
+async function defaultDownloadMedia(raw: unknown): Promise<Buffer> {
+  const mod = (await import('@whiskeysockets/baileys')) as unknown as {
+    downloadMediaMessage: (msg: unknown, type: 'buffer', options: object) => Promise<Buffer>
+  }
+  // Sem pedido de reenvio: figurinha com mídia expirada só não é guardada.
+  return mod.downloadMediaMessage(raw, 'buffer', {})
 }
 
 /** `contextInfo.expiration` de qualquer conteúdo da mensagem (mensagens em conversas temporárias o trazem). */
@@ -359,6 +382,14 @@ export class BaileysTransport extends TransportEmitter implements WaTransport {
         for (const raw of u.messages ?? []) {
           const expiration = messageExpiration(raw.message)
           if (expiration) this.rememberEphemeral([raw.key?.remoteJid, raw.key?.remoteJidAlt], expiration)
+          // Figurinha recebida: guarda o arquivo original (vira figurinha nativa ao reenviar). Falha não afeta nada.
+          const stickerId = u.type === 'notify' ? receivedSticker(raw) : undefined
+          if (stickerId && this.options.stickers) {
+            const sink = this.options.stickers
+            void (this.options.downloadMedia ?? defaultDownloadMedia)(raw, sock)
+              .then((data) => sink.save(stickerId, data))
+              .catch(() => undefined)
+          }
         }
         if (u.type !== 'notify') return
         for (const raw of u.messages ?? []) {

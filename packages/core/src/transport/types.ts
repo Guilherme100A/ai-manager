@@ -57,6 +57,8 @@ export type OutgoingContent =
   | { video: MediaRef; caption?: string; mimetype?: string }
   | { audio: MediaRef; mimetype?: string; ptt?: boolean }
   | { document: MediaRef; mimetype: string; fileName?: string; caption?: string }
+  /** Figurinha nativa do WhatsApp (arquivo .webp). */
+  | { sticker: MediaRef }
 
 export interface GroupSummary {
   id: string

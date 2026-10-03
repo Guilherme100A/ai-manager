@@ -45,6 +45,7 @@ import { startInternalServer, type InternalServer } from './internal-server'
 import { createBridgeTargets } from './bridge-targets'
 import { GroupAutomation } from '../groups/automation'
 import { groupHistoryEntry, redisGroupHistory } from '../groups/history'
+import { fileStickerPool } from '../conversations/stickers'
 import { RedisGroupAutomationStore } from '../groups/store'
 import { recoverOrphanJobs, type RecoverOrphanJobsResult } from './orphan-jobs'
 import { reconcileProcessing, type ReconcileResult } from './reconcile'
@@ -108,9 +109,11 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     onStop('redis', () => redis.quit())
     const inflight: InflightStore = redisInflightStore(redis, config.queuePrefix)
 
+    // Figurinhas do aquecimento: .webp da pasta + as recebidas pelos chips (guardadas em <pasta>/coletadas).
+    const stickers = fileStickerPool(env.STICKERS_DIR?.trim() || '/app/stickers')
     // ---- transporte ------------------------------------------------------------------------
     const fake = config.transport === 'fake' ? new FakeControl({ redis, prefix: config.queuePrefix, bootId, logger }) : undefined
-    const baseFactory = opts.transportFactory ?? fake?.factory ?? createTransportFactory({ kind: config.transport, disappearing: (id) => redisDisappearingStore(redis, id, config.queuePrefix) })
+    const baseFactory = opts.transportFactory ?? fake?.factory ?? createTransportFactory({ kind: config.transport, disappearing: (id) => redisDisappearingStore(redis, id, config.queuePrefix), stickers })
     // Últimas mensagens dos grupos (contexto da postagem automática): gravadas ao chegar, por sessão.
     const groupHistory = redisGroupHistory(redis, config.queuePrefix)
     const transportFactory: TransportFactory = (sessionId) => {
@@ -215,10 +218,12 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
       manager, store: new RedisConversationStore(redis, env.CONVERSATIONS_AUTO_ROTATE?.trim().toLowerCase() !== 'false'), limits, pipeline: routingPipeline, messages: queue,
       model: new SmallConversationModel(() => conversationSettings.resolve()),
       allowed: async (phone) => canMessage(await conversationContacts.findByPhone(phone)).ok,
+      stickers,
       findOutbound: async (senderId, phone, text, since) => {
         const [row] = await db.select({ id: messages.id }).from(messages).where(and(
           eq(messages.sessionId, senderId), eq(messages.direction, 'outbound'), eq(messages.phone, phone),
-          gt(messages.createdAt, new Date(since - 5_000)), sql`${messages.content}->>'text' = ${text}`,
+          gt(messages.createdAt, new Date(since - 5_000)),
+          sql`(${messages.content}->>'text' = ${text} or ${messages.content}->'sticker'->>'url' = ${text})`,
         )).limit(1)
         return row?.id
       },

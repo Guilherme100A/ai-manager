@@ -70,6 +70,9 @@ services:
     # Webhooks de alerta para serviços no host (ex.: receptor de teste em host.docker.internal).
     extra_hosts:
       - 'host.docker.internal:host-gateway'
+    # Figurinhas do aquecimento: .webp colocados em ./stickers + as recebidas (./stickers/coletadas).
+    volumes:
+      - ./stickers:/app/stickers
     # Graceful shutdown: a fila espera o envio em curso terminar antes de fechar as sessões.
     stop_grace_period: 30s
     depends_on:

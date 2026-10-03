@@ -21,7 +21,7 @@ function mulberry32(seed: number) {
 interface Faults { reject: number; uncertain: number; queueFail: number; queueStuck: number; crash: number; restart: number; disconnect: number; modelError: number; slowDelivery: number }
 const NO_FAULTS: Faults = { reject: 0, uncertain: 0, queueFail: 0, queueStuck: 0, crash: 0, restart: 0, disconnect: 0, modelError: 0, slowDelivery: 0 }
 
-interface Msg { id: string; from: string; to: string; text: string; createdAt: number; sentAt?: number; deliveredAt?: number; status: 'queued' | 'sent' | 'failed' | 'cancelled' }
+interface Msg { id: string; from: string; to: string; text: string; sticker?: string; createdAt: number; sentAt?: number; deliveredAt?: number; status: 'queued' | 'sent' | 'failed' | 'cancelled' }
 
 class Crash extends Error { constructor() { super('processo morreu'); this.name = 'Crash' } }
 
@@ -75,10 +75,10 @@ function world(seed: number, ids = ['A', 'B']) {
       release: async (token) => { if (alive() && lease?.token === token) lease = undefined },
     }
     const pipeline = {
-      send: async (input: { sessionId: string; phone: string; content: { text: string } }) => {
+      send: async (input: { sessionId: string; phone: string; content: { text?: string; sticker?: { url: string } } }) => {
         maybeCrash()
         if (rand() < faults.reject) throw Object.assign(new Error('gate'), { name: 'SendRejectedError' })
-        const m: Msg = { id: `m${msgs.length + 1}-${'x'.repeat(Math.floor(rand() * 9))}`, from: input.sessionId, to: phoneOwner(input.phone), text: input.content.text, createdAt: now, status: 'queued' }
+        const m: Msg = { id: `m${msgs.length + 1}-${'x'.repeat(Math.floor(rand() * 9))}`, from: input.sessionId, to: phoneOwner(input.phone), text: input.content.sticker ? `[figurinha]${input.content.sticker.url}#${msgs.length + 1}` : input.content.text!, ...(input.content.sticker ? { sticker: input.content.sticker.url } : {}), createdAt: now, status: 'queued' }
         if (rand() < faults.queueStuck) (m as { stuck?: boolean }).stuck = true
         if (rand() < faults.slowDelivery) (m as { slow?: boolean }).slow = true
         const uncertain = rand() < faults.uncertain
@@ -104,7 +104,7 @@ function world(seed: number, ids = ['A', 'B']) {
       },
     }
     const findOutbound = async (senderId: string, phone: string, text: string, since: number) =>
-      msgs.find((m) => m.from === senderId && sessions.get(m.to)!.phone === phone && m.text === text && m.createdAt >= since - 5_000)?.id
+      msgs.find((m) => m.from === senderId && sessions.get(m.to)!.phone === phone && (m.text === text || m.sticker === text) && m.createdAt >= since - 5_000)?.id
     const manager = {
       list: async () => [...sessions.values()], get: async (id: string) => sessions.get(id)!,
       isConnected: (id: string) => connected.has(id),
@@ -125,6 +125,7 @@ function world(seed: number, ids = ['A', 'B']) {
     }
     const automation = new ConversationAutomation({
       manager: manager as never, store, limits: limits as never, pipeline: pipeline as never, messages: messages as never, model, findOutbound,
+      stickers: { pick: async () => '/stk/figurinha.webp' },
       allowed: async () => true,
       received: async (receiverId, phone, text, since) => {
         settle()
@@ -142,7 +143,7 @@ function world(seed: number, ids = ['A', 'B']) {
   function checkInvariants(where: string) {
     // 1) Nenhuma parte (texto único gerado pela IA) aceita duas vezes pela fila.
     const seen = new Set<string>()
-    for (const m of msgs) {
+    for (const m of msgs.filter((x) => !x.sticker)) {
       if (seen.has(m.text)) log.violations.push(`${where}: duplicada "${m.text}"`)
       seen.add(m.text)
     }
@@ -156,7 +157,14 @@ function world(seed: number, ids = ['A', 'B']) {
     }
     // 4) Partes de um disparo saem em ordem e da mesma conta.
     const byCall = new Map<string, Msg[]>()
-    for (const m of msgs) { const call = m.text.split('.')[0]!; byCall.set(call, [...(byCall.get(call) ?? []), m]) }
+    for (const m of msgs.filter((x) => !x.sticker)) { const call = m.text.split('.')[0]!; byCall.set(call, [...(byCall.get(call) ?? []), m]) }
+    // 4b) Figurinha: logo depois de um texto da mesma conta, depois que ele saiu, no máximo uma por disparo.
+    for (const [i, m] of msgs.entries()) {
+      if (!m.sticker) continue
+      const prev = msgs.slice(0, i).reverse().find((x) => x.from === m.from)
+      if (!prev || prev.sticker) log.violations.push(`${where}: figurinha sem texto antes ou duas seguidas (${m.id})`)
+      else if (m.createdAt < (prev.sentAt ?? Infinity)) log.violations.push(`${where}: figurinha enfileirada antes do texto sair (${m.id})`)
+    }
     for (const [call, parts] of byCall) {
       const order = parts.map((p) => Number(p.text.split('.')[1]))
       if (order.some((n, i) => n !== i + 1)) log.violations.push(`${where}: partes fora de ordem/puladas em ${call}: ${order}`)
@@ -165,13 +173,13 @@ function world(seed: number, ids = ['A', 'B']) {
         if (parts[i]!.createdAt < (parts[i - 1]!.sentAt ?? Infinity)) log.violations.push(`${where}: ${call} parte ${i + 1} enfileirada antes da anterior sair`)
       }
     }
-    // 5) Limite diário respeitado (o disparo pode passar no máximo 2 partes do teto por janela).
+    // 5) Limite diário respeitado: o disparo é cortado para caber na folga, então nunca passa do teto.
     for (const id of sessions.keys()) {
       const cap = configs.get(id)?.maxMessagesPerDay ?? 0
       const out = msgs.filter((m) => m.from === id)
       for (const m of out) {
         const inWindow = out.filter((x) => x.createdAt > m.createdAt - DAY && x.createdAt <= m.createdAt).length
-        if (inWindow > cap + 2) { log.violations.push(`${where}: ${id} passou do limite diário (${inWindow}/${cap})`); break }
+        if (inWindow > cap) { log.violations.push(`${where}: ${id} passou do limite diário (${inWindow}/${cap})`); break }
       }
     }
   }
@@ -212,7 +220,8 @@ describe('simulação da conversa entre contas', () => {
       expect(w.log.violations, `seed ${seed}`).toEqual([])
       expect([...w.states.values()].some((s) => s.halted), `seed ${seed} interrompeu sem falha`).toBe(false)
       expect(w.msgs.length, `seed ${seed} enviou pouco`).toBeGreaterThan(20)
-      expect(w.log.typing, `seed ${seed} sem digitando`).toBeGreaterThanOrEqual(w.msgs.length)
+      expect(w.log.typing, `seed ${seed} sem digitando`).toBeGreaterThanOrEqual(w.msgs.filter((m) => !m.sticker).length)
+      expect(w.msgs.some((m) => m.sticker), `seed ${seed} nunca mandou figurinha`).toBe(true)
     }
   }, 600_000)
 

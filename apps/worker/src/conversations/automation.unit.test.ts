@@ -77,6 +77,38 @@ describe('conversas entre duas contas', () => {
     expect(s.states.get(A)!.turns).toBe(1)
     expect(s.states.get(A)!.history.at(-1)).toEqual({ senderId: A, text: 'opa\ntudo certo?\nviu o trailer novo?' })
   })
+  it('às vezes o disparo termina com figurinha nativa: depois do texto, sem "digitando…", e a vez anda sem conferir texto dela', async () => {
+    const s = setup() // random 0: cai na chance de figurinha (~1/7)
+    const typing = vi.fn(async () => undefined)
+    s.options.manager.getTransport = (() => ({ sendTyping: typing })) as never
+    const pick = vi.fn(async () => '/app/stickers/coletadas/abc.webp')
+    const automation = new ConversationAutomation({ ...s.options, stickers: { pick } })
+    let n = 0
+    s.pipeline.send.mockImplementation(async () => ({ id: `out-${++n}` }))
+    await automation.run(A)
+    expect(s.pipeline.send.mock.calls.map((c) => (c[0] as { content: unknown }).content)).toEqual([
+      { text: 'Qual jogo você recomenda?' }, { sticker: { url: '/app/stickers/coletadas/abc.webp' } },
+    ])
+    expect(typing).toHaveBeenCalledTimes(1) // só o texto mostra "digitando…"
+    s.received.mockImplementation(async (...args: unknown[]) => args[2] === 'Qual jogo você recomenda?')
+    await automation.run(A)
+    expect(s.states.get(A)!.turns).toBe(1)
+    expect(s.states.get(A)!.history.at(-1)).toEqual({ senderId: A, text: 'Qual jogo você recomenda?\n[figurinha]' })
+    // Sem figurinhas na pasta, o disparo sai só com texto.
+    const t = setup()
+    await new ConversationAutomation({ ...t.options, stickers: { pick: async () => undefined } }).run(A)
+    expect(t.pipeline.send).toHaveBeenCalledTimes(1)
+  })
+  it('o disparo é cortado para caber na folga do limite diário (a figurinha sai primeiro)', async () => {
+    const s = setup({ random: () => 0.9 }) // 3 partes
+    s.configs.set(A, { ...s.config, maxMessagesPerDay: 20 })
+    s.limits.countOutbound.mockImplementation(async (_id: string, since: Date) => (since.getTime() < s.options.now() - 3_600_000 ? 18 : 0))
+    s.model.message.mockResolvedValue('opa\ntudo certo?\nviu o trailer?')
+    const automation = new ConversationAutomation({ ...s.options, random: () => 0.05, stickers: { pick: async () => '/app/stickers/a.webp' } })
+    s.model.message.mockResolvedValue('opa\ntudo certo?\nviu o trailer?')
+    await automation.run(A)
+    expect(s.pipeline.send.mock.calls.map((c) => (c[0] as { content: unknown }).content)).toEqual([{ text: 'opa' }, { text: 'tudo certo?' }])
+  })
   it('fala em partes: gate que recusa uma parte seguinte encerra a fala com as partes que saíram', async () => {
     const s = setup({ random: () => 0.5 }) // 2 partes
     s.model.message.mockResolvedValue('opa\ntudo certo?')

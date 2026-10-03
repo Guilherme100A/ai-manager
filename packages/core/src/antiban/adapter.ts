@@ -82,7 +82,7 @@ export function antibanPresetFromEnv(env: Record<string, string | undefined> = p
 export function contentFingerprint(content: OutgoingContent): string {
   if ('text' in content) return content.text
   const caption = 'caption' in content && content.caption ? content.caption : ''
-  const kind = Object.keys(content).find((k) => ['image', 'video', 'audio', 'document'].includes(k)) ?? 'media'
+  const kind = Object.keys(content).find((k) => ['image', 'video', 'audio', 'document', 'sticker'].includes(k)) ?? 'media'
   const media = (content as Record<string, { url?: string } | undefined>)[kind]
   return `[${kind}:${media?.url ?? ''}]${caption}`
 }

@@ -29,7 +29,7 @@ export function createFakeTransportFactory(): FakeTransportFactory {
 
 /** Factory a partir do ambiente: `WA_TRANSPORT=fake` → FakeTransport; senão BaileysTransport. */
 export function createTransportFactory(
-  opts: { kind?: TransportKind; baileys?: BaileysTransportOptions; disappearing?: (sessionId: string) => DisappearingStore } = {},
+  opts: { kind?: TransportKind; baileys?: BaileysTransportOptions; disappearing?: (sessionId: string) => DisappearingStore; stickers?: BaileysTransportOptions['stickers'] } = {},
 ): TransportFactory {
   const kind = opts.kind ?? transportKindFromEnv()
   if (kind === 'fake') return createFakeTransportFactory().factory
@@ -37,6 +37,7 @@ export function createTransportFactory(
     new BaileysTransport({
       ...opts.baileys,
       ...(opts.disappearing ? { disappearing: opts.disappearing(sessionId) } : {}),
+      ...(opts.stickers ? { stickers: opts.stickers } : {}),
       socketConfig: {
         ...opts.baileys?.socketConfig,
         browser: browserForSession(sessionId),
