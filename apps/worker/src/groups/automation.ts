@@ -205,7 +205,8 @@ export class GroupAutomation {
           group.postAt = { day: automationDay(now), at: this.postTime(now) }
           await this.opts.store.saveState(id, state)
         }
-        if (group.postAt.at > now) continue
+        // Antes do horário sorteado ou depois das 21 h (envio atrasado por limite, queda ou falha): fica para amanhã.
+        if (group.postAt.at > now || now >= Date.parse(`${automationDay(now)}T00:00:00-03:00`) + POST_TO_HOUR * HOUR) continue
         if (group.lastMessageId) {
           try {
             const previous = await this.opts.messages.get(group.lastMessageId)

@@ -208,6 +208,13 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
       manager, store: new RedisConversationStore(redis, env.CONVERSATIONS_AUTO_ROTATE?.trim().toLowerCase() !== 'false'), limits, pipeline: routingPipeline, messages: queue,
       model: new SmallConversationModel(() => conversationSettings.resolve()),
       allowed: async (phone) => canMessage(await conversationContacts.findByPhone(phone)).ok,
+      findOutbound: async (senderId, phone, text, since) => {
+        const [row] = await db.select({ id: messages.id }).from(messages).where(and(
+          eq(messages.sessionId, senderId), eq(messages.direction, 'outbound'), eq(messages.phone, phone),
+          gt(messages.createdAt, new Date(since - 5_000)), sql`${messages.content}->>'text' = ${text}`,
+        )).limit(1)
+        return row?.id
+      },
       received: async (receiverId, phone, text, since) => {
         const rows = await db.select({ id: messages.id }).from(messages).where(and(
           eq(messages.sessionId, receiverId), eq(messages.direction, 'inbound'), eq(messages.phone, phone),

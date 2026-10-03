@@ -170,14 +170,45 @@ describe('conversas entre duas contas', () => {
     const s = setup(); await Promise.all([s.automation.run(A), s.automation.run(A)])
     expect(s.pipeline.send).toHaveBeenCalledTimes(1)
   })
-  it('interrompe por falha da fila e por timeout de recebimento', async () => {
+  it('falha da fila ou 2 h sem confirmação não travam: nada é reenviado e a conversa segue sozinha', async () => {
     const s = setup(); await s.automation.run(A)
     s.messages.get.mockResolvedValue({ status: 'failed', sentAt: '' }); await s.automation.run(A)
-    expect(s.states.get(A)!.halted).toBe(true)
+    expect(s.states.get(A)!.pending).toBeUndefined(); expect(s.states.get(A)!.halted).toBeUndefined()
+    expect(s.states.get(A)!.lastError).toContain('falhou')
+    s.messages.get.mockResolvedValue({ status: 'sent', sentAt: new Date(s.options.now()).toISOString() })
+    s.advance(5 * 60_000); await s.automation.run(A)
+    expect(s.pipeline.send).toHaveBeenCalledTimes(2) // tentou de novo no intervalo seguinte
     const timeout = setup(); await timeout.automation.run(A)
+    const cancel = vi.fn(async () => ({}))
+    Object.assign(timeout.messages, { cancel })
     timeout.messages.get.mockResolvedValue({ status: 'sent', sentAt: new Date(timeout.options.now()).toISOString() })
     timeout.advance(2 * 60 * 60_000 + 1); await timeout.automation.run(A)
-    expect(timeout.states.get(A)!.halted).toBe(true)
+    expect(timeout.states.get(A)!.pending).toBeUndefined(); expect(timeout.states.get(A)!.halted).toBeUndefined(); expect(timeout.states.get(A)!.turns).toBe(0)
+    expect(cancel).toHaveBeenCalledWith('out')
+    timeout.advance(30 * 60_000); await timeout.automation.run(A)
+    expect(timeout.pipeline.send).toHaveBeenCalledTimes(2) // nova rodada depois da pausa
+  })
+  it('envio incerto é resolvido pela fila: se foi gravado segue sem reenviar; se não, reenvia o mesmo rascunho', async () => {
+    for (const gravado of [true, false]) {
+      const s = setup()
+      const findOutbound = vi.fn(async () => (gravado ? 'achado' : undefined))
+      Object.assign(s.options, { findOutbound })
+      const automation = new ConversationAutomation(s.options)
+      s.pipeline.send.mockRejectedValueOnce(new Error('timeout'))
+      await automation.run(A)
+      expect(s.states.get(A)!.halted).toBeUndefined()
+      s.received.mockResolvedValue(true)
+      await automation.run(A)
+      expect(findOutbound).toHaveBeenCalledWith(A, s.sessions.get(B)!.phone, 'Qual jogo você recomenda?', expect.any(Number))
+      if (gravado) {
+        expect(s.states.get(A)!.turns).toBe(1) // confirmou a parte achada na fila
+        expect(s.states.get(A)!.draft).toBeUndefined()
+      } else {
+        s.advance(5 * 60_000); await automation.run(A)
+        expect(s.model.message).toHaveBeenCalledTimes(1) // reaproveitou o rascunho, sem nova chamada à IA
+        expect(s.pipeline.send).toHaveBeenCalledTimes(2)
+      }
+    }
   })
   it('reativa após falha conhecida, mas preserva bloqueio de envio incerto', async () => {
     const s = setup(); await s.automation.run(A)

@@ -12,7 +12,9 @@ const OFFLINE_GRACE = 10 * MINUTE
 export interface ConversationOptions {
   manager: AutomationManager; store: ConversationStore
   limits: Pick<SessionLimitsService, 'get' | 'countOutbound'>
-  pipeline: Pick<SendPipeline, 'send'>; messages: Pick<MessageQueue, 'get'>
+  pipeline: Pick<SendPipeline, 'send'>; messages: Pick<MessageQueue, 'get'> & Partial<Pick<MessageQueue, 'cancel'>>
+  /** Procura na fila a mensagem enviada (resolve envio incerto após queda do processo). Sem ela, envio incerto interrompe. */
+  findOutbound?(senderId: string, phone: string, text: string, since: number): Promise<string | undefined>
   model: ConversationModel
   allowed(phone: string): Promise<boolean>
   received(receiverId: string, sourcePhone: string, text: string, since: number): Promise<boolean>
@@ -47,6 +49,25 @@ export class ConversationAutomation {
   private async typing(senderId: string, phone: string, text: string) {
     await this.opts.manager.getTransport(senderId)?.sendTyping?.(phoneToUserJid(phone), true).catch(() => undefined)
     await this.sleep(Math.min(8_000, Math.max(1_500, 1_200 + text.length * 55)) + Math.floor(this.random() * 800))
+  }
+  /**
+   * Partes que de fato estão na fila. Parte sem id (o processo caiu ou a fila deu erro no envio) é procurada no banco:
+   * se não foi gravada, não saiu — ela e as seguintes são descartadas. undefined: sem como verificar (incerto).
+   */
+  private async queuedParts(pending: ConversationPending): Promise<Array<{ text: string; messageId: string }> | undefined> {
+    const parts = pending.parts?.length ? pending.parts : pending.text ? [{ text: pending.text, messageId: pending.messageId }] : []
+    const queued: Array<{ text: string; messageId: string }> = []
+    for (const part of parts) {
+      let messageId = part.messageId
+      if (!messageId) {
+        if (!this.opts.findOutbound) return undefined
+        const receiver = await this.opts.manager.get(pending.receiverId)
+        messageId = receiver.phone ? await this.opts.findOutbound(pending.senderId, receiver.phone, part.text, pending.reservedAt) : undefined
+        if (!messageId) break
+      }
+      queued.push({ text: part.text, messageId })
+    }
+    return queued
   }
   /** Espera a mensagem sair (sentAt) para manter a ordem das partes; false se falhar ou demorar demais. */
   private async waitSent(messageId: string) {
@@ -297,17 +318,26 @@ export class ConversationAutomation {
       const now = this.now()
       if (state.pending) {
         const pending = state.pending
-        if (!pending.messageId) { state.halted = true; state.lastError = 'Envio com resultado incerto: conversa interrompida para evitar duplicação.' }
+        const queued = await this.queuedParts(pending)
+        if (!queued) { state.halted = true; state.lastError = 'Envio com resultado incerto: conversa interrompida para evitar duplicação.' }
         else {
-          // Fala em partes: todas precisam ter saído e chegado. Pendências antigas têm uma parte só.
-          const parts = pending.parts?.length ? pending.parts : [{ text: pending.text, messageId: pending.messageId }]
-          const sent = parts.every((part) => part.messageId) ? await Promise.all(parts.map((part) => this.opts.messages.get(part.messageId!))) : undefined
-          const message = sent?.at(-1)
-          if (!sent || !message) {
-            state.halted = true; state.lastError = 'Envio com resultado incerto: conversa interrompida para evitar duplicação.'
-          } else if (sent.some((m) => ['failed', 'cancelled'].includes(m.status))) {
-            state.halted = true; state.lastError = 'A mensagem falhou ou foi cancelada. Conversa interrompida.'
-          } else if (sent.every((m) => m.sentAt) &&
+          // Se alguma parte foi enfileirada, o rascunho já foi usado (mesmo que o processo tenha caído antes de
+          // apagá-lo): descarta, senão ele seria reenviado na próxima vez desta conta.
+          if (queued.length && state.draft?.senderId === pending.senderId) delete state.draft
+          const sent = await Promise.all(queued.map((part) => this.opts.messages.get(part.messageId)))
+          // Parte que falhou/foi cancelada: as seguintes nunca foram enfileiradas (cada uma espera a anterior sair).
+          const failedAt = sent.findIndex((m) => ['failed', 'cancelled'].includes(m.status))
+          const parts = failedAt >= 0 ? queued.slice(0, failedAt) : queued
+          const message = sent[parts.length - 1]
+          pending.parts = parts
+          pending.text = parts.map((part) => part.text).join('\n')
+          pending.messageId = parts.at(-1)?.messageId
+          if (!message) {
+            // Nada saiu: a mesma conta tenta de novo no próximo intervalo (fala nova ou o rascunho guardado).
+            delete state.pending
+            state.nextAt = now + interval * MINUTE
+            if (failedAt >= 0) state.lastError = 'A mensagem falhou ou foi cancelada; a conversa segue no próximo intervalo.'
+          } else if (sent.slice(0, parts.length).every((m) => m.sentAt) &&
             (await Promise.all(parts.map((part) => this.opts.received(pending.receiverId, pending.sourcePhone, part.text, pending.reservedAt)))).every(Boolean)) {
             state.history = [...state.history, { senderId: pending.senderId, text: pending.text }].slice(-10)
             state.turns++
@@ -323,7 +353,16 @@ export class ConversationAutomation {
               state.turns = 0; state.history = []; state.nextSenderId = this.random() < 0.5 ? id : targetId; state.nextAt = now + 30 * MINUTE
             }
           } else if (now - (message.sentAt ? Date.parse(message.sentAt) : pending.reservedAt) > 2 * 60 * MINUTE) {
-            state.halted = true; state.lastError = 'Sem confirmação de recebimento em duas horas. Conversa interrompida.'
+            // Sem confirmação em 2 h: cancela o que ainda estiver na fila (nada é reenviado) e recomeça após a pausa.
+            for (const part of parts) await this.opts.messages.cancel?.(part.messageId).catch(() => undefined)
+            delete state.pending
+            state.lastError = 'Sem confirmação de recebimento em duas horas; a rodada foi encerrada e recomeça depois da pausa.'
+            if (config.mode === 'rotating') {
+              if (!await this.opts.store.renew(lease)) return
+              await this.finishRotation(id, state, now)
+            } else {
+              state.turns = 0; state.history = []; state.nextSenderId = this.random() < 0.5 ? id : targetId; state.nextAt = now + 30 * MINUTE
+            }
           }
         }
         if (!await this.opts.store.renew(lease)) return
@@ -379,7 +418,8 @@ export class ConversationAutomation {
             // Gate recusou uma parte seguinte: a fala segue só com as partes que já saíram.
             parts.pop(); pending.text = parts.map((part) => part.text).join('\n')
           } else if (rejected) delete state.pending
-          else state.halted = true
+          // Erro incerto: a parte fica sem id e o próximo ciclo confere na fila se ela foi gravada (sem duplicar).
+          else if (!this.opts.findOutbound) state.halted = true
           state.lastError = 'Envio rejeitado ou incerto. Verifique os contatos, os limites e a fila.'
           await this.opts.store.saveState(id, state)
           break

@@ -143,6 +143,19 @@ describe('entrada automática e mensagem diária', () => {
     expect(s.states.get('a')?.groups[0]?.postAt).toEqual({ day: '2026-10-03', at: Date.parse('2026-10-03T15:00:00Z') })
     expect(s.sendGroup).toHaveBeenCalledTimes(1)
   })
+  it('envio atrasado (recusado pelo limite) não sai depois das 21 h', async () => {
+    const s = setup()
+    const service = new GroupAutomation({ ...s.options, random: () => 0.99 }) // sorteia ~20:52
+    s.sendGroup.mockRejectedValue(new SendRejectedError('RATE_LIMIT', 'wait'))
+    await service.run('a')
+    s.advance(12 * 3_600_000 - 5 * 60_000) // 20:55: tenta e é recusado
+    await service.run('a')
+    expect(s.sendGroup).toHaveBeenCalledTimes(1)
+    s.sendGroup.mockResolvedValue({ id: 'daily-1' })
+    s.advance(10 * 60_000) // 21:05: limite liberou, mas já passou da janela
+    await service.run('a')
+    expect(s.sendGroup).toHaveBeenCalledTimes(1)
+  })
   it('depois das 21 h a mensagem do dia fica para amanhã', async () => {
     const s = setup()
     s.advance(12.5 * 3_600_000) // 21:30 em Brasília
@@ -270,4 +283,226 @@ describe('entrada automática e mensagem diária', () => {
     expect(s.service.requestTick('a')).toEqual({ queued: false })
     expect(s.model.discover).not.toHaveBeenCalled()
   })
+})
+
+// Simulação (fuzz) da automação de grupos: chips com e sem proxy, worker morrendo no meio, quedas, convites inválidos,
+// falhas da IA, da fila e do aceite — conferindo invariantes a cada passo. SIM_SEEDS=N roda mais cenários.
+describe('simulação da automação de grupos', () => {
+  const MINUTE = 60_000
+  const HOUR = 60 * MINUTE
+  const DAY = 24 * HOUR
+
+  function mulberry32(seed: number) {
+    return () => {
+      seed |= 0; seed = (seed + 0x6d2b79f5) | 0
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed)
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+    }
+  }
+  class Crash extends Error { constructor() { super('processo morreu'); this.name = 'Crash' } }
+
+  interface Faults { crash: number; restart: number; disconnect: number; inspect: number; accept: number; invite: number; discover: number; message: number; reject: number }
+  const NO_FAULTS: Faults = { crash: 0, restart: 0, disconnect: 0, inspect: 0, accept: 0, invite: 0, discover: 0, message: 0, reject: 0 }
+
+  function world(seed: number) {
+    const rand = mulberry32(seed)
+    let faults = { ...NO_FAULTS }
+    let now = Date.parse('2026-10-03T03:00:00Z') // 00:00 em Brasília
+    const level = Math.floor(rand() * 4) // dia de warm-up
+    const ids = ['P1', 'P2', 'N1', 'N2'] // P = com proxy, N = sem proxy
+    const sessions = new Map(ids.map((id, i) => [id, { id, status: 'WARMING', phone: `+55119999${i}000`, proxyId: id.startsWith('P') ? `proxy-${id}` : null } as SessionView]))
+    const configs = new Map<string, GroupAutomationConfig>(ids.map((id) => [id, { ...DEFAULT_GROUP_AUTOMATION, enabled: rand() < 0.9, maxEntriesPerDay: 1 + Math.floor(rand() * 5) }]))
+    const states = new Map<string, GroupAutomationState>()
+    const leases = new Map<string, { token: string; until: number }>()
+    const connected = new Set(ids)
+    const offlineUntil = new Map<string, number>()
+    const transports = new Map<string, FakeTransport>()
+    const pool = Array.from({ length: 40 }, (_, i) => ({ code: `CODE${String(i).padStart(18, '0')}`, id: `g${i}@g.us`, announce: rand() < 0.2 }))
+    const log = {
+      accepts: [] as Array<{ at: number; session: string; group: string }>,
+      forwards: [] as Array<{ at: number; from: string; to: string; group: string }>,
+      posts: [] as Array<{ at: number; session: string; group: string }>,
+      discovers: [] as Array<{ at: number; session: string; proxiedTargets: number }>,
+      crashes: 0, violations: [] as string[],
+    }
+    const msgs = new Map<string, { status: string; sentAt: string }>()
+    let gen = 0
+    let msgSeq = 0
+
+    for (const id of ids) {
+      const t = new FakeTransport(); t.open()
+      Object.assign(t, {
+        inspectGroupInvite: async (code: string) => {
+          if (rand() < faults.inspect) throw new Error('convite inválido')
+          const g = pool.find((p) => p.code === code)!
+          return { id: g.id, name: `Grupo ${g.id}`, participants: 50, announce: g.announce, description: 'tema' }
+        },
+        groupAcceptInvite: async (code: string) => {
+          if (rand() < faults.accept) throw new Error('aceite falhou')
+          const g = pool.find((p) => p.code === code)!
+          log.accepts.push({ at: now, session: id, group: g.id })
+          if (!t.groups.some((x) => x.id === g.id)) t.setGroups([...t.groups, { id: g.id, name: `Grupo ${g.id}`, participants: 51, announce: g.announce, isAdmin: false }])
+          return g.id
+        },
+      })
+      transports.set(id, t)
+    }
+    const proxiedTargets = (except: string) => ids.filter((x) => x !== except && x.startsWith('P') && connected.has(x) && configs.get(x)!.enabled).length
+
+    function instance() {
+      const myGen = gen
+      const alive = () => myGen === gen
+      const maybeCrash = () => {
+        if (alive() && rand() < faults.crash) { gen++; log.crashes++ }
+        if (!alive()) throw new Crash()
+      }
+      const store: GroupAutomationStore = {
+        config: async (id) => structuredClone(configs.get(id) ?? DEFAULT_GROUP_AUTOMATION),
+        saveConfig: async (id, v) => { maybeCrash(); configs.set(id, structuredClone(v)) },
+        state: async (id) => structuredClone(states.get(id) ?? { groups: [] }),
+        saveState: async (id, v) => { maybeCrash(); states.set(id, structuredClone(v)) },
+        remove: async (id) => { configs.delete(id); states.delete(id) },
+        claim: async (key, ttl) => {
+          const l = leases.get(key)
+          if (!alive() || (l && l.until > now)) return undefined
+          const token = `${myGen}-${rand()}`; leases.set(key, { token, until: now + ttl }); return token
+        },
+        renew: async (key, token, ttl) => { const l = leases.get(key); if (alive() && l?.token === token) l.until = now + ttl },
+        release: async (key, token) => { if (alive() && leases.get(key)?.token === token) leases.delete(key) },
+      }
+      const manager = {
+        list: async () => [...sessions.values()], get: async (id: string) => sessions.get(id)!,
+        getTransport: (id: string) => (connected.has(id) ? transports.get(id) : undefined), isConnected: (id: string) => connected.has(id),
+      }
+      const model = {
+        discover: async () => {
+          maybeCrash()
+          const caller = (new Error().stack ?? '') && current.caller
+          log.discovers.push({ at: now, session: caller, proxiedTargets: proxiedTargets(caller) })
+          if (rand() < faults.discover) throw new Error('busca falhou')
+          return Array.from({ length: 8 }, () => pool[Math.floor(rand() * pool.length)]!).map((g) => ({ inviteUrl: `https://chat.whatsapp.com/${g.code}`, topic: 'jogos' }))
+        },
+        message: async () => { maybeCrash(); if (rand() < faults.message) throw new Error('IA falhou'); return `msg ${++msgSeq}` },
+      }
+      const pipeline = {
+        sendGroup: async (input: { sessionId: string; groupId: string }) => {
+          maybeCrash()
+          if (rand() < faults.reject) throw Object.assign(new Error('gate'), { name: 'SendRejectedError' })
+          const id = `m${++msgSeq}`
+          msgs.set(id, { status: 'sent', sentAt: new Date(now).toISOString() })
+          log.posts.push({ at: now, session: input.sessionId, group: input.groupId })
+          return { id }
+        },
+      }
+      const invites = {
+        run: async (input: { sourceSessionId: string; targetSessionId: string }, pub: { groupId: string; code: string }) => {
+          maybeCrash()
+          if (rand() < faults.invite) throw new Error('convite não recebido')
+          log.forwards.push({ at: now, from: input.sourceSessionId, to: input.targetSessionId, group: pub.groupId })
+          const t = transports.get(input.targetSessionId)!
+          const g = pool.find((p) => p.id === pub.groupId)!
+          if (!t.groups.some((x) => x.id === g.id)) t.setGroups([...t.groups, { id: g.id, name: `Grupo ${g.id}`, participants: 51, announce: g.announce, isAdmin: false }])
+          return { groupId: g.id, targetSessionId: input.targetSessionId, messageId: 'x', result: 'joined' }
+        },
+      }
+      const limits = {
+        get: async () => ({ effective: { perMinute: 5, perHour: 50, perDay: 30, factor: 1 }, warmup: { day: level } }),
+        countOutbound: async (id: string, since: Date) => log.posts.filter((p) => p.session === id && p.at > since.getTime()).length,
+      }
+      const messages = { get: async (id: string) => msgs.get(id) ?? { status: 'sent', sentAt: new Date(now).toISOString() } }
+      const service = new GroupAutomation({
+        manager: manager as never, store, limits: limits as never, pipeline: pipeline as never, messages: messages as never,
+        model, invites: invites as never, audit: async () => undefined, logger: { warn: () => undefined }, now: () => now, random: rand,
+      })
+      return { service, alive }
+    }
+    let current = { ...instance(), caller: '' }
+    const restart = () => { gen++; current = { ...instance(), caller: '' } }
+
+    const spHour = (at: number) => new Date(at - 3 * HOUR).getUTCHours()
+    const spDay = (at: number) => new Date(at - 3 * HOUR).toISOString().slice(0, 10)
+    function check(where: string) {
+      const v = log.violations
+      for (const a of log.accepts) if (!a.session.startsWith('P')) v.push(`${where}: ${a.session} sem proxy entrou em ${a.group}`)
+      for (const f of log.forwards) if (!f.to.startsWith('P')) v.push(`${where}: repassou para ${f.to} sem proxy`)
+      for (const p of log.posts) {
+        if (!p.session.startsWith('P')) v.push(`${where}: ${p.session} sem proxy postou`)
+        if (spHour(p.at) < 9 || spHour(p.at) >= 21) v.push(`${where}: post fora da janela às ${spHour(p.at)}h`)
+      }
+      const perDay = new Map<string, number>()
+      for (const p of log.posts) { const k = `${p.session}|${p.group}|${spDay(p.at)}`; perDay.set(k, (perDay.get(k) ?? 0) + 1) }
+      for (const [k, n] of perDay) if (n > 1) v.push(`${where}: ${n} posts no mesmo dia ${k}`)
+      for (const id of ids) {
+        const cap = Math.max(0, Math.min(configs.get(id)!.maxEntriesPerDay, 30, level + 1))
+        const entries = [...log.accepts.filter((a) => a.session === id).map((a) => a.at), ...log.forwards.filter((f) => f.to === id).map((f) => f.at)].sort((a, b) => a - b)
+        for (const at of entries) {
+          const n = entries.filter((x) => x > at - DAY && x <= at).length
+          if (n > cap) { v.push(`${where}: ${id} entrou ${n}x em 24 h (teto ${cap})`); break }
+        }
+        const discovers = log.discovers.filter((d) => d.session === id)
+        for (const d of discovers) {
+          if (discovers.filter((x) => x.at > d.at - DAY && x.at <= d.at).length > 1) { v.push(`${where}: ${id} pesquisou mais de 1x em 24 h`); break }
+          if (id.startsWith('N') && d.proxiedTargets === 0) v.push(`${where}: ${id} sem proxy pesquisou sem ninguém para receber`)
+        }
+      }
+    }
+
+    async function step() {
+      now += MINUTE
+      for (const id of ids) {
+        if (offlineUntil.has(id) && offlineUntil.get(id)! <= now) { offlineUntil.delete(id); connected.add(id) }
+        else if (connected.has(id) && rand() < faults.disconnect) { connected.delete(id); offlineUntil.set(id, now + Math.floor(rand() * 30) * MINUTE) }
+      }
+      if (rand() < faults.restart) restart()
+      // Como o tickAll: um ciclo por conta, em paralelo. Rodamos em sequência para atribuir a pesquisa à conta certa.
+      for (const id of ids) {
+        current.caller = id
+        try { await current.service.run(id) } catch (err) { if (!(err instanceof Crash)) log.violations.push(`exceção não tratada em ${id}: ${String(err)}`) }
+        if (!current.alive()) restart()
+      }
+    }
+    return {
+      log, states, configs, transports,
+      setFaults: (f: Partial<Faults>) => { faults = { ...NO_FAULTS, ...f } },
+      run: async (steps: number, where: string) => { for (let i = 0; i < steps; i++) { await step(); check(`${where}#${i}`); if (log.violations.length) return } },
+    }
+  }
+
+  const SEEDS = Number(process.env.SIM_SEEDS ?? 3)
+
+
+    it(`sem falhas: só chip com proxy entra/posta, limites e horários respeitados (${SEEDS} seeds)`, async () => {
+      for (let seed = 1; seed <= SEEDS; seed++) {
+        const w = world(seed)
+        await w.run(2 * 24 * 60, `seed ${seed}`)
+        expect(w.log.violations, `seed ${seed}`).toEqual([])
+      }
+    }, 600_000)
+    it(`com falhas e reinícios: invariantes continuam valendo (${SEEDS} seeds)`, async () => {
+      for (let seed = 1; seed <= SEEDS; seed++) {
+        const w = world(50_000 + seed)
+        w.setFaults({ crash: 0.01, restart: 0.005, disconnect: 0.005, inspect: 0.1, accept: 0.1, invite: 0.1, discover: 0.1, message: 0.1, reject: 0.1 })
+        await w.run(2 * 24 * 60, `seed ${50_000 + seed} caos`)
+        expect(w.log.violations, `seed ${50_000 + seed}`).toEqual([])
+      }
+    }, 600_000)
+    it(`chips com proxy e vaga acabam entrando e postando (${SEEDS} seeds)`, async () => {
+      const parados: string[] = []
+      for (let seed = 1; seed <= SEEDS; seed++) {
+        const w = world(90_000 + seed)
+        for (const id of ['P1', 'P2']) w.configs.set(id, { ...w.configs.get(id)!, enabled: true })
+        await w.run(2 * 24 * 60, `seed ${90_000 + seed}`)
+        expect(w.log.violations, `seed ${90_000 + seed}`).toEqual([])
+        for (const id of ['P1', 'P2']) {
+          if (!w.log.accepts.some((a) => a.session === id) && !w.log.forwards.some((f) => f.to === id)) parados.push(`seed ${90_000 + seed}: ${id} nunca entrou`)
+          else if (!w.log.posts.some((p) => p.session === id)) {
+            // Grupo só-admins não aceita mensagem: não postar nele é o correto.
+            const abertos = w.transports.get(id)!.groups.filter((g) => !g.announce)
+            if (abertos.length) parados.push(`seed ${90_000 + seed}: ${id} entrou em ${abertos.length} grupo(s) aberto(s) mas nunca postou`)
+          }
+        }
+      }
+      expect(parados).toEqual([])
+    }, 600_000)
 })
