@@ -38,7 +38,7 @@ import { createWorkerLogger, startObservabilityServer, type ObservabilityServer 
 import { attachAi } from '../ai'
 import { startProxyMonitor, type ProxyMonitor } from '../proxy'
 import { attachQueueToSessions } from '../queue'
-import { createTransportFactory, disappearingKey, redisDisappearingStore, SessionManager, type TransportFactory } from '../sessions'
+import { createTransportFactory, disappearingKey, ensureOwnContact, redisDisappearingStore, SessionManager, type TransportFactory } from '../sessions'
 import { loadWorkerConfig, type WorkerConfig } from './config'
 import { FakeControl } from './fake-control'
 import { startInternalServer, type InternalServer } from './internal-server'
@@ -166,6 +166,13 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     })
     monitor.attach(manager)
     onStop('sessions', () => manager.stop())
+    const ownContacts = new ContactsService(db)
+    manager.on('connected', ({ sessionId }) => {
+      void manager.get(sessionId)
+        .then((session) => ensureOwnContact(ownContacts, session))
+        .then((result) => { if (result === 'created') logger.info({ session_id: sessionId }, 'own chip registered as contact') })
+        .catch((err) => logger.warn({ session_id: sessionId, err }, 'own chip contact registration failed'))
+    })
     // Registrado depois das sessões → roda ANTES delas no shutdown: a fila espera o envio em curso terminar
     // (BullMQ Worker.close) enquanto o transporte ainda está aberto.
     onStop('queue', () => queue.close())
