@@ -297,7 +297,7 @@ describe('vigia de conexão', () => {
   }
 
   it('conta pareada que não abre no prazo: vira queda transitória, tenta de novo e conecta', async () => {
-    const m = newManager({ connectTimeoutMs: 40, authStateFactory: registered })
+    const m = newManager({ connectTimeoutMs: 100, authStateFactory: registered })
     const s = await m.create({ name: 's', phone: '+5511999990001' })
     await m.startQr(s.id)
     const t = fakes.last(s.id)!
@@ -323,13 +323,15 @@ describe('vigia de conexão', () => {
   })
 
   it('queda real antes do prazo não gera reconexão dobrada pelo vigia', async () => {
-    const m = newManager({ connectTimeoutMs: 60, authStateFactory: registered, sleep: (ms) => new Promise((r) => { delays.push(ms); setTimeout(r, 100) }) })
+    const m = newManager({ connectTimeoutMs: 400, authStateFactory: registered, sleep: (ms) => new Promise((r) => { delays.push(ms); setTimeout(r, 1200) }) })
     const s = await m.create({ name: 's', phone: '+5511999990001' })
     await m.startQr(s.id)
     const t = fakes.last(s.id)!
-    await t.close('transient', 428) // cai sozinha; o backoff espera 100 ms, passando do prazo do vigia (60 ms)
-    await new Promise((r) => setTimeout(r, 80))
+    await t.close('transient', 428) // cai sozinha; o backoff espera 1,2 s, passando do prazo do vigia (400 ms)
+    await until(() => delays.length === 1)
+    await new Promise((r) => setTimeout(r, 500)) // o vigia da tentativa anterior dispara aqui e não pode agir
     expect(delays).toHaveLength(1)
+    expect(t.connectCalls).toHaveLength(1)
     await until(() => t.connectCalls.length === 2)
     t.open()
     await m.whenIdle()
