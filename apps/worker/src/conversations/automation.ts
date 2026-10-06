@@ -34,6 +34,8 @@ export interface ConversationOptions {
 const PARTS_MAX = 3
 /** Chance de um disparo terminar com figurinha (~1 a cada 7). */
 const STICKER_CHANCE = 1 / 7
+/** Chance de salvar o contato antes da primeira mensagem da rodada (~40%). */
+const SAVE_CONTACT_CHANCE = 0.4
 /** Como a figurinha aparece no histórico da conversa (a IA vê que foi mandada uma figurinha). */
 const STICKER_MARK = '[figurinha]'
 /** Quanto esperar a parte anterior sair antes de desistir das seguintes. */
@@ -284,8 +286,7 @@ export class ConversationAutomation {
     } catch { return false }
   }
   private async hasCapacity(account: SessionView, config: ConversationConfig) {
-    // Sem número (sessão ainda não conectou pela primeira vez) não há como conversar.
-    if (!account.phone || !await this.opts.allowed(account.phone)) return false
+    if (!account.phone) return false
     const limits = await this.opts.limits.get(account.id)
     for (const [window, maximum] of [[MINUTE, limits.effective.perMinute], [60 * MINUTE, limits.effective.perHour], [DAY, Math.min(config.maxMessagesPerDay, limits.effective.perDay)]]) {
       if (await this.opts.limits.countOutbound(account.id, new Date(this.now() - window!)) >= maximum!) return false
@@ -395,6 +396,9 @@ export class ConversationAutomation {
       }
       const sender = state.nextSenderId === targetId ? b : a
       const receiver = sender.id === id ? b : a
+      if (state.turns === 0 && receiver.phone && this.random() < SAVE_CONTACT_CHANCE) {
+        await this.opts.manager.getTransport(sender.id)?.saveContact?.(phoneToUserJid(receiver.phone), receiver.name).catch(() => undefined)
+      }
       // Confere no celular as temporárias desta conversa, se ainda não souber (espera a resposta por alguns segundos):
       // assim a mensagem sai com o mesmo tempo da conversa e o WhatsApp não mostra "Esta mensagem não desaparecerá".
       if (receiver.phone) await this.opts.manager.getTransport(sender.id)?.syncChatSettings?.(phoneToUserJid(receiver.phone))

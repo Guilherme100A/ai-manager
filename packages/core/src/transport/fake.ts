@@ -130,6 +130,13 @@ export class FakeTransport extends TransportEmitter implements WaTransport {
     this.typing.push({ to, typing })
   }
 
+  readonly savedContacts: Array<{ jid: string; name: string }> = []
+
+  async saveContact(jid: string, name: string): Promise<void> {
+    if (!this.connected) throw new TransportNotConnectedError()
+    this.savedContacts.push({ jid, name })
+  }
+
   async fetchGroups(): Promise<GroupSummary[]> {
     if (!this.connected) throw new TransportNotConnectedError()
     return this.groups.map(({ members: _members, ...g }) => ({ ...g }))

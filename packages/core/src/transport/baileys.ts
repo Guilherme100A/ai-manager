@@ -96,6 +96,7 @@ export interface BaileysSocketLike {
   sendPresenceUpdate?(type: 'composing' | 'paused', jid?: string): Promise<void>
   /** Pede ao celular o histórico sob demanda de uma conversa (a resposta chega em messaging-history.set). */
   fetchMessageHistory?(count: number, oldestMsgKey: { remoteJid: string; fromMe: boolean; id: string }, oldestMsgTimestamp: number): Promise<string>
+  addOrEditContact?(jid: string, contact: { fullName?: string | null; firstName?: string | null }): Promise<void>
   /** WebSocket do Baileys: emite `CB:<tag>` para cada stanza recebida. */
   ws?: { on(event: string, listener: (node: BinaryNodeLike) => void): void }
   sendNode?(node: BinaryNodeLike): Promise<void>
@@ -502,6 +503,12 @@ export class BaileysTransport extends TransportEmitter implements WaTransport {
 
   async sendTyping(to: string, typing: boolean): Promise<void> {
     await this.requireSocket().sendPresenceUpdate?.(typing ? 'composing' : 'paused', to)
+  }
+
+  async saveContact(jid: string, name: string): Promise<void> {
+    const sock = this.requireSocket()
+    if (!sock.addOrEditContact) return
+    await sock.addOrEditContact(jid, { fullName: name })
   }
 
   ownPhone(): string | undefined {

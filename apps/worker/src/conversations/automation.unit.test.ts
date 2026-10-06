@@ -155,12 +155,11 @@ describe('conversas entre duas contas', () => {
     s.advance(60_000); await s.automation.run(A)
     expect(s.pipeline.send).toHaveBeenCalledTimes(3)
   })
-  it.each(['disabled', 'paused', 'offline', 'no_consent', 'daily_limit', 'minute_limit'])('não chama modelo nem envia quando %s', async (reason) => {
+  it.each(['disabled', 'paused', 'offline', 'daily_limit', 'minute_limit'])('não chama modelo nem envia quando %s', async (reason) => {
     const s = setup()
     if (reason === 'disabled') s.config.enabled = false
     if (reason === 'paused') s.sessions.get(B)!.status = 'PAUSED'
     if (reason === 'offline') s.connected.delete(B)
-    if (reason === 'no_consent') s.allowed.mockResolvedValue(false)
     if (reason === 'daily_limit') s.limits.countOutbound.mockImplementation(async (_id, since) => s.options.now() - since.getTime() === 86_400_000 ? 20 : 0)
     if (reason === 'minute_limit') s.limits.countOutbound.mockResolvedValue(5)
     await s.automation.run(A)

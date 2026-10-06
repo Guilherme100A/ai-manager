@@ -113,6 +113,8 @@ export interface WaTransport {
   syncChatSettings?(to: string): Promise<void>
   /** Mostra (`true`) ou encerra (`false`) o "digitando…" para o JID. Opcional; falhar não impede o envio. */
   sendTyping?(to: string, typing: boolean): Promise<void>
+  /** Salva o JID como contato com o nome dado. Opcional; falhar não impede o envio. */
+  saveContact?(jid: string, name: string): Promise<void>
   fetchGroups(): Promise<GroupSummary[]>
   inspectGroupInvite?(code: string): Promise<GroupSummary & { description?: string }>
   groupInviteCode?(groupId: string): Promise<string>

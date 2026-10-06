@@ -98,6 +98,10 @@ services:
       WORKER_INTERNAL_URL: http://worker:9465
       # T17: o nginx do dashboard sobrescreve X-Forwarded-For com o IP real do cliente (limite de login por IP).
       TRUST_PROXY: 'true'
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      AUTH_SECRET: ${AUTH_SECRET:-}
+      AUTH_SESSION_TTL_MS: ${AUTH_SESSION_TTL_MS:-}
     ports:
       - '127.0.0.1:${API_HOST_PORT:-3000}:3000'
     depends_on:
