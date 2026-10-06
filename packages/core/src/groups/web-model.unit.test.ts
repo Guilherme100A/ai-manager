@@ -18,6 +18,18 @@ describe('modelo pequeno para grupos', () => {
     expect(s.create).toHaveBeenCalledWith(expect.objectContaining({ model: 'cheap-model', tools: [expect.objectContaining({ max_uses: 1, allowed_domains: ['chat.whatsapp.com'] })] }), expect.any(Object))
     expect(JSON.stringify(s.create.mock.calls)).not.toContain('costly-model')
   })
+  it('acha o JSON mesmo com texto antes e depois e em bloco de código', async () => {
+    const s = setup({ stop_reason: 'end_turn', content: [
+      { type: 'text', text: 'Vou pesquisar grupos [públicos] para você.' },
+      { type: 'web_search_tool_result', content: [{ type: 'web_search_result', url: URL }] },
+      { type: 'text', text: `Encontrei:\n\`\`\`json\n${JSON.stringify([{ inviteUrl: URL, topic: 'jogos [pc]' }])}\n\`\`\`\nEspero ter ajudado.` },
+    ] })
+    expect(await s.model.discover('jogos')).toEqual([{ inviteUrl: URL, topic: 'jogos [pc]' }])
+  })
+  it('resposta sem nenhum array vira lista vazia', async () => {
+    const s = setup({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'Não encontrei grupos.' }] })
+    expect(await s.model.discover('jogos')).toEqual([])
+  })
   it('não aceita lista de convites sem evidência da ferramenta de pesquisa', async () => {
     const s = setup({ stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify([{ inviteUrl: URL, topic: 'jogos' }]) }] })
     expect(await s.model.discover('jogos')).toEqual([])
