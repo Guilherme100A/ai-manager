@@ -59,7 +59,13 @@ export function tcpProbe(timeoutMs = 5000): ProxyProbe {
 
 const errorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err)) || 'unknown error'
 
-export class ProxyChecker extends EventEmitter<{ proxy_unavailable: [ProxyUnavailableEvent] }> {
+/** Proxy respondeu na checagem (emitido a cada checagem bem-sucedida, não só na recuperação). */
+export interface ProxyAvailableEvent {
+  proxyId: string
+  checkedAt: Date
+}
+
+export class ProxyChecker extends EventEmitter<{ proxy_unavailable: [ProxyUnavailableEvent]; proxy_available: [ProxyAvailableEvent] }> {
   private readonly probe: ProxyProbe
   private readonly intervalMs: number
   private timer: NodeJS.Timeout | undefined
@@ -95,6 +101,7 @@ export class ProxyChecker extends EventEmitter<{ proxy_unavailable: [ProxyUnavai
       .update(proxies)
       .set({ available: true, lastCheckAt: checkedAt, lastError: null, errorCount: 0 })
       .where(eq(proxies.id, proxy.id))
+    this.emit('proxy_available', { proxyId: proxy.id, checkedAt })
     return { proxyId: proxy.id, available: true }
   }
 

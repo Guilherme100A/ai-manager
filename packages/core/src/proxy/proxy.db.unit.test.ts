@@ -112,9 +112,12 @@ describe('ProxyChecker', () => {
     const events: ProxyUnavailableEvent[] = []
     const checker = createProxyChecker({ db, probe: async () => (ok ? undefined : Promise.reject(new Error('ECONNREFUSED'))) })
     checker.on('proxy_unavailable', (e) => events.push(e))
+    const available: string[] = []
+    checker.on('proxy_available', (e) => available.push(e.proxyId))
 
     await checker.checkAll()
     await checker.checkAll()
+    expect(available).toEqual([])
     let row = await service.get(p.id)
     expect(row).toMatchObject({ available: false, lastError: 'ECONNREFUSED', errorCount: 2 })
     expect(row.lastCheckAt).toBeInstanceOf(Date)
@@ -128,6 +131,7 @@ describe('ProxyChecker', () => {
     row = await service.get(p.id)
     expect(row).toMatchObject({ available: true, lastError: null, errorCount: 0 })
     expect(events).toHaveLength(2)
+    expect(available).toEqual([p.id])
   })
 
   it('probe TCP padrão marca porta fechada como indisponível', async () => {

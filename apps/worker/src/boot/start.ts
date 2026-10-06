@@ -287,7 +287,17 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     }
 
     // ---- proxies (T06) + alertas (T11) + métricas (T15) --------------------------------------
-    const proxyMonitor: ProxyMonitor = startProxyMonitor({ db, logger, ...(opts.proxyCheckIntervalMs ? { intervalMs: opts.proxyCheckIntervalMs } : {}) })
+    // Proxy respondeu: sessões que caíram só por ele voltam sozinhas (sem isso ficavam DISCONNECTED até ação manual).
+    const recoverProxySessions = async (proxyId: string) => {
+      for (const session of await manager.list()) {
+        if (session.proxyId !== proxyId || session.status !== 'DISCONNECTED') continue
+        await manager.recoverAfterProxy(session.id).catch((err) => logger.warn({ session_id: session.id, err }, 'proxy recovery reconnect failed'))
+      }
+    }
+    const proxyMonitor: ProxyMonitor = startProxyMonitor({
+      db, logger, ...(opts.proxyCheckIntervalMs ? { intervalMs: opts.proxyCheckIntervalMs } : {}),
+      onAvailable: ({ proxyId }) => void recoverProxySessions(proxyId).catch(() => undefined),
+    })
     onStop('proxy-monitor', () => proxyMonitor.stop())
     const alerts = attachAlerts({ dispatcher: new AlertDispatcher({ db, logger }), healthMonitor: monitor, proxyChecker: proxyMonitor.checker, logger })
     onStop('alerts', async () => {

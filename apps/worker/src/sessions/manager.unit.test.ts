@@ -6,6 +6,7 @@ import {
   InvalidTransitionError,
   ProxyService,
   resetCredentialsCrypto,
+  usePostgresAuthState,
 } from '@wsm/core'
 import {
   createDb,
@@ -230,11 +231,110 @@ describe('quedas (AC-T05-05)', () => {
     expect(await events(s.id)).toContain('proxy_unavailable')
   })
 
+  it('proxy volta: sessão que caiu por ele reconecta sozinha, sem QR e mantendo o aquecimento', async () => {
+    const proxy = await new ProxyService(db).create({ url: 'http://u:p@10.0.0.1:3128' })
+    const s = await manager.create({ name: 's', phone: '+5511999990001', proxyId: proxy.id })
+    await manager.startQr(s.id)
+    fakes.last(s.id)!.open()
+    await manager.whenIdle()
+    const warmup = (await manager.get(s.id)).warmupStartedAt
+    expect(warmup).not.toBeNull()
+
+    await db.update(proxies).set({ available: false, lastError: 'timeout' }).where(eq(proxies.id, proxy.id))
+    await fakes.last(s.id)!.close('transient', 408)
+    await manager.whenIdle()
+    expect(await status(s.id)).toBe('DISCONNECTED')
+    expect((await events(s.id)).at(-1)).toBe('proxy_unavailable')
+    expect(await credsCount(s.id)).toBeGreaterThan(0)
+
+    expect(await manager.recoverAfterProxy(s.id)).toBe(true) // ainda indisponível: tenta e volta a DISCONNECTED
+    await manager.whenIdle()
+    expect(await status(s.id)).toBe('DISCONNECTED')
+
+    await db.update(proxies).set({ available: true, lastError: null }).where(eq(proxies.id, proxy.id))
+    expect(await manager.recoverAfterProxy(s.id)).toBe(true)
+    expect(await manager.recoverAfterProxy(s.id)).toBe(false) // já reconectando: não duplica
+    const t = fakes.last(s.id)!
+    expect(new URL(t.lastConnect!.proxyUrl!).hostname).toBe('10.0.0.1')
+    t.open()
+    await manager.whenIdle()
+    expect(await status(s.id)).toBe('WARMING')
+    expect((await manager.get(s.id)).warmupStartedAt).toBe(warmup)
+  })
+
+  it('não reconecta sozinha sessão deslogada, sem proxy ou que caiu por outro motivo', async () => {
+    const loggedOut = await connectedSession()
+    await fakes.last(loggedOut)!.close('loggedOut', 401)
+    await manager.whenIdle()
+    expect(await status(loggedOut)).toBe('DISCONNECTED')
+    expect(await manager.recoverAfterProxy(loggedOut)).toBe(false)
+
+    const proxy = await new ProxyService(db).create({ url: 'http://u:p@10.0.0.2:3128' })
+    const s = await manager.create({ name: 'p', phone: '+5511999990002', proxyId: proxy.id })
+    await manager.startQr(s.id)
+    fakes.last(s.id)!.open()
+    await manager.whenIdle()
+    await fakes.last(s.id)!.close('loggedOut', 401)
+    await manager.whenIdle()
+    expect(await manager.recoverAfterProxy(s.id)).toBe(false) // último evento não é proxy_unavailable
+    expect(await manager.recoverAfterProxy(loggedOut)).toBe(false)
+  })
+
   it('com proxy disponível conecta pelo proxy', async () => {
     const proxy = await new ProxyService(db).create({ url: 'http://u:p@10.0.0.1:3128' })
     const s = await manager.create({ name: 's', phone: '+5511999990001', proxyId: proxy.id })
     await manager.startQr(s.id)
     expect(new URL(fakes.last(s.id)!.lastConnect!.proxyUrl!).hostname).toBe('10.0.0.1')
+  })
+})
+
+describe('vigia de conexão', () => {
+  // O FakeTransport nunca marca a conta como pareada; aqui simulamos uma conta já registrada.
+  const registered: SessionManagerOptions['authStateFactory'] = async (d, id) => {
+    const auth = await usePostgresAuthState(d, id)
+    auth.state.creds.registered = true
+    return auth
+  }
+
+  it('conta pareada que não abre no prazo: vira queda transitória, tenta de novo e conecta', async () => {
+    const m = newManager({ connectTimeoutMs: 40, authStateFactory: registered })
+    const s = await m.create({ name: 's', phone: '+5511999990001' })
+    await m.startQr(s.id)
+    const t = fakes.last(s.id)!
+    expect(t.connectCalls).toHaveLength(1)
+    await until(() => t.connectCalls.length >= 2) // pendurou: o vigia derrubou e o backoff reconectou
+    expect(await events(s.id)).toContain('disconnected')
+    t.open()
+    await m.whenIdle()
+    expect(await status(s.id)).toBe('WARMING')
+    const calls = t.connectCalls.length
+    await new Promise((r) => setTimeout(r, 120))
+    expect(t.connectCalls).toHaveLength(calls) // conectado: o vigia não age mais
+    expect(await status(s.id)).toBe('WARMING')
+  })
+
+  it('não vigia QR/pareamento: conta ainda não pareada espera o tempo que for', async () => {
+    const m = newManager({ connectTimeoutMs: 40 })
+    const s = await m.create({ name: 's', phone: '+5511999990001' })
+    await m.startQr(s.id)
+    await new Promise((r) => setTimeout(r, 150))
+    expect(fakes.last(s.id)!.connectCalls).toHaveLength(1)
+    expect(await events(s.id)).not.toContain('disconnected')
+  })
+
+  it('queda real antes do prazo não gera reconexão dobrada pelo vigia', async () => {
+    const m = newManager({ connectTimeoutMs: 60, authStateFactory: registered, sleep: (ms) => new Promise((r) => { delays.push(ms); setTimeout(r, 100) }) })
+    const s = await m.create({ name: 's', phone: '+5511999990001' })
+    await m.startQr(s.id)
+    const t = fakes.last(s.id)!
+    await t.close('transient', 428) // cai sozinha; o backoff espera 100 ms, passando do prazo do vigia (60 ms)
+    await new Promise((r) => setTimeout(r, 80))
+    expect(delays).toHaveLength(1)
+    await until(() => t.connectCalls.length === 2)
+    t.open()
+    await m.whenIdle()
+    expect(delays).toHaveLength(1)
+    expect(await status(s.id)).toBe('WARMING')
   })
 })
 

@@ -62,6 +62,8 @@ export interface SessionManagerOptions {
   resumeState?: (row: SessionRow) => 'WARMING' | 'STABLE' | Promise<'WARMING' | 'STABLE'>
   /** Prazo para o transporte emitir o código de pareamento. Default 30s. */
   pairingTimeoutMs?: number
+  /** Conta já pareada que não abre a conexão neste prazo: a tentativa vira queda transitória e entra no backoff. Default 60s. */
+  connectTimeoutMs?: number
   /** Relógio (injetável). */
   now?: () => Date
   /** Auth state persistido (default: usePostgresAuthState, cifrado — T02). */
@@ -116,9 +118,12 @@ interface Runtime {
   chain: Promise<unknown>
   /** A primeira conexão já foi disparada. */
   started: boolean
+  /** Conta as tentativas de conexão: o vigia só age sobre a tentativa que o armou. */
+  attempt: number
 }
 
 export const DEFAULT_MAX_RECONNECT_ATTEMPTS = 5
+export const DEFAULT_CONNECT_TIMEOUT_MS = 60_000
 export const defaultBackoff = (attempt: number) => 1000 * 2 ** (attempt - 1)
 
 const noopLogger: SessionManagerLogger = { debug() {}, info() {}, warn() {}, error() {} }
@@ -139,6 +144,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
   private readonly timers = new Map<NodeJS.Timeout, () => void>()
   private readonly log: SessionManagerLogger
   private readonly maxAttempts: number
+  private readonly connectTimeoutMs: number
   private readonly backoff: (attempt: number) => number
   private readonly now: () => Date
   private stopped = false
@@ -148,6 +154,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     this.store = new SessionStore(opts.db)
     this.log = opts.logger ?? safeChild(coreLogger) ?? noopLogger
     this.maxAttempts = opts.maxReconnectAttempts ?? DEFAULT_MAX_RECONNECT_ATTEMPTS
+    this.connectTimeoutMs = opts.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS
     this.backoff = opts.backoff ?? defaultBackoff
     this.now = opts.now ?? (() => new Date())
   }
@@ -386,6 +393,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       pairingWaiters: [],
       chain: Promise.resolve(),
       started: false,
+      attempt: 0,
     }
     if (o.pairingPhone) rt.pairingPhone = o.pairingPhone
     this.runtimes.set(id, rt)
@@ -474,6 +482,41 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     }
     // A conexão usou o proxy atual do banco: a troca pendente foi aplicada (AC-T06-03).
     if (before?.requiresRestart && this.isCurrent(rt)) await this.store.update(sessionId, { requiresRestart: false })
+    if (auth.state.creds.registered) this.watchConnect(rt)
+  }
+
+  /**
+   * Conta pareada cuja conexão não abre nem falha (ex.: túnel do proxy pendurado) ficaria offline sem aviso:
+   * passado o prazo, a tentativa vira queda transitória e segue o backoff normal. QR/pairing não são vigiados.
+   */
+  private watchConnect(rt: Runtime): void {
+    const attempt = ++rt.attempt
+    const timer = setTimeout(() => {
+      this.timers.delete(timer)
+      if (this.stopped || !this.isCurrent(rt) || rt.connected || rt.closing || rt.attempt !== attempt) return
+      this.log.warn({ session_id: rt.sessionId, timeout_ms: this.connectTimeoutMs }, 'connection did not open in time')
+      void this.enqueue(rt, async () => {
+        if (!this.isCurrent(rt) || rt.connected || rt.attempt !== attempt) return
+        await this.onClose(rt, 'transient', undefined, new Error(`connection did not open within ${this.connectTimeoutMs}ms`))
+      }).catch(() => undefined)
+    }, this.connectTimeoutMs)
+    timer.unref?.()
+    this.timers.set(timer, () => undefined)
+  }
+
+  /**
+   * Sessão que caiu só porque o proxy ficou indisponível (último evento `proxy_unavailable`, credenciais intactas):
+   * com o proxy de volta, reconecta pelo mesmo caminho da reconexão manual, sem QR e mantendo o aquecimento.
+   */
+  async recoverAfterProxy(id: string): Promise<boolean> {
+    if (this.stopped || this.runtimes.has(id)) return false
+    const row = await this.store.find(id)
+    if (!row || row.status !== 'DISCONNECTED' || !row.proxyId) return false
+    if ((await this.store.lastHealthEventType(id)) !== 'proxy_unavailable') return false
+    if (!(await this.store.hasCredentials(id))) return false
+    this.log.info({ session_id: id }, 'proxy available again: reconnecting session')
+    await this.startQr(id)
+    return true
   }
 
   private async onOpen(rt: Runtime): Promise<void> {
@@ -516,6 +559,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     const { sessionId } = rt
     const wasConnected = rt.connected
     rt.connected = false
+    rt.attempt++ // a queda já foi tratada: o vigia da tentativa anterior não age mais
     await this.stopMonitoring(rt, reason, statusCode)
     const detail: Record<string, unknown> = { reason }
     if (statusCode !== undefined) detail.statusCode = statusCode

@@ -271,6 +271,17 @@ export class SessionStore {
     await this.db.insert(healthEvents).values({ sessionId, type, detail: detail ?? null })
   }
 
+  /** Tipo do evento de saúde mais recente da sessão (ex.: `proxy_unavailable`), ou undefined sem eventos. */
+  async lastHealthEventType(sessionId: string): Promise<string | undefined> {
+    const [row] = await this.db
+      .select({ type: healthEvents.type })
+      .from(healthEvents)
+      .where(eq(healthEvents.sessionId, sessionId))
+      .orderBy(desc(healthEvents.id))
+      .limit(1)
+    return row?.type
+  }
+
   async hasCredentials(sessionId: string): Promise<boolean> {
     const [row] = await this.db
       .select({ one: sql<number>`1` })
