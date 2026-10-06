@@ -3,10 +3,10 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { eq } from 'drizzle-orm'
 import { createDb, createTempDatabase, proxies, sessions, type Database, type TempDatabase } from '@wsm/db'
 import { generateCredentialsKey, resetCredentialsCrypto } from '../crypto'
-import { FakeTransport } from '../transport'
+import { FakeTransport, browserForSession } from '../transport'
 import type { AuthenticationState } from '../transport'
 import { createProxyChecker, type ProxyUnavailableEvent } from './checker'
-import { connectSession, resolveSessionProxy } from './connect'
+import { connectSession, resolveSessionBrowser, resolveSessionProxy } from './connect'
 import { ProxyError, ProxyUnavailableError } from './errors'
 import { ProxyService } from './service'
 
@@ -184,5 +184,38 @@ describe('connectSession (AC-T06-05)', () => {
 
   it('sessão inexistente → SESSION_NOT_FOUND', async () => {
     await expect(resolveSessionProxy(db, '00000000-0000-4000-8000-000000000000')).rejects.toBeInstanceOf(ProxyError)
+  })
+})
+
+describe('fingerprint fixo por sessão', () => {
+  it('1ª conexão grava o aparelho derivado do id e as reconexões repetem o mesmo', async () => {
+    const s = await newSession()
+    const t = new FakeTransport()
+    await connectSession({ db, sessionId: s.id, transport: t, auth })
+    await connectSession({ db, sessionId: s.id, transport: t, auth })
+    await connectSession({ db, sessionId: s.id, transport: t, auth })
+    const expected = browserForSession(s.id)
+    expect(t.connectCalls.map((c) => c.browser)).toEqual([expected, expected, expected])
+    const [row] = await db.select().from(sessions).where(eq(sessions.id, s.id))
+    expect(row?.browser).toEqual(expected)
+  })
+
+  it('aparelho já gravado nunca é substituído', async () => {
+    const s = await newSession()
+    const stored: [string, string, string] = ['Mac OS', 'Safari', '17.0']
+    await db.update(sessions).set({ browser: stored }).where(eq(sessions.id, s.id))
+    const t = new FakeTransport()
+    await connectSession({ db, sessionId: s.id, transport: t, auth })
+    expect(t.lastConnect?.browser).toEqual(stored)
+    expect(await resolveSessionBrowser(db, s.id)).toEqual(stored)
+  })
+
+  it('com proxy também envia o aparelho fixo', async () => {
+    const p = await service.create({ url: 'http://h:3128' })
+    const s = await newSession()
+    await service.assign(p.id, s.id)
+    const t = new FakeTransport()
+    await connectSession({ db, sessionId: s.id, transport: t, auth })
+    expect(t.lastConnect).toMatchObject({ proxyUrl: 'http://h:3128', browser: browserForSession(s.id) })
   })
 })

@@ -342,6 +342,7 @@ export class BaileysTransport extends TransportEmitter implements WaTransport {
     })().catch((err) => { this.ephemeralLoad = undefined; this.onListenerError(err, 'connection') })
 
     const config: BaileysSocketConfig = { ...this.options.socketConfig, auth: opts.auth }
+    if (opts.browser) config.browser = opts.browser
     if (opts.proxyUrl) {
       const agent = createProxyAgent(opts.proxyUrl)
       config.agent = agent

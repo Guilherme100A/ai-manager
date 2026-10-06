@@ -67,6 +67,8 @@ export const sessions = pgTable(
       .references(() => proxies.id, { onDelete: 'set null' }),
     note: text('note'),
     requiresRestart: boolean('requires_restart').notNull().default(false),
+    // Aparelho [SO, navegador, versão] gravado na 1ª conexão e reusado sempre: mudar o código não troca o de chips existentes.
+    browser: jsonb('browser').$type<[string, string, string]>(),
     warmupStartedAt: timestamp('warmup_started_at', { withTimezone: true }),
     lastConnectedAt: timestamp('last_connected_at', { withTimezone: true }),
     createdAt: createdAt(),

@@ -1,8 +1,8 @@
 // Regra de conexão com proxy (AC-T06-05): sessão com proxy configurado NUNCA conecta sem ele.
 // Proxy indisponível → a conexão falha e a sessão fica DISCONNECTED (sem fallback para conexão direta).
-import { eq } from 'drizzle-orm'
+import { and, eq, isNull } from 'drizzle-orm'
 import { proxies, sessions, type Database } from '@wsm/db'
-import type { AuthenticationState, ConnectOptions, WaTransport } from '../transport'
+import { browserForSession, type AuthenticationState, type BrowserDescription, type ConnectOptions, type WaTransport } from '../transport'
 import { ProxyError, ProxyUnavailableError } from './errors'
 import { proxyConnectionUrl } from './service'
 
@@ -60,7 +60,26 @@ export async function connectSession(opts: ConnectSessionOptions): Promise<Sessi
       .where(eq(sessions.id, connect.sessionId))
     throw err
   }
-  const connectOpts: ConnectOptions = resolved.proxyUrl ? { ...connect, proxyUrl: resolved.proxyUrl } : connect
+  const browser = await resolveSessionBrowser(db, connect.sessionId)
+  const connectOpts: ConnectOptions = resolved.proxyUrl ? { ...connect, browser, proxyUrl: resolved.proxyUrl } : { ...connect, browser }
   await transport.connect(connectOpts)
   return resolved
+}
+
+/**
+ * Aparelho fixo da sessão: o gravado no banco; na 1ª vez, grava o derivado do id (o mesmo que a sessão já usava),
+ * para que reconexões e mudanças futuras nas listas de fingerprint nunca troquem o aparelho de um chip existente.
+ */
+export async function resolveSessionBrowser(db: Database, sessionId: string): Promise<BrowserDescription> {
+  const [row] = await db.select({ browser: sessions.browser }).from(sessions).where(eq(sessions.id, sessionId))
+  if (row?.browser) return row.browser
+  const browser = browserForSession(sessionId)
+  const [saved] = await db
+    .update(sessions)
+    .set({ browser })
+    .where(and(eq(sessions.id, sessionId), isNull(sessions.browser)))
+    .returning({ browser: sessions.browser })
+  if (saved?.browser) return saved.browser
+  const [again] = await db.select({ browser: sessions.browser }).from(sessions).where(eq(sessions.id, sessionId))
+  return again?.browser ?? browser
 }

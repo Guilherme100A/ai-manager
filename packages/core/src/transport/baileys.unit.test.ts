@@ -104,6 +104,14 @@ describe('BaileysTransport', () => {
     expect(configs[0]).not.toHaveProperty('fetchAgent')
   })
 
+  it('repassa o aparelho fixo da sessão ao socket em toda conexão', async () => {
+    const { transport, configs, auth } = setup()
+    const browser: [string, string, string] = ['Windows', 'Edge', '126.0.0.0']
+    await transport.connect({ sessionId: 's', auth, browser })
+    await transport.connect({ sessionId: 's', auth, browser })
+    expect(configs.map((c) => c.browser)).toEqual([browser, browser])
+  })
+
   it.each([
     ['http://proxy:8080', HttpsProxyAgent],
     ['https://proxy:8443', HttpsProxyAgent],

@@ -15,6 +15,8 @@ export interface ConnectOptions {
   pairingPhone?: string
   /** Chamado quando o Baileys atualiza as credenciais (evento `creds.update`); persiste o auth state. */
   saveCreds?: () => Promise<void> | void
+  /** Aparelho [SO, navegador, versão] anunciado ao WhatsApp; fixo por sessão. */
+  browser?: [string, string, string]
 }
 
 export interface ConnectionUpdate {
