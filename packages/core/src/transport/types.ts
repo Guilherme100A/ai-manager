@@ -118,7 +118,8 @@ export interface WaTransport {
   /** Salva o JID como contato com o nome dado. Opcional; falhar não impede o envio. */
   saveContact?(jid: string, name: string): Promise<void>
   fetchGroups(): Promise<GroupSummary[]>
-  inspectGroupInvite?(code: string): Promise<GroupSummary & { description?: string }>
+  /** `joinApproval`: a entrada fica pendente até um admin aprovar. */
+  inspectGroupInvite?(code: string): Promise<GroupSummary & { description?: string; joinApproval?: boolean }>
   groupInviteCode?(groupId: string): Promise<string>
   groupAcceptInvite?(code: string): Promise<string | undefined>
   off?(event: 'message', cb: (message: IncomingMessage) => void): void

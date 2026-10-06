@@ -196,7 +196,8 @@ export class GroupAutomation {
             state.inspectedTimes.push(now)
             await this.opts.store.saveState(id, state)
             const group = await transport.inspectGroupInvite(code).catch(() => undefined)
-            const fits = !!group && group.participants >= MIN_PARTICIPANTS && group.participants <= MAX_PARTICIPANTS &&
+            // Grupo com aprovação de admin gastaria a entrada do dia num pedido que talvez nunca seja aceito.
+            const fits = !!group && !group.joinApproval && group.participants >= MIN_PARTICIPANTS && group.participants <= MAX_PARTICIPANTS &&
               await this.opts.model.judge({ name: group.name, ...(group.description ? { description: group.description } : {}), topic: candidate.topic })
             if (!group || !fits) {
               state.rejectedAt = now

@@ -121,6 +121,8 @@ export interface BaileysGroupLike {
   participants?: unknown[]
   announce?: boolean
   linkedParent?: string
+  /** Entrada só com aprovação de um admin. */
+  joinApprovalMode?: boolean
 }
 
 export type BaileysSocketConfig = UserFacingSocketConfig
@@ -522,11 +524,11 @@ export class BaileysTransport extends TransportEmitter implements WaTransport {
     return Object.values(groups).map((g) => toGroupSummary(g, own))
   }
 
-  async inspectGroupInvite(code: string): Promise<GroupSummary & { description?: string }> {
+  async inspectGroupInvite(code: string): Promise<GroupSummary & { description?: string; joinApproval?: boolean }> {
     const sock = this.requireSocket()
     if (!sock.groupGetInviteInfo) throw new Error('groupGetInviteInfo not available')
     const group = await sock.groupGetInviteInfo(code)
-    return { ...toGroupSummary(group), ...(group.desc ? { description: group.desc } : {}) }
+    return { ...toGroupSummary(group), ...(group.desc ? { description: group.desc } : {}), ...(group.joinApprovalMode ? { joinApproval: true } : {}) }
   }
 
   async groupInviteCode(groupId: string): Promise<string> {

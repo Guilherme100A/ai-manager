@@ -321,6 +321,20 @@ describe('entrada automática e mensagem diária', () => {
     expect(t.invites.run).not.toHaveBeenCalled()
     expect(t.states.get('a')?.groups).toEqual([])
   })
+  it('grupo que exige aprovação de admin é descartado: não entra nem repassa', async () => {
+    const s = setup()
+    s.inspect.mockResolvedValue({ ...group, description: 'jogos', joinApproval: true } as never)
+    await s.service.run('a')
+    expect(s.model.judge).not.toHaveBeenCalled()
+    expect(s.accept).not.toHaveBeenCalled()
+
+    const t = setup()
+    t.sessions.set('a', { ...t.sessions.get('a')!, proxyId: null })
+    t.configs.set('b', { ...DEFAULT_GROUP_AUTOMATION, enabled: true })
+    t.inspect.mockResolvedValue({ ...group, description: 'jogos', joinApproval: true } as never)
+    await t.service.run('a')
+    expect(t.invites.run).not.toHaveBeenCalled()
+  })
   it('tamanho fora de 20 a 900 participantes é descartado sem chamar o juiz', async () => {
     for (const participants of [5, 2000]) {
       const s = setup()
