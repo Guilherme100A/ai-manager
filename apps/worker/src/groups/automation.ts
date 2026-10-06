@@ -28,6 +28,12 @@ function dedupeGroups(groups: ManagedGroup[]): ManagedGroup[] {
 
 const DAY = 86_400_000
 const LEASE = 300_000
+/** Faixa de tamanho aceita: abaixo é grupo morto; acima, lotado e geralmente de divulgação. */
+const MIN_PARTICIPANTS = 20
+const MAX_PARTICIPANTS = 900
+/** Teto de consultas de convite ao WhatsApp por 24 h e pausa após um candidato descartado. */
+const MAX_INSPECTS_PER_DAY = 8
+const REJECT_COOLDOWN = 15 * 60_000
 export interface AutomationManager {
   list(): Promise<SessionView[]>
   get(id: string): Promise<SessionView>
@@ -179,13 +185,25 @@ export class GroupAutomation {
             const index = candidates.findIndex((c) => inviteCodeFromUrl(c.inviteUrl) === attempted.inviteCode)
             if (index >= 0) candidates.splice(index, 1)
           }
-          const candidate = randomItem(candidates)
-          if (!candidate) { state.lastError = 'Nenhum novo convite público encontrado no cache da busca. A pesquisa será renovada após 24 h.'; await this.opts.store.saveState(id, state) }
+          if (!candidates.length) { state.lastError = 'Nenhum novo convite público encontrado no cache da busca. A pesquisa será renovada após 24 h.'; await this.opts.store.saveState(id, state) }
+          state.inspectedTimes = (state.inspectedTimes ?? []).filter((at) => at > now - DAY)
+          const cooling = state.rejectedAt !== undefined && now - state.rejectedAt < REJECT_COOLDOWN
+          const candidate = state.inspectedTimes.length < MAX_INSPECTS_PER_DAY && !cooling ? randomItem(candidates) : undefined
           const code = candidate && inviteCodeFromUrl(candidate.inviteUrl)
           if (candidate && code && transport.inspectGroupInvite) {
-            const group = await transport.inspectGroupInvite(code)
-            const topic = [group.name, group.description, candidate.topic].filter(Boolean).join(' — ').slice(0, 800)
-            if (proxied && transport.groupAcceptInvite) {
+            // Sai do cache antes da consulta: convite expirado ou reprovado nunca é consultado de novo.
+            state.discovery.candidates = state.discovery.candidates.filter((c) => c.inviteUrl !== candidate.inviteUrl)
+            state.inspectedTimes.push(now)
+            await this.opts.store.saveState(id, state)
+            const group = await transport.inspectGroupInvite(code).catch(() => undefined)
+            const fits = !!group && group.participants >= MIN_PARTICIPANTS && group.participants <= MAX_PARTICIPANTS &&
+              await this.opts.model.judge({ name: group.name, ...(group.description ? { description: group.description } : {}), topic: candidate.topic })
+            if (!group || !fits) {
+              state.rejectedAt = now
+              await this.opts.store.saveState(id, state)
+              await this.opts.audit(id, { action: 'group_rejected', reason: group ? 'filtered' : 'invite_invalid', ...(group ? { groupId: group.id, participants: group.participants } : {}) })
+            } else if (proxied && transport.groupAcceptInvite) {
+              const topic = [group.name, group.description, candidate.topic].filter(Boolean).join(' — ').slice(0, 800)
               const latest = await this.capacity(id)
               if (!actualIds.has(group.id) && latest.canEnter && await this.active(id, transport)) {
                 const managed = upsertGroup(state.groups, { id: group.id, name: group.name, topic, inviteCode: code, joinedAt: now, state: 'pending' })
@@ -201,6 +219,7 @@ export class GroupAutomation {
               }
             } else if (!proxied && !state.groups.some((g) => g.inviteCode === code)) {
               // Chip sem proxy: registra o grupo descoberto apenas para encaminhar; NUNCA entra.
+              const topic = [group.name, group.description, candidate.topic].filter(Boolean).join(' — ').slice(0, 800)
               state.groups.push({ id: group.id, name: group.name, topic, inviteCode: code, joinedAt: now, state: 'pending' })
               state.discoveredTimes.push(now)
               await this.opts.store.saveState(id, state)

@@ -1,38 +1,47 @@
 import { describe, expect, it, vi } from 'vitest'
-import { SmallGroupModel } from './web-model'
+import { SmallGroupModel, topicSlugs } from './web-model'
 const URL = 'https://chat.whatsapp.com/ABCDEFGHIJKLMNOPQRSTUV'
-function setup(response: unknown) {
+function setup(response: unknown, pages: Record<string, string | number> = {}) {
   const create = vi.fn(async (..._args: unknown[]) => response)
   const settings = vi.fn(async () => ({ enabled: true, config: { apiKey: 'test-key', smallModel: 'cheap-model', largeModel: 'costly-model', timeoutMs: 1000 } }))
   const factory = vi.fn(() => ({ messages: { create } }))
-  const model = new SmallGroupModel(settings as never, factory as never)
-  return { create, settings, factory, model }
+  const fetcher = vi.fn(async (url: string) => {
+    const page = pages[url.split('/').pop()!]
+    if (page === undefined) return new Response('', { status: 404 })
+    if (typeof page === 'number') return new Response('', { status: page })
+    return new Response(page, { status: 200 })
+  })
+  const model = new SmallGroupModel(settings as never, factory as never, fetcher as never)
+  return { create, settings, factory, fetcher, model }
 }
 describe('modelo pequeno para grupos', () => {
-  it('usa somente o modelo pequeno, limita pesquisa e rejeita links inventados', async () => {
-    const s = setup({ stop_reason: 'end_turn', content: [
-      { type: 'web_search_tool_result', content: [{ type: 'web_search_result', url: URL }] },
-      { type: 'text', text: JSON.stringify([{ inviteUrl: URL, topic: 'jogos' }, { inviteUrl: 'https://chat.whatsapp.com/ZYXWVUTSRQPONMLKJIHGFE', topic: 'inventado' }]) },
-    ] })
-    expect(await s.model.discover('jogos')).toEqual([{ inviteUrl: URL, topic: 'jogos' }])
-    expect(s.create).toHaveBeenCalledWith(expect.objectContaining({ model: 'cheap-model', tools: [expect.objectContaining({ max_uses: 1, allowed_domains: ['chat.whatsapp.com'] })] }), expect.any(Object))
-    expect(JSON.stringify(s.create.mock.calls)).not.toContain('costly-model')
+  it('transforma o tema em páginas do diretório', () => {
+    expect(topicSlugs('Jogos e Tecnologia, grupos brasileiros')).toEqual(['jogos', 'tecnologia'])
+    expect(topicSlugs('Mecânica de motos, carros e caminhões')).toEqual(['mecanica', 'motos', 'carros'])
   })
-  it('acha o JSON mesmo com texto antes e depois e em bloco de código', async () => {
-    const s = setup({ stop_reason: 'end_turn', content: [
-      { type: 'text', text: 'Vou pesquisar grupos [públicos] para você.' },
-      { type: 'web_search_tool_result', content: [{ type: 'web_search_result', url: URL }] },
-      { type: 'text', text: `Encontrei:\n\`\`\`json\n${JSON.stringify([{ inviteUrl: URL, topic: 'jogos [pc]' }])}\n\`\`\`\nEspero ter ajudado.` },
-    ] })
-    expect(await s.model.discover('jogos')).toEqual([{ inviteUrl: URL, topic: 'jogos [pc]' }])
+  it('lê os convites das páginas de tema, sem duplicar e sem chamar o modelo', async () => {
+    const other = 'https://chat.whatsapp.com/ZYXWVUTSRQPONMLKJIHGFE'
+    const s = setup({}, {
+      jogos: `<a href="${URL}">A</a> <a href="${URL}?x">A de novo</a> <a href="https://chat.whatsapp.com/invite/ZYXWVUTSRQPONMLKJIHGFE">B</a>`,
+      tecnologia: `<a href="${other}">B repetido</a> <a href="https://evil.com/ABCDEFGHIJKLMNOPQRSTUV">fora</a>`,
+    })
+    expect(await s.model.discover('jogos e tecnologia')).toEqual([{ inviteUrl: URL, topic: 'jogos' }, { inviteUrl: other, topic: 'jogos' }])
+    expect(s.fetcher).toHaveBeenCalledTimes(2)
+    expect(s.create).not.toHaveBeenCalled()
   })
-  it('resposta sem nenhum array vira lista vazia', async () => {
-    const s = setup({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'Não encontrei grupos.' }] })
-    expect(await s.model.discover('jogos')).toEqual([])
+  it('tema que falha não derruba os outros; diretório inteiro fora do ar vira erro', async () => {
+    const s = setup({}, { jogos: 503, tecnologia: `<a href="${URL}">A</a>` })
+    expect(await s.model.discover('jogos tecnologia')).toEqual([{ inviteUrl: URL, topic: 'tecnologia' }])
+    const t = setup({}, { jogos: 503 })
+    await expect(t.model.discover('jogos')).rejects.toThrow('indisponível')
   })
-  it('não aceita lista de convites sem evidência da ferramenta de pesquisa', async () => {
-    const s = setup({ stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify([{ inviteUrl: URL, topic: 'jogos' }]) }] })
-    expect(await s.model.discover('jogos')).toEqual([])
+  it.each([['SIM', true], ['Sim.', true], ['NAO', false], ['Não, é divulgação', false], ['Talvez', false]])('juiz: resposta %s → %s', async (text, expected) => {
+    const s = setup({ stop_reason: 'end_turn', content: [{ type: 'text', text }] })
+    expect(await s.model.judge({ name: 'COD Mobile Brasil', description: 'Bate-papo', topic: 'jogos' })).toBe(expected)
+    const request = s.create.mock.calls[0]?.[0] as { model: string; tools?: unknown; messages: unknown }
+    expect(request.model).toBe('cheap-model')
+    expect(request.tools).toBeUndefined()
+    expect(JSON.stringify(request.messages)).toContain('COD Mobile Brasil')
   })
   it('usa as últimas mensagens do grupo como contexto (no máximo 15, a própria como "você")', async () => {
     const s = setup({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'Alguém já testou o modo novo?' }] })
@@ -61,7 +70,7 @@ describe('modelo pequeno para grupos', () => {
   it('IA desabilitada/chave ausente não faz chamadas pagas', async () => {
     const s = setup({})
     s.settings.mockResolvedValue({ enabled: false, config: { apiKey: '', smallModel: 'cheap-model', largeModel: 'costly-model', timeoutMs: 1000 } })
-    await expect(s.model.discover('jogos')).rejects.toThrow('Configure')
+    await expect(s.model.judge({ name: 'Jogos', topic: 'jogos' })).rejects.toThrow('Configure')
     expect(s.create).not.toHaveBeenCalled()
   })
 })

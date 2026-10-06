@@ -6,7 +6,7 @@ import type { GroupAutomationStore } from './store'
 
 const DAY = 86_400_000
 const CODE = 'ABCDEFGHIJKLMNOPQRSTUV'
-const group = { id: 'one@g.us', name: 'Jogos', participants: 10, announce: false }
+const group = { id: 'one@g.us', name: 'Jogos', participants: 50, announce: false }
 function setup() {
   let now = Date.parse('2026-10-02T12:00:00Z')
   const configs = new Map<string, GroupAutomationConfig>([['a', { ...DEFAULT_GROUP_AUTOMATION, enabled: true }]])
@@ -36,7 +36,11 @@ function setup() {
   })
   let day = 0
   const limits = { get: vi.fn(async () => ({ effective: { perMinute: 5, perHour: 100, perDay: 20, factor: 1 }, warmup: { day } })), countOutbound: vi.fn(async () => 0) }
-  const model = { discover: vi.fn(async () => [{ inviteUrl: `https://chat.whatsapp.com/${CODE}`, topic: 'jogos' }]), message: vi.fn(async () => 'Qual jogo vocês estão curtindo hoje?') }
+  const model = {
+    discover: vi.fn(async () => [{ inviteUrl: `https://chat.whatsapp.com/${CODE}`, topic: 'jogos' }]),
+    judge: vi.fn(async (_group: { name: string; description?: string; topic: string }) => true),
+    message: vi.fn(async () => 'Qual jogo vocês estão curtindo hoje?'),
+  }
   const sendGroup = vi.fn(async () => ({ id: 'daily-1' }))
   const messages = { get: vi.fn(async () => ({ status: 'sent', sentAt: new Date(now - DAY).toISOString() })) }
   const invites = { run: vi.fn(async () => ({ result: 'joined' })) }
@@ -300,6 +304,54 @@ describe('entrada automática e mensagem diária', () => {
     await s.service.run('a')
     expect(s.sendGroup).toHaveBeenCalledTimes(1)
   })
+  it('juiz reprova spam: não entra nem repassa, e o convite sai do cache', async () => {
+    const s = setup()
+    s.model.judge.mockResolvedValue(false)
+    await s.service.run('a')
+    expect(s.model.judge).toHaveBeenCalledWith({ name: 'Jogos', description: 'Bate-papo sobre jogos', topic: 'jogos' })
+    expect(s.accept).not.toHaveBeenCalled()
+    expect(s.states.get('a')?.discovery?.candidates).toEqual([])
+    expect(s.states.get('a')?.rejectedAt).toBeDefined()
+
+    const t = setup()
+    t.sessions.set('a', { ...t.sessions.get('a')!, proxyId: null })
+    t.configs.set('b', { ...DEFAULT_GROUP_AUTOMATION, enabled: true })
+    t.model.judge.mockResolvedValue(false)
+    await t.service.run('a')
+    expect(t.invites.run).not.toHaveBeenCalled()
+    expect(t.states.get('a')?.groups).toEqual([])
+  })
+  it('tamanho fora de 20 a 900 participantes é descartado sem chamar o juiz', async () => {
+    for (const participants of [5, 2000]) {
+      const s = setup()
+      s.inspect.mockResolvedValue({ ...group, participants, description: 'jogos' })
+      await s.service.run('a')
+      expect(s.model.judge, String(participants)).not.toHaveBeenCalled()
+      expect(s.accept, String(participants)).not.toHaveBeenCalled()
+    }
+  })
+  it('convite expirado é descartado sem marcar erro, e o resto do ciclo segue', async () => {
+    const s = setup()
+    s.a.setGroups([group])
+    s.states.set('a', { groups: [{ id: group.id, name: 'Jogos', topic: 'jogos', inviteCode: 'OLD', joinedAt: 0, state: 'joined' }] })
+    s.model.discover.mockResolvedValue([{ inviteUrl: `https://chat.whatsapp.com/${'X'.repeat(22)}`, topic: 'jogos' }])
+    s.inspect.mockRejectedValue(new Error('not-authorized'))
+    await s.service.run('a')
+    expect(s.states.get('a')?.lastError).toBeUndefined()
+    expect(s.sendGroup).toHaveBeenCalledTimes(1) // mensagem diária do grupo existente não é afetada
+  })
+  it('depois de um descarte espera 15 min, e consulta no máximo 8 convites em 24 h', async () => {
+    const s = setup()
+    s.level(10)
+    s.model.discover.mockResolvedValue(Array.from({ length: 20 }, (_, i) => ({ inviteUrl: `https://chat.whatsapp.com/${String(i).padStart(22, 'A')}`, topic: 'jogos' })))
+    s.model.judge.mockResolvedValue(false)
+    await s.service.run('a')
+    s.advance(60_000)
+    await s.service.run('a')
+    expect(s.inspect).toHaveBeenCalledTimes(1) // em pausa após o descarte
+    for (let i = 0; i < 20; i++) { s.advance(16 * 60_000); await s.service.run('a') }
+    expect(s.inspect).toHaveBeenCalledTimes(8)
+  })
   it('encerra o timer e não lança novos ciclos após stop', async () => {
     const s = setup()
     s.configs.set('a', { ...DEFAULT_GROUP_AUTOMATION })
@@ -408,6 +460,7 @@ describe('simulação da automação de grupos', () => {
           if (rand() < faults.discover) throw new Error('busca falhou')
           return Array.from({ length: 8 }, () => pool[Math.floor(rand() * pool.length)]!).map((g) => ({ inviteUrl: `https://chat.whatsapp.com/${g.code}`, topic: 'jogos' }))
         },
+        judge: async () => { maybeCrash(); return rand() >= faults.reject },
         message: async () => { maybeCrash(); if (rand() < faults.message) throw new Error('IA falhou'); return `msg ${++msgSeq}` },
       }
       const pipeline = {

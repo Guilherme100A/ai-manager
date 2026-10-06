@@ -33,6 +33,10 @@ export interface GroupAutomationState {
   /** Chip sem proxy: quando registrou grupos descobertos para repassar (limitado ao teto por 24 h). */
   discoveredTimes?: number[]
   discovery?: { query: string; at: number; candidates: Array<{ inviteUrl: string; topic: string }> }
+  /** Consultas de convite ao WhatsApp nas últimas 24 h (teto contra rajadas de convites inválidos/rejeitados). */
+  inspectedTimes?: number[]
+  /** Último candidato descartado (expirado, tamanho fora da faixa ou reprovado pelo juiz): pausa antes do próximo. */
+  rejectedAt?: number
   lastSearchAt?: number
   lastJoinAt?: number
   lastError?: string
