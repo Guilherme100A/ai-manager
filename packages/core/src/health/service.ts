@@ -8,6 +8,9 @@ import { computeHealthScore, type HealthLabel } from './score'
 
 /** Janela padrão dos contadores do score: 24h. */
 export const DEFAULT_HEALTH_WINDOW_MS = 24 * 60 * 60 * 1000
+/** Rajada de quedas: a partir da 3ª dentro de 60 min (regra do baileys-antiban). */
+export const DISCONNECT_BURST_SIZE = 3
+export const DISCONNECT_BURST_WINDOW_MS = 60 * 60 * 1000
 
 /** Tipos de health_event gravados pelo monitor (T10) e pelo SessionManager (T05). */
 export const HEALTH_EVENT_TYPES = {
@@ -40,8 +43,10 @@ export interface HealthStats {
   received: number
   failed: number
   disconnects: number
+  /** Quedas em rajada: a 3ª em diante dentro de 60 min. Só elas pesam no score; quedas isoladas são rotina do WhatsApp. */
+  burstDisconnects: number
   forbidden403: number
-  /** Erros (failed + disconnects) da metade recente da janela. */
+  /** Falhas de envio da metade recente da janela (quedas ficam fora: já pesam em burstDisconnects). */
   recentErrors: number
   /** Erros da metade anterior da janela. */
   previousErrors: number
@@ -138,14 +143,25 @@ export class HealthService {
 
     const failedRow = msg('failed')
     const discRow = ev(HEALTH_EVENT_TYPES.disconnected)
-    const recentErrors = n(failedRow?.recent) + n(discRow?.recent)
-    const previousErrors = n(failedRow?.total) + n(discRow?.total) - recentErrors
+    const recentErrors = n(failedRow?.recent)
+    const previousErrors = n(failedRow?.total) - recentErrors
+
+    const discTimes = (await this.db
+      .select({ at: healthEvents.createdAt })
+      .from(healthEvents)
+      .where(and(eq(healthEvents.sessionId, sessionId), eq(healthEvents.type, HEALTH_EVENT_TYPES.disconnected), inWindow(healthEvents.createdAt)))
+      .orderBy(healthEvents.createdAt)).map((r) => r.at.getTime())
+    let burstDisconnects = 0
+    for (let i = DISCONNECT_BURST_SIZE - 1; i < discTimes.length; i++) {
+      if (discTimes[i]! - discTimes[i - DISCONNECT_BURST_SIZE + 1]! <= DISCONNECT_BURST_WINDOW_MS) burstDisconnects++
+    }
 
     return {
       sent: n(msg('sent')?.total),
       received: n(msg('received')?.total),
       failed: n(failedRow?.total),
       disconnects: n(discRow?.total),
+      burstDisconnects,
       forbidden403: n(ev(HEALTH_EVENT_TYPES.forbidden403)?.total),
       recentErrors,
       previousErrors,
@@ -161,7 +177,7 @@ export class HealthService {
     const row = await this.store.get(sessionId)
     const stats = await this.stats(sessionId, now)
     const warmup = this.warmup(row, now)
-    const { score, label } = computeHealthScore(stats)
+    const { score, label } = computeHealthScore({ ...stats, disconnects: stats.burstDisconnects })
     return { row, stats, warmup, score, label, health: toSessionHealth(row.status, warmup, score, label, stats) }
   }
 

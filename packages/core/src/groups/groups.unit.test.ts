@@ -41,13 +41,13 @@ describe('grupos', () => {
     expect(err.code).toBe('SESSION_NOT_CONNECTED')
   })
 
-  it('listSessionGroups exige WARMING/STABLE e transporte vivo', async () => {
+  it('listSessionGroups exige WARMING/STABLE/DEGRADED e transporte vivo', async () => {
     const t = connected()
     const getTransport = () => t
-    for (const status of ['WARMING', 'STABLE'] as const) {
+    for (const status of ['WARMING', 'STABLE', 'DEGRADED'] as const) {
       expect(await listSessionGroups({ store: storeWith(status), sessionId: 's1', getTransport })).toHaveLength(2)
     }
-    for (const status of ['NEW', 'DEGRADED', 'PAUSED', 'DISCONNECTED'] as const) {
+    for (const status of ['NEW', 'PAUSED', 'DISCONNECTED'] as const) {
       await expect(listSessionGroups({ store: storeWith(status), sessionId: 's1', getTransport })).rejects.toBeInstanceOf(SessionNotConnectedError)
     }
     await expect(listSessionGroups({ store: storeWith('STABLE'), sessionId: 's1' })).rejects.toBeInstanceOf(SessionNotConnectedError)

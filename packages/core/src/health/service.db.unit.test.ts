@@ -73,13 +73,26 @@ describe('HealthService', () => {
     expect(h.lastEventAt).toBe(ago(10 * 60 * 1000).toISOString())
   })
 
-  it('tendência de erros: metade recente menos a anterior', async () => {
+  it('tendência de erros: falhas de envio da metade recente menos a anterior (quedas não entram)', async () => {
     const s = await session()
     await msg(s.id, 'failed', ago(20 * H))
     for (let i = 0; i < 4; i++) await msg(s.id, 'failed', ago(H))
     await ev(s.id, 'disconnected', ago(2 * H))
     const st = await service().stats(s.id)
-    expect(st).toMatchObject({ recentErrors: 5, previousErrors: 1, errorTrend: 4 })
+    expect(st).toMatchObject({ recentErrors: 4, previousErrors: 1, errorTrend: 3 })
+  })
+
+  it('quedas isoladas não pesam no score; só a 3ª em diante dentro de 60 min', async () => {
+    const s = await session()
+    for (const h of [1, 4, 7, 10, 13]) await ev(s.id, 'disconnected', ago(h * H)) // 5 quedas espaçadas
+    let h = await service().getHealth(s.id)
+    expect(h).toMatchObject({ disconnects: 5, score: 100, label: 'Good' })
+
+    for (const min of [10, 20, 30, 40]) await ev(s.id, 'disconnected', ago(15 * H + min * 60_000)) // rajada de 4 em 30 min
+    const st = await service().stats(s.id)
+    expect(st).toMatchObject({ disconnects: 9, burstDisconnects: 2 })
+    h = await service().getHealth(s.id)
+    expect(h.score).toBe(90)
   })
 
   it('sinais até o último resume manual não contam', async () => {

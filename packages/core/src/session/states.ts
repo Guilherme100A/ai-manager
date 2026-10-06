@@ -32,8 +32,11 @@ export const SESSION_TRANSITIONS: Record<SessionState, readonly SessionState[]> 
 
 /** Estados com a conta autenticada e conexão esperada. */
 export const CONNECTED_STATES: readonly SessionState[] = ['WARMING', 'STABLE', 'DEGRADED', 'PAUSED']
-/** Estados que permitem envio (SESSION_NOT_CONNECTED fora deles, SPEC 3.4). */
-export const SENDABLE_STATES: readonly SessionState[] = ['WARMING', 'STABLE']
+/**
+ * Estados que permitem envio (SESSION_NOT_CONNECTED fora deles, SPEC 3.4). DEGRADED envia em ritmo reduzido
+ * (DEGRADED_LIMIT_FACTOR nos limites), como o baileys-antiban: parar de vez não reduz quedas e só atrasa o aquecimento.
+ */
+export const SENDABLE_STATES: readonly SessionState[] = ['WARMING', 'STABLE', 'DEGRADED']
 
 export function isSessionState(value: unknown): value is SessionState {
   return typeof value === 'string' && (SESSION_STATES as readonly string[]).includes(value)

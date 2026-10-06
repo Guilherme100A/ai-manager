@@ -91,11 +91,15 @@ describe('gates default', () => {
     expect(await reject(pipeline.send({ ...req('x'), actor: '' }))).toMatchObject({ code: 'UNAUTHORIZED', status: 401, gate: 'auth' })
     expect(await reject(pipeline.send(req('nope')))).toMatchObject({ code: 'SESSION_NOT_FOUND', status: 404 })
     expect(await reject(pipeline.send(req('00000000-0000-4000-8000-000000000000')))).toMatchObject({ code: 'SESSION_NOT_FOUND' })
-    for (const status of ['NEW', 'PAUSED', 'DEGRADED'] as const) {
+    for (const status of ['NEW', 'PAUSED'] as const) {
       const id = await session(status)
       transports.set(id, new FakeTransport())
       expect(await reject(pipeline.send(req(id)))).toMatchObject({ code: 'SESSION_NOT_CONNECTED', status: 409, gate: 'connected' })
     }
+    // DEGRADED envia em ritmo reduzido: passa pelo gate connected.
+    const degraded = await session('DEGRADED')
+    transports.set(degraded, new FakeTransport())
+    expect((await reject(pipeline.send(req(degraded))))?.gate).not.toBe('connected')
     const noTransport = await session('STABLE')
     expect(await reject(pipeline.send(req(noTransport)))).toMatchObject({ code: 'SESSION_NOT_CONNECTED' })
     expect(queue.enqueue).not.toHaveBeenCalled()
