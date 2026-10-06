@@ -45,3 +45,6 @@ export * from './safety'
 export * from './ai'
 export * from './session-router'
 export * from './conversations'
+
+// Relatório diário por chip (quedas, bloqueios, envios, grupos)
+export * from './reports/daily'

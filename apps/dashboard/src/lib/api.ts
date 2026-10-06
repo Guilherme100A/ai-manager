@@ -4,6 +4,7 @@ import type { ProxyInput } from './proxy-form'
 import type {
   AuthUser,
   Contact,
+  DailyReport,
   Group,
   ImportResult,
   LoginResult,
@@ -135,6 +136,7 @@ export const api = {
   importContacts: (csv: string) => request<ImportResult>('/api/contacts/import', { raw: { body: csv, contentType: 'text/csv' } }),
 
   webhooks: () => request<{ items: Webhook[] }>('/api/webhooks').then((r) => r.items),
+  dailyReport: (days = 7) => request<DailyReport>(`/api/reports/daily?days=${days}`),
   createWebhook: (input: { name: string; channel: WebhookChannel; url: string; secret?: string; config?: Record<string, unknown>; events?: string[] }) =>
     request<Webhook>('/api/webhooks', { body: input }),
   updateWebhook: (id: string, input: Partial<{ enabled: boolean; name: string }>) =>

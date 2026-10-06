@@ -4,6 +4,7 @@ import { Layout } from './components/Layout'
 import { useRoute, useToken } from './lib/hooks'
 import { navigate, type Route } from './lib/router'
 import { Alerts } from './pages/Alerts'
+import { Report } from './pages/Report'
 import { AiSettingsPage } from './pages/AiSettings'
 import { Contacts } from './pages/Contacts'
 import { Groups } from './pages/Groups'
@@ -35,6 +36,8 @@ function Page({ route }: { route: Route }) {
       return <Groups />
     case 'alerts':
       return <Alerts />
+    case 'report':
+      return <Report />
     case 'ai':
       return <AiSettingsPage />
     case 'login':

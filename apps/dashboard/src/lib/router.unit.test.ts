@@ -15,6 +15,7 @@ describe('rotas por hash', () => {
     ['#/contacts', { name: 'contacts' }],
     ['#/groups', { name: 'groups' }],
     ['#/alerts', { name: 'alerts' }],
+    ['#/report', { name: 'report' }],
     ['#/nope', { name: 'not-found', path: '/nope' }],
     ['#/sessions/a/b', { name: 'not-found', path: '/sessions/a/b' }],
   ])('%s', (hash, route) => expect(parseHash(hash)).toEqual(route))

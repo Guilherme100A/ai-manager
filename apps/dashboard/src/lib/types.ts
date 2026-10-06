@@ -147,3 +147,43 @@ export interface SessionRouteRun {
   messageId: string | null
   error: string | null
 }
+
+/** Relatório diário (GET /api/reports/daily): "agora" por chip + uma linha por chip e dia (Brasília). */
+export interface ReportChipNow {
+  sessionId: string
+  name: string
+  phone: string | null
+  status: SessionState
+  proxy: boolean
+  score: number
+  label: HealthLabel
+  warmupDay: number
+  warmupPercent: number
+  dailyLimit: number | null
+  lastConnectedAt: string | null
+}
+
+export interface ReportDayRow {
+  day: string
+  sessionId: string
+  sent: number
+  failed: number
+  received: number
+  disconnects: number
+  disconnectCodes: Record<string, number>
+  proxyUnavailable: number
+  degraded: number
+  recovered: number
+  blocked: number
+  groupsJoined: number
+  groupsPending: number
+  groupsRejected: number
+  groupsDiscovered: number
+}
+
+export interface DailyReport {
+  generatedAt: string
+  days: string[]
+  chips: ReportChipNow[]
+  rows: ReportDayRow[]
+}

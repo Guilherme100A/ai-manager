@@ -10,6 +10,7 @@ const LINKS: Array<{ route: Route['name']; href: string; label: string; testId: 
   { route: 'session-links', href: '#/session-links', label: 'Vínculos de sessões', testId: 'nav-session-links', icon: IconPhone },
   { route: 'contacts', href: '#/contacts', label: 'Contatos', testId: 'nav-contacts', icon: IconUsers },
   { route: 'groups', href: '#/groups', label: 'Grupos', testId: 'nav-groups', icon: IconGroups },
+  { route: 'report', href: '#/report', label: 'Relatório', testId: 'nav-report', icon: IconBell },
   { route: 'alerts', href: '#/alerts', label: 'Alertas', testId: 'nav-alerts', icon: IconBell },
   { route: 'ai', href: '#/ai', label: 'IA / Modelo LLM', testId: 'nav-ai', icon: IconSpark },
 ]

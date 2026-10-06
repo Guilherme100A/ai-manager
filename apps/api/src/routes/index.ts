@@ -17,6 +17,7 @@ import { suggestionsRoutes } from './suggestions'
 import { authRoutes } from './auth'
 import { aiSettingsRoutes } from './ai-settings'
 import { sessionLinksRoutes } from './session-links'
+import { reportsRoutes } from './reports'
 
 export function registerRoutes(app: Hono<AppEnv>, deps: AppDeps) {
   app.route('/', healthRoutes(deps))
@@ -39,4 +40,6 @@ export function registerRoutes(app: Hono<AppEnv>, deps: AppDeps) {
   // T19 — configurações do modelo de LLM (GET/PUT /api/ai/settings, POST /api/ai/settings/test)
   app.route('/', aiSettingsRoutes(deps))
   app.route('/', sessionLinksRoutes(deps))
+  // Relatório diário por chip (GET /api/reports/daily)
+  app.route('/', reportsRoutes(deps))
 }

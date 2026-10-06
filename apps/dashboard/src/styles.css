@@ -1397,3 +1397,14 @@ legend {
   grid-column: 1 / -1;
   margin: -0.25rem 0 0;
 }
+
+/* Relatório diário: destaque do que pede atenção */
+.report-alert {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.report-warn {
+  color: var(--warning);
+  font-weight: 600;
+}

@@ -9,6 +9,7 @@ export type Route =
   | { name: 'contacts' }
   | { name: 'groups' }
   | { name: 'alerts' }
+  | { name: 'report' }
   | { name: 'ai' }
   | { name: 'session-links' }
   | { name: 'not-found'; path: string }
@@ -30,6 +31,7 @@ export function parseHash(hash: string): Route {
     case 'contacts':
     case 'groups':
     case 'alerts':
+    case 'report':
     case 'ai':
     case 'session-links':
       return second ? { name: 'not-found', path } : { name: head }
