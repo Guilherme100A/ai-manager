@@ -37,6 +37,7 @@ import { HealthMonitor } from '../health'
 import { createWorkerLogger, startObservabilityServer, type ObservabilityServer } from '../observability'
 import { attachAi } from '../ai'
 import { startProxyMonitor, type ProxyMonitor } from '../proxy'
+import { startStallMonitor } from './stall-monitor'
 import { attachQueueToSessions } from '../queue'
 import { createTransportFactory, disappearingKey, ensureOwnContact, redisDisappearingStore, SessionManager, type TransportFactory } from '../sessions'
 import { loadWorkerConfig, type WorkerConfig } from './config'
@@ -306,6 +307,8 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
       onAvailable: ({ proxyId }) => void recoverProxySessions(proxyId).catch(() => undefined),
     })
     onStop('proxy-monitor', () => proxyMonitor.stop())
+    const stallMonitor = startStallMonitor({ db, logger })
+    onStop('stall-monitor', () => stallMonitor.stop())
     const alerts = attachAlerts({ dispatcher: new AlertDispatcher({ db, logger }), healthMonitor: monitor, proxyChecker: proxyMonitor.checker, logger })
     onStop('alerts', async () => {
       alerts.stop()

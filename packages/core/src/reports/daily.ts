@@ -42,6 +42,21 @@ export interface ReportDayRow {
   groupsPending: number
   groupsRejected: number
   groupsDiscovered: number
+  /** Quedas que aconteceram até 60 s depois de um travamento do worker (indício de causa nossa, não do WhatsApp). */
+  disconnectsNearStall: number
+}
+
+/** Travamentos do processo do worker (event loop parado > 1 s), por dia. */
+export interface ReportWorkerDay {
+  day: string
+  stalls: number
+  maxLagMs: number
+}
+
+export interface ReportStall {
+  at: string
+  lagMs: number
+  heapMb: number | null
 }
 
 export interface DailyReport {
@@ -49,7 +64,15 @@ export interface DailyReport {
   days: string[]
   chips: ReportChipNow[]
   rows: ReportDayRow[]
+  worker: ReportWorkerDay[]
+  /** Últimos travamentos (mais recente primeiro), para comparar com os horários das quedas. */
+  recentStalls: ReportStall[]
 }
+
+/** Ação gravada em audit_logs pelo monitor de travamento do worker. */
+export const WORKER_STALL_ACTION = 'worker.stall'
+/** Janela para ligar uma queda a um travamento: queda até 60 s depois do travamento. */
+export const STALL_LINK_WINDOW_S = 60
 
 export interface DailyReportOptions {
   days?: number
@@ -104,7 +127,7 @@ export async function buildDailyReport(db: Database, opts: DailyReportOptions = 
     let r = rows.get(key)
     if (!r) {
       r = { day: d, sessionId, sent: 0, failed: 0, received: 0, disconnects: 0, disconnectCodes: {}, proxyUnavailable: 0, degraded: 0,
-        recovered: 0, blocked: 0, groupsJoined: 0, groupsPending: 0, groupsRejected: 0, groupsDiscovered: 0 }
+        recovered: 0, blocked: 0, groupsJoined: 0, groupsPending: 0, groupsRejected: 0, groupsDiscovered: 0, disconnectsNearStall: 0 }
       rows.set(key, r)
     }
     return r
@@ -143,6 +166,30 @@ export async function buildDailyReport(db: Database, opts: DailyReportOptions = 
     else if (g.kind === 'discovered') r.groupsDiscovered += n
   }
 
+  const nearStallRows = (await db.execute(sql`
+    select ${day('h.created_at')} as day, h.session_id, count(*) as n
+    from health_events h
+    where h.type = 'disconnected' and h.created_at > ${since} and exists (
+      select 1 from audit_logs a where a.action = ${WORKER_STALL_ACTION}
+        and a.created_at between h.created_at - ${sql.raw(`interval '${STALL_LINK_WINDOW_S} seconds'`)} and h.created_at)
+    group by 1, 2`)).rows as Array<Record<string, unknown>>
+  for (const x of nearStallRows) {
+    if (!keep(x.day, x.session_id)) continue
+    row(String(x.day), String(x.session_id)).disconnectsNearStall += num(x.n)
+  }
+
+  const workerRows = (await db.execute(sql`
+    select ${day('created_at')} as day, count(*) as stalls, max((detail->>'lagMs')::int) as max_lag
+    from audit_logs where action = ${WORKER_STALL_ACTION} and created_at > ${since} group by 1`)).rows as Array<Record<string, unknown>>
+  const worker: ReportWorkerDay[] = workerRows
+    .filter((w) => dayList.includes(String(w.day)))
+    .map((w) => ({ day: String(w.day), stalls: num(w.stalls), maxLagMs: num(w.max_lag) }))
+    .sort((a, b) => b.day.localeCompare(a.day))
+  const recentStalls: ReportStall[] = ((await db.execute(sql`
+    select created_at, detail from audit_logs where action = ${WORKER_STALL_ACTION} and created_at > ${since}
+    order by created_at desc limit 20`)).rows as Array<{ created_at: Date | string; detail: { lagMs?: number; heapMb?: number } | null }>)
+    .map((s) => ({ at: new Date(s.created_at).toISOString(), lagMs: num(s.detail?.lagMs), heapMb: s.detail?.heapMb ?? null }))
+
   const health = new HealthService(db, { ...opts.health, now: () => now })
   const chips: ReportChipNow[] = []
   for (const s of sessionRows) {
@@ -168,5 +215,7 @@ export async function buildDailyReport(db: Database, opts: DailyReportOptions = 
     days: dayList,
     chips,
     rows: [...rows.values()].sort((a, b) => b.day.localeCompare(a.day) || (order.get(a.sessionId)! - order.get(b.sessionId)!)),
+    worker,
+    recentStalls,
   }
 }

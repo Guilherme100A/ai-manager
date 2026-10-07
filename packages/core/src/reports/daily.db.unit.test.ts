@@ -89,6 +89,25 @@ describe('relatório diário', () => {
     expect(r.rows[0]!.day).toBe('2026-10-07')
   })
 
+  it('travamentos do worker: por dia, últimos e quedas ligadas a eles (até 60 s depois)', async () => {
+    const a = await chip('chip A')
+    const stall = (createdAt: Date, lagMs: number) =>
+      db.insert(auditLogs).values({ actor: 'worker', action: 'worker.stall', targetType: 'worker', detail: { lagMs, heapMb: 120 }, createdAt })
+    await stall(at('2026-10-07T13:00:00Z'), 1500)
+    await stall(at('2026-10-07T16:00:00Z'), 4200)
+    await ev(a.id, 'disconnected', at('2026-10-07T13:00:30Z'), { reason: 'transient', statusCode: 428 }) // 30 s depois: ligada
+    await ev(a.id, 'disconnected', at('2026-10-07T14:00:00Z'), { reason: 'transient', statusCode: 428 }) // sem travamento
+    await ev(a.id, 'disconnected', at('2026-10-07T15:59:00Z'), { reason: 'transient', statusCode: 428 }) // antes do travamento
+
+    const r = await buildDailyReport(db, { days: 2, now: () => NOW })
+    expect(r.worker).toEqual([{ day: '2026-10-07', stalls: 2, maxLagMs: 4200 }])
+    expect(r.recentStalls.map((s) => [s.at, s.lagMs, s.heapMb])).toEqual([
+      ['2026-10-07T16:00:00.000Z', 4200, 120],
+      ['2026-10-07T13:00:00.000Z', 1500, 120],
+    ])
+    expect(r.rows.find((x) => x.sessionId === a.id)).toMatchObject({ disconnects: 3, disconnectsNearStall: 1 })
+  })
+
   it('dias fora do período e chips removidos não aparecem', async () => {
     const a = await chip('chip A')
     await msg(a.id, 'delivered', at('2026-09-20T12:00:00Z'))

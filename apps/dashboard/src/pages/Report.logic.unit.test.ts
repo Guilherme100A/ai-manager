@@ -4,7 +4,7 @@ import { formatCodes, rowFlags, shortDay, totalsBySession } from './Report.logic
 
 const row = (over: Partial<ReportDayRow> = {}): ReportDayRow => ({
   day: '2026-10-07', sessionId: 's1', sent: 0, failed: 0, received: 0, disconnects: 0, disconnectCodes: {}, proxyUnavailable: 0,
-  degraded: 0, recovered: 0, blocked: 0, groupsJoined: 0, groupsPending: 0, groupsRejected: 0, groupsDiscovered: 0, ...over,
+  degraded: 0, recovered: 0, blocked: 0, groupsJoined: 0, groupsPending: 0, groupsRejected: 0, groupsDiscovered: 0, disconnectsNearStall: 0, ...over,
 })
 
 describe('relatório: o que merece atenção', () => {
@@ -15,6 +15,9 @@ describe('relatório: o que merece atenção', () => {
     const flags = rowFlags(row({ blocked: 1, failed: 2, disconnects: 3, proxyUnavailable: 1, degraded: 1 }))
     expect(flags.map((f) => f.level)).toEqual(['alert', 'alert', 'warn', 'warn', 'warn'])
     expect(flags[0]!.text).toContain('bloqueio')
+  })
+  it('queda logo após travamento do worker vira aviso', () => {
+    expect(rowFlags(row({ disconnects: 1, disconnectsNearStall: 1 }))).toEqual([{ level: 'warn', text: '1 queda(s) logo após travamento do worker' }])
   })
   it('códigos de queda: maior primeiro', () => {
     expect(formatCodes({ 503: 1, 428: 3, 408: 1 })).toBe('428×3 · 408×1 · 503×1')

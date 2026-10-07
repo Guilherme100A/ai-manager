@@ -179,6 +179,20 @@ export interface ReportDayRow {
   groupsPending: number
   groupsRejected: number
   groupsDiscovered: number
+  /** Quedas até 60 s depois de um travamento do worker. */
+  disconnectsNearStall: number
+}
+
+export interface ReportWorkerDay {
+  day: string
+  stalls: number
+  maxLagMs: number
+}
+
+export interface ReportStall {
+  at: string
+  lagMs: number
+  heapMb: number | null
 }
 
 export interface DailyReport {
@@ -186,4 +200,6 @@ export interface DailyReport {
   days: string[]
   chips: ReportChipNow[]
   rows: ReportDayRow[]
+  worker: ReportWorkerDay[]
+  recentStalls: ReportStall[]
 }

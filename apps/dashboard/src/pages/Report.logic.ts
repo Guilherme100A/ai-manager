@@ -15,6 +15,7 @@ export function rowFlags(r: ReportDayRow): ReportFlag[] {
   if (r.blocked > 0) flags.push({ level: 'alert', text: `${r.blocked} sinal(is) de bloqueio (401/403)` })
   if (r.failed > 0) flags.push({ level: 'alert', text: `${r.failed} falha(s) de envio` })
   if (r.disconnects >= DISCONNECTS_WARN) flags.push({ level: 'warn', text: `${r.disconnects} quedas no dia` })
+  if (r.disconnectsNearStall > 0) flags.push({ level: 'warn', text: `${r.disconnectsNearStall} queda(s) logo após travamento do worker` })
   if (r.proxyUnavailable > 0) flags.push({ level: 'warn', text: `proxy caiu ${r.proxyUnavailable}x` })
   if (r.degraded > 0) flags.push({ level: 'warn', text: `entrou em DEGRADED ${r.degraded}x` })
   return flags

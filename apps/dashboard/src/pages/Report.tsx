@@ -92,6 +92,7 @@ export function Report() {
                 <th>Recebidas</th>
                 <th>Quedas</th>
                 <th>Códigos</th>
+                <th>Quedas c/ travamento</th>
                 <th>Proxy caiu</th>
                 <th>DEGRADED</th>
                 <th>Bloqueios</th>
@@ -108,6 +109,50 @@ export function Report() {
           {data && data.rows.length === 0 ? <p className="empty">Sem atividade no período.</p> : null}
         </div>
       </section>
+
+      <section className="panel" data-testid="report-worker">
+        <h2>Worker</h2>
+        <p className="muted">
+          Travamento = o processo ficou mais de 1 s sem responder. Nesse tempo as conexões não respondem o WhatsApp, que pode
+          derrubar vários chips juntos. Se as quedas aparecem logo após travamentos, a causa é nossa; se não, é do WhatsApp ou da rede.
+        </p>
+        {data && data.worker.length === 0 ? (
+          <p className="empty">Nenhum travamento no período.</p>
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Dia</th>
+                  <th>Travamentos</th>
+                  <th>Maior</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(data?.worker ?? []).map((w) => (
+                  <tr key={w.day} data-testid="report-worker-day">
+                    <td>{shortDay(w.day)}</td>
+                    <td className="report-warn">{w.stalls}</td>
+                    <td>{(w.maxLagMs / 1000).toFixed(1)} s</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {data && data.recentStalls.length > 0 ? (
+          <>
+            <h3>Últimos travamentos</h3>
+            <ul className="muted">
+              {data.recentStalls.map((s) => (
+                <li key={s.at}>
+                  {formatDateTime(s.at)} · {(s.lagMs / 1000).toFixed(1)} s{s.heapMb !== null ? ` · memória ${s.heapMb} MB` : ''}
+                </li>
+              ))}
+            </ul>
+          </>
+        ) : null}
+      </section>
     </div>
   )
 }
@@ -123,6 +168,7 @@ function DayRow({ row, name }: { row: ReportDayRow; name: string }) {
       <td>{row.received}</td>
       <td className={row.disconnects >= 3 ? 'report-warn' : undefined}>{row.disconnects}</td>
       <td className="mono">{formatCodes(row.disconnectCodes)}</td>
+      <td className={row.disconnectsNearStall ? 'report-warn' : undefined}>{row.disconnectsNearStall || '—'}</td>
       <td>{row.proxyUnavailable || '—'}</td>
       <td>{row.degraded || '—'}</td>
       <td className={row.blocked ? 'report-alert' : undefined}>{row.blocked}</td>
