@@ -279,6 +279,31 @@ describe('entrada automática e mensagem diária', () => {
     expect(s.accept).toHaveBeenCalledTimes(1)
     expect(s.sendGroup).toHaveBeenCalledTimes(1)
   })
+  it('repasse que falha devolve a entrada de B e não deixa grupo pendente fantasma', async () => {
+    const s = setup()
+    s.sessions.set('a', { ...s.sessions.get('a')!, proxyId: null })
+    s.configs.set('b', { ...DEFAULT_GROUP_AUTOMATION, enabled: true })
+    s.invites.run.mockRejectedValueOnce(new Error('rate-overlimit'))
+    await s.service.run('a')
+    expect(s.invites.run).toHaveBeenCalledTimes(1)
+    expect(s.states.get('b')).toMatchObject({ groups: [], entryTimes: [] })
+    expect(s.states.get('a')?.groups[0]).toMatchObject({ id: group.id, state: 'pending' })
+    expect(s.states.get('a')?.groups[0]?.forwardedTo).toBeUndefined() // A tenta repassar de novo
+
+    s.advance(60_000)
+    await s.service.run('a')
+    expect(s.invites.run).toHaveBeenCalledTimes(2)
+    expect(s.states.get('b')?.groups[0]).toMatchObject({ id: group.id, state: 'joined' })
+  })
+  it('repasse que falha mas B entrou mesmo assim mantém o grupo', async () => {
+    const s = setup()
+    s.sessions.set('a', { ...s.sessions.get('a')!, proxyId: null })
+    s.configs.set('b', { ...DEFAULT_GROUP_AUTOMATION, enabled: true })
+    s.invites.run.mockImplementationOnce(async () => { s.b.setGroups([group]); throw new Error('timeout após aceitar') })
+    await s.service.run('a')
+    expect(s.states.get('b')?.groups[0]).toMatchObject({ id: group.id })
+    expect(s.states.get('b')?.entryTimes).toHaveLength(1)
+  })
   it('não encaminha convite para B sem capacidade ou com automação desativada', async () => {
     const s = setup()
     s.configs.set('b', { ...DEFAULT_GROUP_AUTOMATION, enabled: true })

@@ -338,8 +338,9 @@ export class GroupAutomation {
     if (!target) return
     const lease = await this.opts.store.claim(target.id, LEASE)
     if (!lease) return
+    const transport = this.opts.manager.getTransport(target.id)
+    let markedAt: number | undefined
     try {
-      const transport = this.opts.manager.getTransport(target.id)
       if (!transport) return
       const groups = await transport.fetchGroups()
       const state = await this.opts.store.state(target.id)
@@ -347,17 +348,30 @@ export class GroupAutomation {
       if (!(await this.capacity(target.id)).canEnter) return
       if (!await this.active(target.id, transport)) return
       // Marca a tentativa antes do aceite; reinício não causa várias entradas seguidas.
-      state.lastJoinAt = this.now()
-      state.entryTimes = [...(state.entryTimes ?? []).filter((at) => at > this.now() - DAY), this.now()]
-      upsertGroup(state.groups, { ...group, joinedAt: this.now(), state: 'pending', forwardedTo: id, lastPostDay: undefined, postAt: undefined, draft: undefined, draftAttemptDay: undefined, lastMessageId: undefined })
+      markedAt = this.now()
+      state.lastJoinAt = markedAt
+      state.entryTimes = [...(state.entryTimes ?? []).filter((at) => at > markedAt! - DAY), markedAt]
+      upsertGroup(state.groups, { ...group, joinedAt: markedAt, state: 'pending', forwardedTo: id, lastPostDay: undefined, postAt: undefined, draft: undefined, draftAttemptDay: undefined, lastMessageId: undefined })
       await this.opts.store.saveState(target.id, state)
       const out = await this.opts.invites.run({ sourceSessionId: id, targetSessionId: target.id, groupIds: [group.id], actor: 'group-automation' }, { groupId: group.id, code: group.inviteCode })
       const managed = state.groups.find((g) => g.id === group.id)!
       managed.state = out.result === 'joined' ? 'joined' : 'pending'
       await this.opts.store.saveState(target.id, state)
       group.forwardedTo = target.id
-    } catch {
-      this.opts.logger.warn({ session_id: id, target_session_id: target.id }, 'group invitation forwarding deferred')
+    } catch (err) {
+      this.opts.logger.warn({ session_id: id, target_session_id: target.id, err: err instanceof Error ? err.message : String(err) }, 'group invitation forwarding deferred')
+      // Falhou sem entrar: devolve a entrada e tira o grupo "pendente" fantasma (senão a vaga do dia some à toa).
+      if (markedAt !== undefined) await this.undoForwardMark(target.id, group.id, markedAt, transport).catch(() => undefined)
     } finally { await this.opts.store.release(target.id, lease) }
+  }
+
+  private async undoForwardMark(targetId: string, groupId: string, markedAt: number, transport: WaTransport | undefined) {
+    const joined = await transport?.fetchGroups().then((gs) => gs.some((g) => g.id === groupId)).catch(() => false)
+    if (joined) return
+    const state = await this.opts.store.state(targetId)
+    const at = (state.entryTimes ?? []).indexOf(markedAt)
+    if (at >= 0) state.entryTimes!.splice(at, 1)
+    state.groups = state.groups.filter((g) => !(g.id === groupId && g.state === 'pending' && g.joinedAt === markedAt))
+    await this.opts.store.saveState(targetId, state)
   }
 }
