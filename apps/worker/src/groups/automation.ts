@@ -127,7 +127,11 @@ export class GroupAutomation {
   requestTick(id: string) { if (!this.stopped) this.launch(id); return { queued: !this.stopped } }
   private launch(id: string) {
     if (this.running.has(id)) return
-    const run = this.run(id).catch(() => this.opts.logger.warn({ session_id: id }, 'group automation cycle failed'))
+    const run = this.run(id).catch((err: unknown) => this.opts.logger.warn({
+      session_id: id,
+      err: err instanceof Error ? err.message : String(err),
+      at: err instanceof Error ? err.stack?.split('\n').slice(1, 4).map((l) => l.trim()).join(' | ') : undefined,
+    }, 'group automation cycle failed'))
     this.running.set(id, run)
     void run.finally(() => this.running.delete(id))
   }
