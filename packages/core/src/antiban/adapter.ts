@@ -1,7 +1,7 @@
 // AntibanAdapter (T09, AC-T09-03): todo envio efetivo passa por aqui antes de chegar ao transporte.
 // Modo `real` envolve o AntiBan do pacote baileys-antiban (delays, limites, bloqueio de mensagens idênticas).
 // Modo `passthrough` só registra e conta (para testes): nunca é o default.
-import { AntiBan, type AntiBanInput } from 'baileys-antiban'
+import { AntiBan, type AntiBanInput, type WarmUpState } from 'baileys-antiban'
 import { logger as coreLogger } from '../logger'
 import type { OutgoingContent } from '../transport'
 
@@ -115,7 +115,18 @@ export interface BaileysAntibanAdapterOptions {
   /** Preset ou config do AntiBan (default: preset conservative). `logging` fica sempre desligado (sem console). */
   config?: AntiBanInput
   /** Fábrica do AntiBan (injetável em testes). Uma instância por key (sessão). */
-  create?: (config: AntiBanInput) => AntiBanLike
+  create?: (config: AntiBanInput, warmUp: WarmUpState) => AntiBanLike
+}
+
+/**
+ * O aquecimento que vale é o nosso (persistido em sessions.warmup_started_at, gate warmupLimit do pipeline).
+ * O do AntiBan fica só em memória: a cada restart do worker voltava ao "dia 1" (15 msgs no conservative) e
+ * recusava envios que o nosso cronograma liberava, contando como falha. Por isso a instância já nasce graduada
+ * e nunca volta ao warm-up por inatividade; ritmo, jitter, mensagens idênticas e saúde do AntiBan seguem valendo.
+ */
+const NEVER_REWARM_HOURS = 1e9
+export function graduatedWarmUp(now = Date.now()): WarmUpState {
+  return { startedAt: now - 365 * 86_400_000, lastActiveAt: now, dailyCounts: [], graduated: true }
 }
 
 /** Modo real: uma instância do AntiBan por sessão, com o estado de ritmo/limites dela. */
@@ -123,19 +134,20 @@ export class BaileysAntibanAdapter extends BaseAdapter {
   readonly mode = 'real' as const
   private readonly instances = new Map<string, AntiBanLike>()
   private readonly config: AntiBanInput
-  private readonly create: (config: AntiBanInput) => AntiBanLike
+  private readonly create: (config: AntiBanInput, warmUp: WarmUpState) => AntiBanLike
 
   constructor(opts: BaileysAntibanAdapterOptions = {}) {
     super()
     const base = opts.config ?? DEFAULT_ANTIBAN_PRESET
-    this.config = typeof base === 'string' ? { preset: base, logging: false } : { ...base, logging: false }
-    this.create = opts.create ?? ((config) => new AntiBan(config))
+    const fixed = { logging: false, inactivityThresholdHours: NEVER_REWARM_HOURS }
+    this.config = (typeof base === 'string' ? { preset: base, ...fixed } : { ...base, ...fixed }) as AntiBanInput
+    this.create = opts.create ?? ((config, warmUp) => new AntiBan(config, warmUp))
   }
 
   private instance(key: string): AntiBanLike {
     let a = this.instances.get(key)
     if (!a) {
-      a = this.create(this.config)
+      a = this.create(this.config, graduatedWarmUp())
       this.instances.set(key, a)
     }
     return a
@@ -200,7 +212,7 @@ export interface CreateAntibanAdapterOptions {
   preset?: AntibanPreset
   /** Config completa do AntiBan (sobrepõe o preset). */
   config?: AntiBanInput
-  create?: (config: AntiBanInput) => AntiBanLike
+  create?: (config: AntiBanInput, warmUp: WarmUpState) => AntiBanLike
   logger?: AntibanLogger
 }
 

@@ -79,15 +79,27 @@ describe('BaileysAntibanAdapter (real)', () => {
       afterSend: vi.fn(),
       afterSendFailed: vi.fn(),
     })
-    const a = new BaileysAntibanAdapter({ config: 'moderate', create: (cfg) => (created.push(cfg), fake()) })
+    const warmUps: Array<{ graduated: boolean }> = []
+    const a = new BaileysAntibanAdapter({ config: 'moderate', create: (cfg, w) => (created.push(cfg), warmUps.push(w), fake()) })
     expect(await a.beforeSend('s1', TO, { text: 'a' })).toEqual({ allowed: true, delayMs: 1234 })
     await a.beforeSend('s1', TO, { text: 'b' })
     await a.beforeSend('s2', TO, { text: 'a' })
     expect(created).toEqual([
-      { preset: 'moderate', logging: false },
-      { preset: 'moderate', logging: false },
+      { preset: 'moderate', logging: false, inactivityThresholdHours: 1e9 },
+      { preset: 'moderate', logging: false, inactivityThresholdHours: 1e9 },
     ])
+    expect(warmUps.every((w) => w.graduated)).toBe(true)
   })
+
+  it('o aquecimento do AntiBan não limita: o nosso (persistido) é o único limite diário', async () => {
+    const a = new BaileysAntibanAdapter({ config: 'conservative' })
+    // O conservative limitaria a 15 no "dia 1" do AntiBan, que reiniciava a cada restart do worker.
+    for (let i = 0; i < 20; i++) {
+      const d = await a.beforeSend('s1', `+55319000000${String(i).padStart(2, '0')}`, { text: `mensagem ${i}` })
+      expect(d.reason ?? '', `envio ${i + 1}`).not.toMatch(/warm-?up/i)
+      if (d.allowed) a.afterSend('s1', `+55319000000${String(i).padStart(2, '0')}`, { text: `mensagem ${i}` }, `m${i}`)
+    }
+  }, 30_000)
 
   it('com o baileys-antiban real: delays humanos e bloqueio de mensagens idênticas', async () => {
     const a = new BaileysAntibanAdapter({ config: 'conservative' })
