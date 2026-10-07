@@ -28,6 +28,10 @@ export interface ConversationOptions {
   random?: () => number
   /** Espera (injetável nos testes). Default: setTimeout. */
   sleep?: (ms: number) => Promise<void>
+  /** Worker travando (modo alívio): o timer não abre rodadas novas; disparo manual pela API continua. */
+  paused?: () => boolean
+  /** Registro de atividade (pista dos travamentos). */
+  activity?: { mark(label: string): void }
 }
 
 /** Cada disparo sai em até PARTS_MAX mensagens curtas (sorteado), cada uma depois de "digitando…". */
@@ -101,7 +105,10 @@ export class ConversationAutomation {
   requestTick(id: string) { this.launch(id); return { queued: !this.stopped } }
   private launch(id?: string) {
     if (this.stopped || this.running) return
-    this.running = (async () => { await this.distribute(); if (id) await this.run(id); else await this.tick() })().catch(() => this.opts.logger.warn({}, 'conversation cycle failed'))
+    if (!id && this.opts.paused?.()) return
+    this.opts.activity?.mark('conversa:ciclo')
+    this.running = (async () => { await this.distribute(); if (id) await this.run(id); else await this.tick() })()
+      .catch((err: unknown) => this.opts.logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'conversation cycle failed'))
       .finally(() => { this.running = undefined })
   }
   private async tick() {

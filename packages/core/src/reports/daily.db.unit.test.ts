@@ -92,7 +92,7 @@ describe('relatório diário', () => {
   it('travamentos do worker: por dia, últimos e quedas ligadas a eles (até 60 s depois)', async () => {
     const a = await chip('chip A')
     const stall = (createdAt: Date, lagMs: number) =>
-      db.insert(auditLogs).values({ actor: 'worker', action: 'worker.stall', targetType: 'worker', detail: { lagMs, heapMb: 120 }, createdAt })
+      db.insert(auditLogs).values({ actor: 'worker', action: 'worker.stall', targetType: 'worker', detail: { lagMs, heapMb: 120, activity: { 'msg:chip:grupo': 3 } }, createdAt })
     await stall(at('2026-10-07T13:00:00Z'), 1500)
     await stall(at('2026-10-07T16:00:00Z'), 4200)
     await ev(a.id, 'disconnected', at('2026-10-07T13:00:30Z'), { reason: 'transient', statusCode: 428 }) // 30 s depois: ligada
@@ -105,6 +105,7 @@ describe('relatório diário', () => {
       ['2026-10-07T16:00:00.000Z', 4200, 120],
       ['2026-10-07T13:00:00.000Z', 1500, 120],
     ])
+    expect(r.recentStalls[0]!.activity).toEqual({ 'msg:chip:grupo': 3 })
     expect(r.rows.find((x) => x.sessionId === a.id)).toMatchObject({ disconnects: 3, disconnectsNearStall: 1 })
   })
 

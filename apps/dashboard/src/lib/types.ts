@@ -193,6 +193,7 @@ export interface ReportStall {
   at: string
   lagMs: number
   heapMb: number | null
+  activity: Record<string, number>
 }
 
 export interface DailyReport {

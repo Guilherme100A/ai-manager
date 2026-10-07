@@ -366,6 +366,19 @@ describe('entrada automática e mensagem diária', () => {
     for (let i = 0; i < 20; i++) { s.advance(16 * 60_000); await s.service.run('a') }
     expect(s.inspect).toHaveBeenCalledTimes(8)
   })
+  it('modo alívio (worker travando): o timer não roda ciclos, o disparo manual continua', async () => {
+    const s = setup()
+    let paused = true
+    const service = new GroupAutomation({ ...s.options, paused: () => paused })
+    await service.start()
+    await new Promise((r) => setTimeout(r, 20))
+    expect(s.model.discover).not.toHaveBeenCalled()
+    service.requestTick('a')
+    await new Promise((r) => setTimeout(r, 20))
+    expect(s.model.discover).toHaveBeenCalledTimes(1)
+    paused = false
+    await service.stop()
+  })
   it('encerra o timer e não lança novos ciclos após stop', async () => {
     const s = setup()
     s.configs.set('a', { ...DEFAULT_GROUP_AUTOMATION })

@@ -38,6 +38,7 @@ import { createWorkerLogger, startObservabilityServer, type ObservabilityServer 
 import { attachAi } from '../ai'
 import { startProxyMonitor, type ProxyMonitor } from '../proxy'
 import { startStallMonitor } from './stall-monitor'
+import { createActivityLog } from './activity'
 import { attachQueueToSessions } from '../queue'
 import { createTransportFactory, disappearingKey, ensureOwnContact, redisDisappearingStore, SessionManager, type TransportFactory } from '../sessions'
 import { loadWorkerConfig, type WorkerConfig } from './config'
@@ -117,13 +118,21 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     const baseFactory = opts.transportFactory ?? fake?.factory ?? createTransportFactory({ kind: config.transport, disappearing: (id) => redisDisappearingStore(redis, id, config.queuePrefix), stickers })
     // Últimas mensagens dos grupos (contexto da postagem automática): gravadas ao chegar, por sessão.
     const groupHistory = redisGroupHistory(redis, config.queuePrefix)
+    // Travamentos do processo: registro com a atividade anterior e modo alívio (automações não essenciais pausadas).
+    const activity = createActivityLog()
+    const stallMonitor = startStallMonitor({ db, logger, activity })
+    onStop('stall-monitor', () => stallMonitor.stop())
     const transportFactory: TransportFactory = (sessionId) => {
       const t = baseFactory(sessionId)
       bindTransportSession(t, sessionId)
+      const chip = sessionId.slice(0, 8)
       t.on('message', (msg) => {
+        activity.mark(`msg:${chip}:${msg.from.endsWith('@g.us') ? 'grupo' : 'direta'}`)
         const item = groupHistoryEntry(msg)
         if (item) void groupHistory.record(sessionId, item.groupId, item.entry).catch(() => undefined)
       })
+      const fetchGroups = t.fetchGroups.bind(t)
+      t.fetchGroups = () => { activity.mark(`grupos:lista:${chip}`); return fetchGroups() }
       return t
     }
     if (fake) logger.warn({ wa_transport: 'fake' }, 'WA_TRANSPORT=fake: FakeTransport em uso (somente testes)')
@@ -227,6 +236,8 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
       model: new SmallConversationModel(() => conversationSettings.resolve()),
       allowed: async (phone) => canMessage(await conversationContacts.findByPhone(phone)).ok,
       stickers,
+      paused: () => stallMonitor.underPressure(),
+      activity,
       findOutbound: async (senderId, phone, text, since) => {
         const [row] = await db.select({ id: messages.id }).from(messages).where(and(
           eq(messages.sessionId, senderId), eq(messages.direction, 'outbound'), eq(messages.phone, phone),
@@ -274,6 +285,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
       manager, store: new RedisGroupAutomationStore(redis, config.queuePrefix, env.GROUP_AUTOMATION_AUTO_ENABLE?.trim().toLowerCase() !== 'false'), limits,
       pipeline: routingPipeline, messages: queue, model: new SmallGroupModel(() => groupSettings.resolve()),
       invites: bridgeTargets.groupInvites, logger, history: groupHistory,
+      paused: () => stallMonitor.underPressure(), activity,
       audit: async (sessionId, detail) => {
         const { auditLogs } = await import('@wsm/db')
         await db.insert(auditLogs).values({ actor: 'group-automation', action: 'group.automation', targetType: 'session', targetId: sessionId, detail })
@@ -307,8 +319,6 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
       onAvailable: ({ proxyId }) => void recoverProxySessions(proxyId).catch(() => undefined),
     })
     onStop('proxy-monitor', () => proxyMonitor.stop())
-    const stallMonitor = startStallMonitor({ db, logger })
-    onStop('stall-monitor', () => stallMonitor.stop())
     const alerts = attachAlerts({ dispatcher: new AlertDispatcher({ db, logger }), healthMonitor: monitor, proxyChecker: proxyMonitor.checker, logger })
     onStop('alerts', async () => {
       alerts.stop()

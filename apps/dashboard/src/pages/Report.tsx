@@ -147,6 +147,9 @@ export function Report() {
               {data.recentStalls.map((s) => (
                 <li key={s.at}>
                   {formatDateTime(s.at)} · {(s.lagMs / 1000).toFixed(1)} s{s.heapMb !== null ? ` · memória ${s.heapMb} MB` : ''}
+                  {Object.keys(s.activity).length
+                    ? ` · antes: ${Object.entries(s.activity).slice(0, 4).map(([label, n]) => `${label}×${n}`).join(', ')}`
+                    : ' · antes: nada registrado'}
                 </li>
               ))}
             </ul>

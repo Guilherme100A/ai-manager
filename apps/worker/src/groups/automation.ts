@@ -53,6 +53,10 @@ export interface GroupAutomationOptions {
   now?: () => number
   /** Fonte de aleatoriedade (injetável nos testes). Default: Math.random. */
   random?: () => number
+  /** Worker travando (modo alívio): o timer não roda ciclos; disparo manual pela API continua. */
+  paused?: () => boolean
+  /** Registro de atividade (pista dos travamentos). */
+  activity?: { mark(label: string): void }
   /** Últimas mensagens de cada grupo (contexto da postagem). Sem ele, a mensagem usa só o tema. */
   history?: Pick<GroupHistory, 'recent' | 'record'>
 }
@@ -127,6 +131,7 @@ export class GroupAutomation {
   requestTick(id: string) { if (!this.stopped) this.launch(id); return { queued: !this.stopped } }
   private launch(id: string) {
     if (this.running.has(id)) return
+    this.opts.activity?.mark('grupos:ciclo')
     const run = this.run(id).catch((err: unknown) => this.opts.logger.warn({
       session_id: id,
       err: err instanceof Error ? err.message : String(err),
@@ -136,7 +141,7 @@ export class GroupAutomation {
     void run.finally(() => this.running.delete(id))
   }
   private async tickAll() {
-    if (this.stopped) return
+    if (this.stopped || this.opts.paused?.()) return
     try {
       for (const session of await this.opts.manager.list()) if (this.opts.manager.isConnected(session.id)) this.launch(session.id)
     } catch { this.opts.logger.warn({}, 'group automation scheduler failed') }

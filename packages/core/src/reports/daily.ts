@@ -57,6 +57,8 @@ export interface ReportStall {
   at: string
   lagMs: number
   heapMb: number | null
+  /** O que o worker fez nos segundos antes do travamento (rótulo → quantidade). */
+  activity: Record<string, number>
 }
 
 export interface DailyReport {
@@ -187,8 +189,8 @@ export async function buildDailyReport(db: Database, opts: DailyReportOptions = 
     .sort((a, b) => b.day.localeCompare(a.day))
   const recentStalls: ReportStall[] = ((await db.execute(sql`
     select created_at, detail from audit_logs where action = ${WORKER_STALL_ACTION} and created_at > ${since}
-    order by created_at desc limit 20`)).rows as Array<{ created_at: Date | string; detail: { lagMs?: number; heapMb?: number } | null }>)
-    .map((s) => ({ at: new Date(s.created_at).toISOString(), lagMs: num(s.detail?.lagMs), heapMb: s.detail?.heapMb ?? null }))
+    order by created_at desc limit 20`)).rows as Array<{ created_at: Date | string; detail: { lagMs?: number; heapMb?: number; activity?: Record<string, number> } | null }>)
+    .map((s) => ({ at: new Date(s.created_at).toISOString(), lagMs: num(s.detail?.lagMs), heapMb: s.detail?.heapMb ?? null, activity: s.detail?.activity ?? {} }))
 
   const health = new HealthService(db, { ...opts.health, now: () => now })
   const chips: ReportChipNow[] = []
