@@ -145,7 +145,18 @@ export interface BaileysTransportOptions {
   stickers?: { save(id: string, data: Buffer): Promise<void> }
   /** Baixa a mídia de uma mensagem recebida; default: `downloadMediaMessage` do Baileys. */
   downloadMedia?: (raw: unknown, sock: BaileysSocketLike) => Promise<Buffer>
+  /** Validade da lista de grupos em cache (default GROUPS_CACHE_MS). */
+  groupsCacheMs?: number
+  /** Relógio (injetável em testes). */
+  now?: () => number
 }
+
+/**
+ * A lista de grupos (groupFetchAllParticipating) era pedida a cada minuto por chip, mais repasses e o painel:
+ * o WhatsApp responde `rate-overlimit` e o ciclo de grupos falhava. Fica em cache e é invalidada quando a conta
+ * entra/adiciona alguém ou o WhatsApp avisa mudança de grupo.
+ */
+export const GROUPS_CACHE_MS = 5 * 60_000
 
 /** Intervalo mínimo entre duas conferências da mesma conversa no celular. */
 export const CHAT_CHECK_INTERVAL = 6 * 3_600_000
@@ -304,6 +315,9 @@ export class BaileysTransport extends TransportEmitter implements WaTransport {
   /** Conferências esperando a resposta do celular (resolvidas quando o histórico da conversa chega). */
   private readonly chatAnswer = new Map<string, () => void>()
 
+  private groupsCache: { at: number; groups: GroupSummary[] } | undefined
+  private groupsInFlight: Promise<GroupSummary[]> | undefined
+
   constructor(private readonly options: BaileysTransportOptions = {}) {
     super()
   }
@@ -354,6 +368,7 @@ export class BaileysTransport extends TransportEmitter implements WaTransport {
     const factory = this.options.makeSocket ?? (await defaultSocketFactory())
     const sock = factory(config)
     this.sock = sock
+    this.invalidateGroups()
     let pairingRequested = false
 
     // Eventos de um socket substituído/encerrado são ignorados.
@@ -438,6 +453,8 @@ export class BaileysTransport extends TransportEmitter implements WaTransport {
     sock.ev.on('chats.upsert', guard<ChatEphemeralLike[]>((chats) => this.rememberChats(chats)))
     sock.ev.on('chats.update', guard<ChatEphemeralLike[]>((chats) => this.rememberChats(chats)))
     sock.ev.on('messaging-history.set', guard<{ chats?: ChatEphemeralLike[] }>((h) => this.rememberChats(h.chats)))
+    // Mudança de grupo avisada pelo WhatsApp (entrou, saiu, nome, admins): a lista em cache deixa de valer.
+    for (const event of ['groups.upsert', 'groups.update', 'group-participants.update']) sock.ev.on(event, guard(() => this.invalidateGroups()))
 
     sock.ev.on(
       'messages.update',
@@ -519,9 +536,30 @@ export class BaileysTransport extends TransportEmitter implements WaTransport {
   }
 
   async fetchGroups(): Promise<GroupSummary[]> {
-    const groups = await this.requireSocket().groupFetchAllParticipating()
-    const own = new Set([this.sock?.user?.id, this.sock?.user?.lid].filter((v): v is string => typeof v === 'string').map(normalizeJid))
-    return Object.values(groups).map((g) => toGroupSummary(g, own))
+    const sock = this.requireSocket()
+    const now = this.options.now?.() ?? Date.now()
+    const ttl = this.options.groupsCacheMs ?? GROUPS_CACHE_MS
+    if (this.groupsCache && now - this.groupsCache.at < ttl) return this.groupsCache.groups.map((g) => ({ ...g }))
+    this.groupsInFlight ??= (async () => {
+      try {
+        const groups = await sock.groupFetchAllParticipating()
+        const own = new Set([sock.user?.id, sock.user?.lid].filter((v): v is string => typeof v === 'string').map(normalizeJid))
+        const list = Object.values(groups).map((g) => toGroupSummary(g, own))
+        this.groupsCache = { at: this.options.now?.() ?? Date.now(), groups: list }
+        return list
+      } catch (err) {
+        // Limite do WhatsApp: a última lista boa vale mais que derrubar quem pediu (e pedir de novo piora o limite).
+        if (this.groupsCache && /rate-overlimit/i.test(err instanceof Error ? err.message : String(err))) return this.groupsCache.groups
+        throw err
+      } finally {
+        this.groupsInFlight = undefined
+      }
+    })()
+    return (await this.groupsInFlight).map((g) => ({ ...g }))
+  }
+
+  private invalidateGroups(): void {
+    this.groupsCache = undefined
   }
 
   async inspectGroupInvite(code: string): Promise<GroupSummary & { description?: string; joinApproval?: boolean }> {
@@ -542,7 +580,11 @@ export class BaileysTransport extends TransportEmitter implements WaTransport {
   async groupAcceptInvite(code: string): Promise<string | undefined> {
     const sock = this.requireSocket()
     if (!sock.groupAcceptInvite) throw new Error('groupAcceptInvite not available')
-    return sock.groupAcceptInvite(code)
+    try {
+      return await sock.groupAcceptInvite(code)
+    } finally {
+      this.invalidateGroups()
+    }
   }
 
   /** T20 — adiciona UM participante (`groupParticipantsUpdate(..., 'add')`). Erros do grupo viram status. */
@@ -552,6 +594,7 @@ export class BaileysTransport extends TransportEmitter implements WaTransport {
     let res: Array<{ status?: string; jid?: string }>
     try {
       res = await sock.groupParticipantsUpdate(groupId, [jid], 'add')
+      this.invalidateGroups()
     } catch (err) {
       const code = disconnectStatusCode(err) ?? numericData(err)
       const out: GroupParticipantResult = { jid, status: mapGroupErrorStatus(code) }

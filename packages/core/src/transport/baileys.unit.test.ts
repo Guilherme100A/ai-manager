@@ -12,6 +12,7 @@ import {
   toIncomingMessage,
   type BaileysSocketConfig,
   type BaileysSocketLike,
+  type BaileysTransportOptions,
   type DisappearingStore,
 } from './baileys'
 import { TransportNotConnectedError, type AuthenticationState, type ConnectionUpdate } from './types'
@@ -40,7 +41,7 @@ function mockSocket() {
   return sock
 }
 
-function setup(registered = false) {
+function setup(registered = false, extra: Partial<BaileysTransportOptions> = {}) {
   const configs: BaileysSocketConfig[] = []
   const sockets: ReturnType<typeof mockSocket>[] = []
   const transport = new BaileysTransport({
@@ -50,6 +51,7 @@ function setup(registered = false) {
       sockets.push(s)
       return s
     },
+    ...extra,
   })
   const auth = { creds: { registered }, keys: {} } as unknown as AuthenticationState
   return { transport, configs, sockets, auth }
@@ -387,6 +389,69 @@ describe('BaileysTransport', () => {
       { id: 'g1@g.us', name: 'Grupo 1', participants: 5, announce: true, communityId: 'c@g.us', isAdmin: false },
       { id: 'g2@g.us', name: 'Grupo 2', participants: 2, announce: false, isAdmin: false },
     ])
+  })
+
+  describe('cache da lista de grupos (evita rate-overlimit)', () => {
+    async function connected() {
+      let now = 1_000_000
+      const s = setup(false, { now: () => now, groupsCacheMs: 300_000 })
+      await s.transport.connect({ sessionId: 's', auth: s.auth })
+      s.sockets[0]!.ev.emit('connection.update', { connection: 'open' })
+      await flush()
+      return { ...s, sock: s.sockets[0]!, advance: (ms: number) => { now += ms } }
+    }
+
+    it('dentro da validade não consulta o WhatsApp de novo; depois consulta', async () => {
+      const t = await connected()
+      await t.transport.fetchGroups()
+      await t.transport.fetchGroups()
+      t.advance(299_000)
+      await t.transport.fetchGroups()
+      expect(t.sock.groupFetchAllParticipating).toHaveBeenCalledTimes(1)
+      t.advance(2_000)
+      await t.transport.fetchGroups()
+      expect(t.sock.groupFetchAllParticipating).toHaveBeenCalledTimes(2)
+    })
+
+    it('chamadas ao mesmo tempo fazem uma consulta só', async () => {
+      const t = await connected()
+      await Promise.all([t.transport.fetchGroups(), t.transport.fetchGroups(), t.transport.fetchGroups()])
+      expect(t.sock.groupFetchAllParticipating).toHaveBeenCalledTimes(1)
+    })
+
+    it('rate-overlimit devolve a última lista boa; outro erro (ou sem cache) continua falhando', async () => {
+      const t = await connected()
+      const first = await t.transport.fetchGroups()
+      t.advance(400_000)
+      t.sock.groupFetchAllParticipating.mockRejectedValueOnce(new Error('rate-overlimit'))
+      await expect(t.transport.fetchGroups()).resolves.toEqual(first)
+      t.advance(400_000)
+      t.sock.groupFetchAllParticipating.mockRejectedValueOnce(new Error('internal-server-error'))
+      await expect(t.transport.fetchGroups()).rejects.toThrow('internal-server-error')
+
+      const cold = await connected()
+      cold.sock.groupFetchAllParticipating.mockRejectedValueOnce(new Error('rate-overlimit'))
+      await expect(cold.transport.fetchGroups()).rejects.toThrow('rate-overlimit')
+    })
+
+    it('entrar em grupo ou aviso de mudança do WhatsApp invalida a lista', async () => {
+      const t = await connected()
+      await t.transport.fetchGroups()
+      await t.transport.groupAcceptInvite('TEST_CODE')
+      await t.transport.fetchGroups()
+      expect(t.sock.groupFetchAllParticipating).toHaveBeenCalledTimes(2)
+      t.sock.ev.emit('group-participants.update', { id: 'g1@g.us' })
+      await flush()
+      await t.transport.fetchGroups()
+      expect(t.sock.groupFetchAllParticipating).toHaveBeenCalledTimes(3)
+    })
+
+    it('quem recebe a lista não altera o cache', async () => {
+      const t = await connected()
+      const a = await t.transport.fetchGroups()
+      a[0]!.name = 'mexido'
+      expect((await t.transport.fetchGroups())[0]!.name).toBe('Grupo 1')
+    })
   })
 
   it('logout emite close loggedOut; close() encerra sem evento e ignora eventos do socket antigo', async () => {
