@@ -10,7 +10,7 @@ export const conversationConfigSchema = z.object({
 }).strict().refine((c) => !c.enabled || c.mode === 'rotating' || c.targetSessionId !== null, { message: 'Selecione a outra conta.' })
 export type ConversationConfig = z.infer<typeof conversationConfigSchema>
 export const DEFAULT_CONVERSATION_CONFIG: ConversationConfig = {
-  mode: 'rotating', enabled: false, targetSessionId: null, topic: 'Jogos e tecnologia', maxMessagesPerDay: 20,
+  mode: 'rotating', enabled: false, targetSessionId: null, topic: 'Jogos e tecnologia', maxMessagesPerDay: 120,
   turnsPerConversation: 6, intervalMinutes: 5,
 }
 export interface ConversationTurn { senderId: string; text: string }

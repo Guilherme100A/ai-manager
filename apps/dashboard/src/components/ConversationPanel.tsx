@@ -63,13 +63,13 @@ export function ConversationPanel({ sessionId }: { sessionId: string }) {
           {sessions.filter((s) => s.id !== sessionId).map((s) => <option key={s.id} value={s.id}>{s.name} ({s.phone ?? 'sem número'})</option>)}
         </select>
         <small className="hint">Autorize os dois números em Contatos. Ative o par apenas aqui; não é necessário criar o vínculo inverso na outra conta.</small>
-      </div> : <p className="hint">Ative também o rodízio nas outras contas. Só entram no sorteio contas conectadas, autorizadas em Contatos e com cota. Se o número de contas for ímpar, quem ficar de fora ganha prioridade na próxima formação.</p>}
+      </div> : <p className="hint">Ative também o rodízio nas outras contas. Só entram no sorteio contas conectadas e com cota. Se o número de contas for ímpar, quem ficar de fora ganha prioridade na próxima formação.</p>}
       <div className="dialog-field"><label htmlFor="conversation-topic">Tema</label><input id="conversation-topic" value={config.topic} maxLength={300} disabled={busy} onChange={(e) => setConfig({ ...config, topic: e.target.value })} /></div>
       {([{ key: 'maxMessagesPerDay', label: 'Teto de envios por conta em 24 horas', min: 1, max: 800 },
         { key: 'turnsPerConversation', label: 'Falas por rodada (somando as duas contas)', min: 2, max: 10 },
         { key: 'intervalMinutes', label: 'Intervalo entre falas em minutos', min: 1, max: 60 }] as const).map(({ key, label, min, max }) =>
         <div className="dialog-field" key={key}><label htmlFor={`conversation-${key}`}>{label}</label><input id={`conversation-${key}`} type="number" min={min} max={max} value={config[key]} disabled={busy} onChange={(e) => setConfig({ ...config, [key]: Number(e.target.value) })} /></div>)}
-      <p className="hint">O teto não substitui a maturação: vale o menor limite. Ao terminar uma rodada, o par aguarda 30 minutos. A ativação não garante melhora do score.</p>
+      <p className="hint">O volume por dia acompanha o aquecimento (metade do limite do dia, no mínimo 20) até este teto. Ao terminar uma rodada, o par aguarda 30 minutos. A ativação não garante melhora do score.</p>
       <div className="row"><button type="button" disabled={busy || !config.topic.trim() || (config.enabled && config.mode === 'fixed' && !config.targetSessionId)} onClick={() => void save()}>Salvar conversas</button>
         <button type="button" className="secondary" disabled={busy || !view?.config.enabled || view.state.halted} onClick={() => void run()}>Verificar ciclo agora</button></div>
     </> : null}

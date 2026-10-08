@@ -45,6 +45,20 @@ const STICKER_MARK = '[figurinha]'
 /** Quanto esperar a parte anterior sair antes de desistir das seguintes. */
 const PART_SEND_TIMEOUT = 60_000
 
+/** Parte do limite do aquecimento usada pelas conversas, e o mínimo por dia. */
+export const CONVERSATION_WARMUP_SHARE = 0.5
+export const CONVERSATION_DAILY_MIN = 20
+
+/**
+ * Volume diário das conversas acompanha o aquecimento (metade do limite do dia, mínimo 20), até o teto configurado
+ * no chip (maxMessagesPerDay) e o limite diário de envio. Antes era o teto fixo: o volume nunca crescia.
+ */
+export function conversationDailyLimit(maxPerDay: number, effective: { perDay: number; warmupDailyLimit?: number | null }): number {
+  const warmup = effective.warmupDailyLimit
+  const fromWarmup = warmup == null ? Infinity : warmup === 0 ? 0 : Math.max(CONVERSATION_DAILY_MIN, Math.round(warmup * CONVERSATION_WARMUP_SHARE))
+  return Math.min(maxPerDay, effective.perDay, fromWarmup)
+}
+
 export class ConversationAutomation {
   private timer?: ReturnType<typeof setInterval>
   private running?: Promise<void>
@@ -259,7 +273,7 @@ export class ConversationAutomation {
       const limits = await this.opts.limits.get(accountId)
       const used24h = await this.opts.limits.countOutbound(accountId, new Date(this.now() - DAY))
       const ownConfig = config.mode === 'rotating' ? await this.opts.store.config(accountId) : config
-      accounts.push({ id: accountId, used24h, dailyLimit: Math.min(ownConfig.maxMessagesPerDay, limits.effective.perDay) })
+      accounts.push({ id: accountId, used24h, dailyLimit: conversationDailyLimit(ownConfig.maxMessagesPerDay, limits.effective) })
     }
     const { pending, ...rest } = ownerState
     return { config, activePartnerId, state: { ...rest, pending: pending ? { senderId: pending.senderId, receiverId: pending.receiverId, messageId: pending.messageId, reservedAt: pending.reservedAt } : null }, accounts }
@@ -295,7 +309,7 @@ export class ConversationAutomation {
   private async hasCapacity(account: SessionView, config: ConversationConfig) {
     if (!account.phone) return false
     const limits = await this.opts.limits.get(account.id)
-    for (const [window, maximum] of [[MINUTE, limits.effective.perMinute], [60 * MINUTE, limits.effective.perHour], [DAY, Math.min(config.maxMessagesPerDay, limits.effective.perDay)]]) {
+    for (const [window, maximum] of [[MINUTE, limits.effective.perMinute], [60 * MINUTE, limits.effective.perHour], [DAY, conversationDailyLimit(config.maxMessagesPerDay, limits.effective)]]) {
       if (await this.opts.limits.countOutbound(account.id, new Date(this.now() - window!)) >= maximum!) return false
     }
     return true
@@ -304,7 +318,7 @@ export class ConversationAutomation {
   private async room(account: SessionView, config: ConversationConfig) {
     const limits = await this.opts.limits.get(account.id)
     let room = Infinity
-    for (const [window, maximum] of [[MINUTE, limits.effective.perMinute], [60 * MINUTE, limits.effective.perHour], [DAY, Math.min(config.maxMessagesPerDay, limits.effective.perDay)]]) {
+    for (const [window, maximum] of [[MINUTE, limits.effective.perMinute], [60 * MINUTE, limits.effective.perHour], [DAY, conversationDailyLimit(config.maxMessagesPerDay, limits.effective)]]) {
       room = Math.min(room, maximum! - await this.opts.limits.countOutbound(account.id, new Date(this.now() - window!)))
     }
     return Math.max(0, room)
