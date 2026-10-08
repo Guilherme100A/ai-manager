@@ -434,7 +434,7 @@ describe('BaileysTransport', () => {
       await expect(cold.transport.fetchGroups()).rejects.toThrow('rate-overlimit')
     })
 
-    it('entrar em grupo ou aviso de mudança do WhatsApp invalida a lista', async () => {
+    it('entrar em grupo consulta na hora; aviso de mudança só deixa a lista velha (nova consulta após 2 min)', async () => {
       const t = await connected()
       await t.transport.fetchGroups()
       await t.transport.groupAcceptInvite('TEST_CODE')
@@ -442,6 +442,34 @@ describe('BaileysTransport', () => {
       expect(t.sock.groupFetchAllParticipating).toHaveBeenCalledTimes(2)
       t.sock.ev.emit('group-participants.update', { id: 'g1@g.us' })
       await flush()
+      t.advance(60_000)
+      await t.transport.fetchGroups()
+      expect(t.sock.groupFetchAllParticipating).toHaveBeenCalledTimes(2) // velha, mas consultada há menos de 2 min
+      t.advance(61_000)
+      await t.transport.fetchGroups()
+      expect(t.sock.groupFetchAllParticipating).toHaveBeenCalledTimes(3)
+    })
+
+    it('grupos movimentados (avisos toda hora) não apagam a reserva: rate-overlimit usa a última lista', async () => {
+      const t = await connected()
+      const first = await t.transport.fetchGroups()
+      for (let i = 0; i < 5; i++) t.sock.ev.emit('group-participants.update', { id: 'g1@g.us' })
+      await flush()
+      t.advance(130_000)
+      t.sock.groupFetchAllParticipating.mockRejectedValueOnce(new Error('rate-overlimit'))
+      await expect(t.transport.fetchGroups()).resolves.toEqual(first)
+    })
+
+    it('depois de rate-overlimit espera 2 min antes de consultar de novo', async () => {
+      const t = await connected()
+      await t.transport.fetchGroups()
+      t.advance(400_000)
+      t.sock.groupFetchAllParticipating.mockRejectedValueOnce(new Error('rate-overlimit'))
+      await t.transport.fetchGroups()
+      t.advance(60_000)
+      await t.transport.fetchGroups()
+      expect(t.sock.groupFetchAllParticipating).toHaveBeenCalledTimes(2)
+      t.advance(61_000)
       await t.transport.fetchGroups()
       expect(t.sock.groupFetchAllParticipating).toHaveBeenCalledTimes(3)
     })
