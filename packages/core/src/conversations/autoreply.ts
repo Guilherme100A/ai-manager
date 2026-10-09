@@ -22,6 +22,9 @@ export function normalizeAutoReplyPhone(raw: string): string | undefined {
   return E164_REGEX.test(phone) ? phone : undefined
 }
 
+// Dentro do select o Drizzle escreve só "phone" (sem a tabela), que a subconsulta entenderia como m.phone.
+const CONTACT_PHONE = sql.raw('"contacts"."phone"')
+
 export class AutoReplyTargets {
   constructor(private readonly db: Database) {}
 
@@ -41,9 +44,9 @@ export class AutoReplyTargets {
     const since = new Date(now.getTime() - 86_400_000)
     const rows = await this.db.select({
       id: contacts.id, phone: contacts.phone, createdAt: contacts.createdAt,
-      sent24h: sql<number>`(select count(*) from ${messages} m where m.phone = ${contacts.phone} and m.direction = 'outbound' and m.status in ('sent','delivered','read') and m.created_at > ${since})`,
-      replies24h: sql<number>`(select count(*) from ${messages} m where m.phone = ${contacts.phone} and m.direction = 'inbound' and m.created_at > ${since})`,
-      lastSentAt: sql<Date | null>`(select max(m.created_at) from ${messages} m where m.phone = ${contacts.phone} and m.direction = 'outbound')`,
+      sent24h: sql<number>`(select count(*) from ${messages} m where m.phone = ${CONTACT_PHONE} and m.direction = 'outbound' and m.status in ('sent','delivered','read') and m.created_at > ${since})`,
+      replies24h: sql<number>`(select count(*) from ${messages} m where m.phone = ${CONTACT_PHONE} and m.direction = 'inbound' and m.created_at > ${since})`,
+      lastSentAt: sql<Date | null>`(select max(m.created_at) from ${messages} m where m.phone = ${CONTACT_PHONE} and m.direction = 'outbound')`,
     }).from(contacts).where(eq(contacts.consentSource, AUTOREPLY_CONSENT_SOURCE)).orderBy(desc(contacts.createdAt))
     return rows.map((r) => ({
       id: r.id, phone: r.phone, createdAt: r.createdAt.toISOString(),

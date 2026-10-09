@@ -1,7 +1,7 @@
 // /api/autoreply-targets com Postgres local (banco descartável).
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { AUTOREPLY_CONSENT_SOURCE, type AutoReplyTarget } from '@wsm/core'
-import { contacts, createDb, createTempDatabase, type Database, type TempDatabase } from '@wsm/db'
+import { contacts, createDb, createTempDatabase, messages, sessions, type Database, type TempDatabase } from '@wsm/db'
 import { createApp } from '../app'
 import { captureLogger, fakeRedis } from '../test-utils'
 
@@ -43,6 +43,22 @@ describe('/api/autoreply-targets', () => {
     expect((await req('DELETE', `/api/autoreply-targets/${list.items[0]!.id}`)).status).toBe(404)
     const after = (await (await req('GET', '/api/autoreply-targets')).json()) as { items: AutoReplyTarget[] }
     expect(after.items).toHaveLength(1)
+  })
+
+  it('estatísticas contam só as mensagens de cada número', async () => {
+    await req('POST', '/api/autoreply-targets', { phones: ['5511999990003', '5511999990004'] })
+    const [s] = await db.insert(sessions).values({ name: 'chip', phone: '+5531900000000' }).returning()
+    const msg = (phone: string, direction: 'outbound' | 'inbound') =>
+      db.insert(messages).values({ sessionId: s!.id, phone, content: { text: 'x' }, direction, status: 'delivered' })
+    await msg('+5511999990003', 'outbound')
+    await msg('+5511999990003', 'outbound')
+    await msg('+5511999990003', 'inbound')
+    await msg('+5511888880000', 'outbound') // outro número, fora da lista
+    const list = (await (await req('GET', '/api/autoreply-targets')).json()) as { items: AutoReplyTarget[] }
+    const by = (phone: string) => list.items.find((t) => t.phone === phone)!
+    expect(by('+5511999990003')).toMatchObject({ sent24h: 2, replies24h: 1 })
+    expect(by('+5511999990003').lastSentAt).not.toBeNull()
+    expect(by('+5511999990004')).toMatchObject({ sent24h: 0, replies24h: 0, lastSentAt: null })
   })
 
   it('não remove contato comum e exige autenticação', async () => {
