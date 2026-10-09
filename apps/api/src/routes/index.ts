@@ -18,6 +18,7 @@ import { authRoutes } from './auth'
 import { aiSettingsRoutes } from './ai-settings'
 import { sessionLinksRoutes } from './session-links'
 import { reportsRoutes } from './reports'
+import { autoReplyRoutes } from './autoreply'
 
 export function registerRoutes(app: Hono<AppEnv>, deps: AppDeps) {
   app.route('/', healthRoutes(deps))
@@ -42,4 +43,6 @@ export function registerRoutes(app: Hono<AppEnv>, deps: AppDeps) {
   app.route('/', sessionLinksRoutes(deps))
   // Relatório diário por chip (GET /api/reports/daily)
   app.route('/', reportsRoutes(deps))
+  // Números de autoresposta das conversas dos chips com proxy
+  app.route('/', autoReplyRoutes(deps))
 }

@@ -5,6 +5,7 @@ import { useRoute, useToken } from './lib/hooks'
 import { navigate, type Route } from './lib/router'
 import { Alerts } from './pages/Alerts'
 import { Report } from './pages/Report'
+import { AutoReply } from './pages/AutoReply'
 import { AiSettingsPage } from './pages/AiSettings'
 import { Contacts } from './pages/Contacts'
 import { Groups } from './pages/Groups'
@@ -38,6 +39,8 @@ function Page({ route }: { route: Route }) {
       return <Alerts />
     case 'report':
       return <Report />
+    case 'autoreply':
+      return <AutoReply />
     case 'ai':
       return <AiSettingsPage />
     case 'login':

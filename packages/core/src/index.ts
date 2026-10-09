@@ -49,3 +49,4 @@ export * from './conversations'
 // Relatório diário por chip (quedas, bloqueios, envios, grupos)
 export * from './reports/daily'
 export * from './reports/message-counts'
+export * from './conversations/autoreply'

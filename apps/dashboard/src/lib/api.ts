@@ -4,6 +4,7 @@ import type { ProxyInput } from './proxy-form'
 import type {
   AuthUser,
   Contact,
+  AutoReplyTarget,
   DailyReport,
   SessionMessageCounts,
   Group,
@@ -139,6 +140,9 @@ export const api = {
   webhooks: () => request<{ items: Webhook[] }>('/api/webhooks').then((r) => r.items),
   dailyReport: (days = 7) => request<DailyReport>(`/api/reports/daily?days=${days}`),
   messageCounts: () => request<{ items: Record<string, SessionMessageCounts> }>('/api/reports/message-counts').then((r) => r.items),
+  autoReplyTargets: () => request<{ items: AutoReplyTarget[] }>('/api/autoreply-targets').then((r) => r.items),
+  addAutoReplyTargets: (phones: string[]) => request<{ added: string[]; invalid: string[] }>('/api/autoreply-targets', { body: { phones } }),
+  removeAutoReplyTarget: (id: string) => request<void>(`/api/autoreply-targets/${enc(id)}`, { method: 'DELETE' }),
   createWebhook: (input: { name: string; channel: WebhookChannel; url: string; secret?: string; config?: Record<string, unknown>; events?: string[] }) =>
     request<Webhook>('/api/webhooks', { body: input }),
   updateWebhook: (id: string, input: Partial<{ enabled: boolean; name: string }>) =>

@@ -212,3 +212,13 @@ export interface SessionMessageCounts {
   sent24h: number
   received24h: number
 }
+
+/** Número de autoresposta (próprio do operador) usado pelas conversas dos chips com proxy. */
+export interface AutoReplyTarget {
+  id: string
+  phone: string
+  createdAt: string
+  sent24h: number
+  replies24h: number
+  lastSentAt: string | null
+}

@@ -8,6 +8,7 @@ import { Redis } from 'ioredis'
 import {
   AiAssistant,
   AiSettingsService,
+  AutoReplyTargets,
   SmallGroupModel,
   SmallConversationModel,
   ContactsService,
@@ -31,6 +32,7 @@ import {
 import { createDb, runMigrations, sessions, messages, auditLogs, type Database } from '@wsm/db'
 import { and, eq, gt, sql } from 'drizzle-orm'
 import { ConversationAutomation } from '../conversations/automation'
+import { AutoReplyAutomation } from '../conversations/autoreply'
 import { RedisConversationStore } from '../conversations/store'
 import { attachAlerts } from '../alerts'
 import { HealthMonitor } from '../health'
@@ -231,9 +233,11 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     const sessionRouter = new SessionRouter(new SessionLinkStore(db).dependencies((request) => routingPipeline.send(request)))
     const conversationSettings = new AiSettingsService({ db, env })
     const conversationContacts = new ContactsService(db)
+    const conversationStore = new RedisConversationStore(redis, env.CONVERSATIONS_AUTO_ROTATE?.trim().toLowerCase() !== 'false')
+    const conversationModel = new SmallConversationModel(() => conversationSettings.resolve())
     const conversations = new ConversationAutomation({
-      manager, store: new RedisConversationStore(redis, env.CONVERSATIONS_AUTO_ROTATE?.trim().toLowerCase() !== 'false'), limits, pipeline: routingPipeline, messages: queue,
-      model: new SmallConversationModel(() => conversationSettings.resolve()),
+      manager, store: conversationStore, limits, pipeline: routingPipeline, messages: queue,
+      model: conversationModel,
       allowed: async (phone) => canMessage(await conversationContacts.findByPhone(phone)).ok,
       stickers,
       paused: () => stallMonitor.underPressure(),
@@ -260,7 +264,8 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
       db,
       logger,
       routeIncoming: (event) => sessionRouter.route(event),
-      consumeConversation: (id, phone, text) => conversations.handlesInbound(id, phone, text),
+      // Resposta automática dos números de autoresposta não vira sugestão da IA assistiva.
+      consumeConversation: async (id, phone, text) => (await conversations.handlesInbound(id, phone, text)) || autoReplyTargets.isTarget(phone),
       // T19 — configuração dinâmica: tabela ai_settings (painel) com fallback no ambiente AI_*, relida a cada
       // AI_SETTINGS_REFRESH_MS (default 5 s) sem restart. Sem chave ou enabled=false → só o fallback determinístico.
       assistant: new AiAssistant({
@@ -280,6 +285,14 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     bridgeTargets.sessions.configureConversation = (id, config) => conversations.configure(id, config)
     bridgeTargets.sessions.tickConversation = async (id) => { await manager.get(id); return conversations.requestTick(id) }
     onStop('session-conversations', () => conversations.stop())
+    // Números de autoresposta próprios: só os chips com proxy conversam com eles (mesmo limite diário do chip).
+    const autoReplyTargets = new AutoReplyTargets(db)
+    const autoReply = new AutoReplyAutomation({
+      manager, config: (id) => conversationStore.config(id), targets: autoReplyTargets, limits, pipeline: routingPipeline,
+      model: conversationModel, logger, paused: () => stallMonitor.underPressure(), activity,
+      audit: async (id, detail) => { await db.insert(auditLogs).values({ actor: 'autoreply-conversations', action: 'conversation.autoreply', targetType: 'session', targetId: id, detail }) },
+    })
+    onStop('autoreply-conversations', () => autoReply.stop())
     const groupSettings = new AiSettingsService({ db, env })
     const groupAutomation = new GroupAutomation({
       manager, store: new RedisGroupAutomationStore(redis, config.queuePrefix, env.GROUP_AUTOMATION_AUTO_ENABLE?.trim().toLowerCase() !== 'false'), limits,
@@ -353,6 +366,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     await resumeQueues(db, queue, logger)
     await groupAutomation.start()
     conversations.start()
+    autoReply.start()
 
     logger.info(
       { boot_id: bootId, wa_transport: config.transport, health_port: observability.port, internal_port: internal.port, reconciled: counts(reconciled) },
