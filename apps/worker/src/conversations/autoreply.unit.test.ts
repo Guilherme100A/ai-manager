@@ -59,7 +59,7 @@ describe('conversas com números de autoresposta', () => {
   })
 
   it('sem folga no limite diário (compartilhado com o rodízio) não manda', async () => {
-    const s = setup({ used: 50 }) // limite das conversas: metade de 100
+    const s = setup({ used: 100 }) // limite das conversas: o aquecimento inteiro (100)
     await s.svc.tick()
     expect(s.send).not.toHaveBeenCalled()
     expect(s.model.message).not.toHaveBeenCalled()

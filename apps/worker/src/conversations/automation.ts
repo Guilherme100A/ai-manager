@@ -46,11 +46,11 @@ const STICKER_MARK = '[figurinha]'
 const PART_SEND_TIMEOUT = 60_000
 
 /** Parte do limite do aquecimento usada pelas conversas, e o mínimo por dia. */
-export const CONVERSATION_WARMUP_SHARE = 0.5
+export const CONVERSATION_WARMUP_SHARE = 1
 export const CONVERSATION_DAILY_MIN = 20
 
 /**
- * Volume diário das conversas acompanha o aquecimento (metade do limite do dia, mínimo 20), até o teto configurado
+ * Volume diário das conversas acompanha o aquecimento (o limite inteiro do dia, mínimo 20), até o teto configurado
  * no chip (maxMessagesPerDay) e o limite diário de envio. Antes era o teto fixo: o volume nunca crescia.
  */
 export function conversationDailyLimit(maxPerDay: number, effective: { perDay: number; warmupDailyLimit?: number | null }): number {

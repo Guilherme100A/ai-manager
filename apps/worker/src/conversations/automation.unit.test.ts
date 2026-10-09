@@ -376,15 +376,16 @@ describe('conversas entre duas contas', () => {
 describe('volume diário das conversas acompanha o aquecimento', () => {
   const lim = (warmupDailyLimit: number | null, perDay = 1000) => ({ perDay, warmupDailyLimit })
   it.each([
-    [20, 20], // dia 1: mínimo 20
-    [36, 20], // dia 2: metade (18) fica no mínimo
-    [65, 33], // dia 3
-    [117, 59], // dia 4
-    [210, 105], // dia 5
-    [378, 120], // dia 6: teto do chip
-    [680, 120], // dia 7
-  ])('aquecimento %i → conversa %i (teto 120)', (warmup, expected) => {
-    expect(conversationDailyLimit(120, lim(warmup))).toBe(expected)
+    [10, 20], // abaixo do mínimo: 20
+    [20, 20], // dia 1
+    [36, 36], // dia 2
+    [65, 65], // dia 3
+    [117, 117], // dia 4
+    [210, 210], // dia 5
+    [378, 378], // dia 6
+    [680, 400], // dia 7: teto do chip
+  ])('aquecimento %i → conversa %i (teto 400)', (warmup, expected) => {
+    expect(conversationDailyLimit(400, lim(warmup))).toBe(expected)
   })
   it('aquecimento concluído: vale o teto do chip', () => expect(conversationDailyLimit(120, lim(null))).toBe(120))
   it('teto do chip e limite diário de envio continuam valendo', () => {
