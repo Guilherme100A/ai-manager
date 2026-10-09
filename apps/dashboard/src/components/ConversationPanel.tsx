@@ -69,7 +69,7 @@ export function ConversationPanel({ sessionId }: { sessionId: string }) {
         { key: 'turnsPerConversation', label: 'Falas por rodada (somando as duas contas)', min: 2, max: 10 },
         { key: 'intervalMinutes', label: 'Intervalo entre falas em minutos', min: 1, max: 60 }] as const).map(({ key, label, min, max }) =>
         <div className="dialog-field" key={key}><label htmlFor={`conversation-${key}`}>{label}</label><input id={`conversation-${key}`} type="number" min={min} max={max} value={config[key]} disabled={busy} onChange={(e) => setConfig({ ...config, [key]: Number(e.target.value) })} /></div>)}
-      <p className="hint">O volume por dia acompanha o aquecimento (o limite inteiro do dia, no mínimo 20) até este teto. Ao terminar uma rodada, o par aguarda 30 minutos. A ativação não garante melhora do score.</p>
+      <p className="hint">O volume por dia acompanha o aquecimento (chip com proxy: o limite inteiro do dia; sem proxy: metade; no mínimo 20) até este teto. Ao terminar uma rodada, o par aguarda 30 minutos. A ativação não garante melhora do score.</p>
       <div className="row"><button type="button" disabled={busy || !config.topic.trim() || (config.enabled && config.mode === 'fixed' && !config.targetSessionId)} onClick={() => void save()}>Salvar conversas</button>
         <button type="button" className="secondary" disabled={busy || !view?.config.enabled || view.state.halted} onClick={() => void run()}>Verificar ciclo agora</button></div>
     </> : null}

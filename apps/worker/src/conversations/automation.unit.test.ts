@@ -384,8 +384,11 @@ describe('volume diário das conversas acompanha o aquecimento', () => {
     [210, 210], // dia 5
     [378, 378], // dia 6
     [680, 400], // dia 7: teto do chip
-  ])('aquecimento %i → conversa %i (teto 400)', (warmup, expected) => {
-    expect(conversationDailyLimit(400, lim(warmup))).toBe(expected)
+  ])('chip com proxy: aquecimento %i → conversa %i (teto 400)', (warmup, expected) => {
+    expect(conversationDailyLimit(400, lim(warmup), true)).toBe(expected)
+  })
+  it.each([[20, 20], [36, 20], [65, 33], [117, 59], [210, 105], [680, 340]])('chip sem proxy: aquecimento %i → conversa %i (metade)', (warmup, expected) => {
+    expect(conversationDailyLimit(800, lim(warmup))).toBe(expected)
   })
   it('aquecimento concluído: vale o teto do chip', () => expect(conversationDailyLimit(120, lim(null))).toBe(120))
   it('teto do chip e limite diário de envio continuam valendo', () => {

@@ -83,7 +83,7 @@ export class AutoReplyAutomation {
   private async room(id: string, config: ConversationConfig) {
     const limits = await this.opts.limits.get(id)
     let room = Infinity
-    for (const [window, maximum] of [[MINUTE, limits.effective.perMinute], [60 * MINUTE, limits.effective.perHour], [DAY, conversationDailyLimit(config.maxMessagesPerDay, limits.effective)]] as const) {
+    for (const [window, maximum] of [[MINUTE, limits.effective.perMinute], [60 * MINUTE, limits.effective.perHour], [DAY, conversationDailyLimit(config.maxMessagesPerDay, limits.effective, true)]] as const) {
       room = Math.min(room, maximum - await this.opts.limits.countOutbound(id, new Date(this.now() - window)))
     }
     return Math.max(0, room)
