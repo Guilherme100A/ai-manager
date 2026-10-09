@@ -40,5 +40,12 @@ describe('/api/reports/daily', () => {
 
   it('exige autenticação', async () => {
     expect((await get('/api/reports/daily', null)).status).toBe(401)
+    expect((await get('/api/reports/message-counts', null)).status).toBe(401)
+  })
+
+  it('message-counts devolve um mapa por chip', async () => {
+    const res = await get('/api/reports/message-counts')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ items: {} })
   })
 })

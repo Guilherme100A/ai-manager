@@ -204,3 +204,11 @@ export interface DailyReport {
   worker: ReportWorkerDay[]
   recentStalls: ReportStall[]
 }
+
+/** Mensagens por chip (GET /api/reports/message-counts): enviadas ao WhatsApp e recebidas. */
+export interface SessionMessageCounts {
+  sentTotal: number
+  receivedTotal: number
+  sent24h: number
+  received24h: number
+}

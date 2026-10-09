@@ -6,9 +6,11 @@ import { api } from '../lib/api'
 import { POLL, usePoll } from '../lib/hooks'
 import { proxyAddress } from '../lib/proxy-form'
 import { routeHref } from '../lib/router'
+import type { SessionMessageCounts } from '../lib/types'
 
 export function Sessions() {
   const { data, error, reload } = usePoll(() => api.sessions(), POLL.list)
+  const counts = usePoll(() => api.messageCounts(), POLL.page)
   const [removing, setRemoving] = useState<string>()
   const [actionError, setActionError] = useState<unknown>()
 
@@ -44,6 +46,8 @@ export function Sessions() {
             <th>Nome</th>
             <th>Número</th>
             <th>Proxy</th>
+            <th title="Mensagens que saíram para o WhatsApp">Enviadas</th>
+            <th>Recebidas</th>
             <th>Última conexão</th>
             <th>Observação</th>
             <th aria-label="Ações" />
@@ -62,6 +66,8 @@ export function Sessions() {
               </td>
               <td className="mono">{s.phone ?? '—'}</td>
               <td className={s.proxy ? 'mono' : 'muted'} data-testid="session-proxy">{proxyAddress(s.proxy)}</td>
+              <MessageCountCell counts={counts.data?.[s.id]} kind="sent" />
+              <MessageCountCell counts={counts.data?.[s.id]} kind="received" />
               <td className="muted">{formatDateTime(s.lastConnectedAt)}</td>
               <td className="muted">{s.note ?? ''}</td>
               <td className="cell-delete">
@@ -73,7 +79,7 @@ export function Sessions() {
           ))}
           {data && data.length === 0 ? (
             <tr>
-              <td colSpan={7} className="empty">
+              <td colSpan={9} className="empty">
                 Nenhuma sessão
               </td>
             </tr>
@@ -82,5 +88,18 @@ export function Sessions() {
       </table>
       </div>
     </div>
+  )
+}
+
+/** Total desde o início e, embaixo, as últimas 24 horas. */
+function MessageCountCell({ counts, kind }: { counts: SessionMessageCounts | undefined; kind: 'sent' | 'received' }) {
+  if (!counts) return <td className="muted" data-testid={`session-${kind}`}>0</td>
+  const total = kind === 'sent' ? counts.sentTotal : counts.receivedTotal
+  const day = kind === 'sent' ? counts.sent24h : counts.received24h
+  return (
+    <td className="nowrap" data-testid={`session-${kind}`}>
+      <span className="cell-strong">{total.toLocaleString('pt-BR')}</span>
+      <div className="muted">{day} em 24 h</div>
+    </td>
   )
 }

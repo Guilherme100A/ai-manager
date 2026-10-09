@@ -1,6 +1,7 @@
 // GET /api/reports/daily?days=7: números por chip e por dia (Brasília) para decidir ajustes. Só leitura.
+// GET /api/reports/message-counts: enviadas/recebidas por chip (total e últimas 24 h).
 import { Hono } from 'hono'
-import { buildDailyReport, MAX_REPORT_DAYS } from '@wsm/core'
+import { buildDailyReport, MAX_REPORT_DAYS, messageCountsBySession } from '@wsm/core'
 import { ApiError } from '../errors'
 import type { AppDeps, AppEnv } from '../types'
 
@@ -13,4 +14,5 @@ export function reportsRoutes(deps: Pick<AppDeps, 'db' | 'healthOptions'>) {
     }
     return c.json(await buildDailyReport(deps.db, { days, ...(deps.healthOptions ? { health: deps.healthOptions } : {}) }))
   })
+    .get('/api/reports/message-counts', async (c) => c.json({ items: await messageCountsBySession(deps.db) }))
 }

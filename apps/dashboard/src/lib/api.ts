@@ -5,6 +5,7 @@ import type {
   AuthUser,
   Contact,
   DailyReport,
+  SessionMessageCounts,
   Group,
   ImportResult,
   LoginResult,
@@ -137,6 +138,7 @@ export const api = {
 
   webhooks: () => request<{ items: Webhook[] }>('/api/webhooks').then((r) => r.items),
   dailyReport: (days = 7) => request<DailyReport>(`/api/reports/daily?days=${days}`),
+  messageCounts: () => request<{ items: Record<string, SessionMessageCounts> }>('/api/reports/message-counts').then((r) => r.items),
   createWebhook: (input: { name: string; channel: WebhookChannel; url: string; secret?: string; config?: Record<string, unknown>; events?: string[] }) =>
     request<Webhook>('/api/webhooks', { body: input }),
   updateWebhook: (id: string, input: Partial<{ enabled: boolean; name: string }>) =>
