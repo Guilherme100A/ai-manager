@@ -313,6 +313,23 @@ describe('vigia de conexão', () => {
     expect(await status(s.id)).toBe('WARMING')
   })
 
+  it('conta pareada por QR (Baileys não marca `registered`, só `me`) também é vigiada', async () => {
+    const qrPaired: SessionManagerOptions['authStateFactory'] = async (d, id) => {
+      const auth = await usePostgresAuthState(d, id)
+      auth.state.creds.me = { id: '5511999990001@s.whatsapp.net' }
+      return auth
+    }
+    const m = newManager({ connectTimeoutMs: 100, authStateFactory: qrPaired })
+    const s = await m.create({ name: 's', phone: '+5511999990001' })
+    await m.startQr(s.id)
+    const t = fakes.last(s.id)!
+    await until(() => t.connectCalls.length >= 2) // pendurou: o vigia derrubou e o backoff reconectou
+    expect(await events(s.id)).toContain('disconnected')
+    t.open()
+    await m.whenIdle()
+    expect(await status(s.id)).toBe('WARMING')
+  })
+
   it('não vigia QR/pareamento: conta ainda não pareada espera o tempo que for', async () => {
     const m = newManager({ connectTimeoutMs: 40 })
     const s = await m.create({ name: 's', phone: '+5511999990001' })

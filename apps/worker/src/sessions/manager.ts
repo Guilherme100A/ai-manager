@@ -482,7 +482,8 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     }
     // A conexão usou o proxy atual do banco: a troca pendente foi aplicada (AC-T06-03).
     if (before?.requiresRestart && this.isCurrent(rt)) await this.store.update(sessionId, { requiresRestart: false })
-    if (auth.state.creds.registered) this.watchConnect(rt)
+    // Conta já vinculada: `me` vem do pareamento por QR ou código (o Baileys só marca `registered` no por código).
+    if (auth.state.creds.registered || auth.state.creds.me?.id) this.watchConnect(rt)
   }
 
   /**
