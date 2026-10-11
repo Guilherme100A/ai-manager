@@ -345,6 +345,39 @@ describe('BaileysTransport', () => {
     expect(sendNode.mock.calls).toEqual([[{ tag: 'ack', attrs: { id: '2A09AC3F', to: '5511@s.whatsapp.net', class: 'status', type: 'text' } }]])
   })
 
+  it('figurinha de grupo: informa o nome do grupo (só do cache) e não baixa se o filtro recusar', async () => {
+    const saved: Array<[string, unknown]> = []
+    const downloadMedia = vi.fn(async () => Buffer.from('webp-data'))
+    const sockets: ReturnType<typeof mockSocket>[] = []
+    const transport = new BaileysTransport({
+      makeSocket: () => { const s = mockSocket(); sockets.push(s); return s },
+      stickers: {
+        accepts: (_id, source) => source.groupName !== 'Grupo 2',
+        save: async (id, _data, source) => { saved.push([id, source]) },
+      },
+      downloadMedia,
+    })
+    await transport.connect({ sessionId: 's', auth: setup().auth })
+    const sock = sockets[0]!
+    const sticker = (remoteJid: string, sha: number) => ({
+      key: { id: `m${sha}`, remoteJid, fromMe: false },
+      message: { stickerMessage: { fileSha256: new Uint8Array([sha, 1, 2, 3]), fileLength: 20_000 } },
+    })
+    sock.ev.emit('messages.upsert', { type: 'notify', messages: [sticker('g1@g.us', 1)] }) // sem cache: grupo sem nome
+    await flush(); await flush()
+    expect(sock.groupFetchAllParticipating).not.toHaveBeenCalled()
+    sock.ev.emit('connection.update', { connection: 'open' })
+    await flush()
+    await transport.fetchGroups()
+    sock.ev.emit('messages.upsert', { type: 'notify', messages: [sticker('g1@g.us', 2), sticker('g2@g.us', 3)] })
+    await flush(); await flush()
+    expect(saved).toEqual([
+      ['01010203', { chatId: 'g1@g.us' }],
+      ['02010203', { chatId: 'g1@g.us', groupName: 'Grupo 1' }],
+    ])
+    expect(downloadMedia).toHaveBeenCalledTimes(2) // a do Grupo 2 nem foi baixada
+  })
+
   it('guarda as figurinhas recebidas (não as próprias, nem acima de 1 MB) e envia figurinha nativa', async () => {
     const saved: Array<[string, string]> = []
     const downloadMedia = vi.fn(async () => Buffer.from('webp-data'))

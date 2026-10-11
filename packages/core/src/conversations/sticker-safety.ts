@@ -1,66 +1,77 @@
-// Filtro das figurinhas coletadas: as recebidas pelos chips (inclusive de grupos) podem ser sexuais ou sugestivas,
-// e seriam reenviadas nas conversas. Antes de guardar, o modelo pequeno olha a imagem (até 4 quadros das animadas).
-// Fecha em caso de dúvida: só 'ok' libera. 'unknown' (IA desligada, erro de rede) não libera nem apaga: revisa depois.
-import Anthropic from '@anthropic-ai/sdk'
-import type { ResolvedAiSettings } from '../ai/settings'
+// Filtro local das figurinhas coletadas (sem API externa): o NSFWJS (TensorFlow.js, backend WebAssembly) dá a
+// probabilidade de conteúdo sexual de até 4 quadros da figurinha. O modelo só é carregado quando há figurinhas para
+// avaliar e é liberado depois (release), para não ocupar memória (~300 MB) o tempo todo.
+// Nos testes com as figurinhas reais ele erra para os dois lados (close de rosto/pele vira "Porn"), por isso o
+// filtro por nome de grupo vem antes e o limite é baixo: perder uma figurinha boa não faz falta, mandar uma +18 faz.
 
 export const STICKER_MAX_FRAMES = 4
+/** Classes do NSFWJS tratadas como impróprias. */
+export const NSFW_CLASSES = ['Porn', 'Hentai', 'Sexy'] as const
 
-export type StickerVerdict = 'ok' | 'blocked' | 'unknown'
-
-export interface StickerModerator {
-  /** 'ok' = pode ser usada; 'blocked' = imprópria; 'unknown' = não deu para avaliar agora. Nunca lança. */
-  review(webp: Buffer): Promise<StickerVerdict>
+export interface StickerScorer {
+  /** Carrega o modelo (lança se não der: quem chama mantém as figurinhas para a próxima vez). */
+  ready(): Promise<void>
+  /** Maior probabilidade de conteúdo impróprio entre os quadros (0 a 1). Lança se o arquivo não for imagem. */
+  score(webp: Buffer): Promise<number>
+  /** Libera o modelo da memória (carrega de novo na próxima chamada a `score`). */
+  release(): Promise<void>
 }
 
-/** Quadros em PNG (até `max`, espalhados pela animação). Figurinha estática → 1 quadro. */
-export async function stickerFrames(webp: Buffer, max = STICKER_MAX_FRAMES): Promise<Buffer[]> {
+/** Quadros RGB 224x224 (até `max`, espalhados pela animação). Figurinha estática → 1 quadro. */
+export async function stickerFrames(webp: Buffer, max = STICKER_MAX_FRAMES): Promise<Array<{ data: Uint8Array; width: number; height: number }>> {
   const sharp = (await import('sharp')).default
   const pages = (await sharp(webp, { animated: true }).metadata()).pages ?? 1
-  const picks = [...new Set(Array.from({ length: Math.min(max, pages) }, (_, i) => Math.floor((i * pages) / Math.min(max, pages))))]
-  return Promise.all(picks.map((page) => sharp(webp, { page }).resize(256, 256, { fit: 'inside' }).png().toBuffer()))
+  const count = Math.min(max, pages)
+  const picks = [...new Set(Array.from({ length: count }, (_, i) => Math.floor((i * pages) / count)))]
+  return Promise.all(picks.map(async (page) => {
+    const { data, info } = await sharp(webp, { page }).flatten({ background: '#ffffff' }).resize(224, 224, { fit: 'fill' })
+      .removeAlpha().raw().toBuffer({ resolveWithObject: true })
+    return { data: new Uint8Array(data), width: info.width, height: info.height }
+  }))
 }
 
-const SYSTEM =
-  'Você revisa figurinhas (stickers) de WhatsApp antes de um sistema reenviá-las em conversas comuns entre adultos ' +
-  'desconhecidos. As imagens são quadros da mesma figurinha. Responda BLOQUEAR se qualquer quadro tiver nudez, ' +
-  'conteúdo sexual ou sugestivo (poses ou roupas sensuais, foco em partes íntimas, insinuação ou piada sexual), ' +
-  'violência explícita ou sangue, drogas, ou símbolos de ódio. Na dúvida, BLOQUEAR. Caso contrário responda OK. ' +
-  'Responda só com OK ou BLOQUEAR.'
+interface NsfwModel { classify(img: unknown): Promise<Array<{ className: string; probability: number }>>; model?: { dispose?(): void } }
 
-export class SmallStickerModerator implements StickerModerator {
-  constructor(
-    private readonly settings: () => Promise<ResolvedAiSettings>,
-    private readonly clientFactory = (apiKey: string) => new Anthropic({ apiKey, maxRetries: 1 }),
-    private readonly frames: (webp: Buffer) => Promise<Buffer[]> = stickerFrames,
-  ) {}
+/** NSFWJS (MobileNetV2) com TensorFlow.js em WebAssembly: roda no Alpine sem dependência nativa. */
+export function nsfwjsScorer(): StickerScorer {
+  let loading: Promise<{ tf: typeof import('@tensorflow/tfjs'); model: NsfwModel }> | undefined
+  const load = () => (loading ??= (async () => {
+    const tf = await import('@tensorflow/tfjs')
+    await import('@tensorflow/tfjs-backend-wasm')
+    await tf.setBackend('wasm')
+    await tf.ready()
+    const nsfwjs = await import('nsfwjs')
+    const model = (await nsfwjs.load('MobileNetV2')) as unknown as NsfwModel
+    return { tf, model }
+  })().catch((err: unknown) => { loading = undefined; throw err }))
 
-  async review(webp: Buffer): Promise<StickerVerdict> {
-    try {
-      const settings = await this.settings()
-      if (!settings.enabled || !settings.config.apiKey) return 'unknown'
-      // Arquivo que nem abre como imagem não é figurinha utilizável.
-      const images = await this.frames(webp).catch(() => [])
-      if (!images.length) return 'blocked'
-      const response = await this.clientFactory(settings.config.apiKey).messages.create({
-        model: settings.config.smallModel,
-        max_tokens: 16,
-        system: SYSTEM,
-        messages: [{
-          role: 'user',
-          content: [
-            ...images.map((png) => ({ type: 'image' as const, source: { type: 'base64' as const, media_type: 'image/png' as const, data: png.toString('base64') } })),
-            { type: 'text', text: 'Esta figurinha pode ser usada?' },
-          ],
-        }],
-      }, { signal: AbortSignal.timeout(Math.min(30_000, settings.config.timeoutMs)) })
-      // Recusa do modelo de segurança: trata como imprópria.
-      if (response.stop_reason === 'refusal') return 'blocked'
-      if (response.stop_reason !== 'end_turn') return 'unknown'
-      const answer = response.content.filter((c) => c.type === 'text').map((c) => c.text).join('').trim().toUpperCase().replace(/[^A-Z]/g, '')
-      return answer === 'OK' ? 'ok' : answer === 'BLOQUEAR' ? 'blocked' : 'unknown'
-    } catch {
-      return 'unknown'
-    }
+  return {
+    async ready() {
+      await load()
+    },
+    async score(webp) {
+      const frames = await stickerFrames(webp)
+      const { tf, model } = await load()
+      let worst = 0
+      for (const f of frames) {
+        const img = tf.tensor3d(f.data, [f.height, f.width, 3], 'int32')
+        try {
+          for (const p of await model.classify(img)) {
+            if ((NSFW_CLASSES as readonly string[]).includes(p.className)) worst = Math.max(worst, p.probability)
+          }
+        } finally {
+          img.dispose()
+        }
+      }
+      return worst
+    },
+    async release() {
+      const current = loading
+      loading = undefined
+      if (!current) return
+      const { tf, model } = await current.catch(() => ({ tf: undefined, model: undefined }))
+      model?.model?.dispose?.()
+      tf?.disposeVariables()
+    },
   }
 }

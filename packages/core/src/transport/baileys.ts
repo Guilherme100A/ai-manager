@@ -142,7 +142,7 @@ export interface BaileysTransportOptions {
   /** Persistência dos tempos de mensagens temporárias (sobrevive a reinícios). Sem ela, só em memória. */
   disappearing?: DisappearingStore
   /** Guarda as figurinhas recebidas (de pessoas e grupos) para o aquecimento reaproveitar. */
-  stickers?: { save(id: string, data: Buffer): Promise<void> }
+  stickers?: StickerSink
   /** Baixa a mídia de uma mensagem recebida; default: `downloadMediaMessage` do Baileys. */
   downloadMedia?: (raw: unknown, sock: BaileysSocketLike) => Promise<Buffer>
   /** Validade da lista de grupos em cache (default GROUPS_CACHE_MS). */
@@ -164,6 +164,19 @@ export const GROUPS_MIN_REFETCH_MS = 2 * 60_000
 export const CHAT_CHECK_INTERVAL = 6 * 3_600_000
 /** Quanto esperar a resposta do celular numa conferência. */
 export const CHAT_CHECK_WAIT = 8_000
+
+/** De onde veio a figurinha recebida (o filtro descarta as de grupos com nome suspeito). */
+export interface StickerSource {
+  chatId: string
+  /** Nome do grupo, se a lista de grupos já estiver em cache (nunca consulta o WhatsApp só para isso). */
+  groupName?: string
+}
+
+export interface StickerSink {
+  /** Filtro barato antes de baixar a mídia (ex.: grupo bloqueado). */
+  accepts?(id: string, source: StickerSource): boolean
+  save(id: string, data: Buffer, source: StickerSource): Promise<void>
+}
 
 /** Figurinha recebida aproveitável: até 1 MB; id estável (hash do arquivo) para não guardar repetida. */
 export function receivedSticker(raw: { key?: { fromMe?: boolean | null } | null; message?: Record<string, unknown> | null }): string | undefined {
@@ -429,10 +442,11 @@ export class BaileysTransport extends TransportEmitter implements WaTransport {
           if (expiration) this.rememberEphemeral([raw.key?.remoteJid, raw.key?.remoteJidAlt], expiration)
           // Figurinha recebida: guarda o arquivo original (vira figurinha nativa ao reenviar). Falha não afeta nada.
           const stickerId = u.type === 'notify' ? receivedSticker(raw) : undefined
-          if (stickerId && this.options.stickers) {
-            const sink = this.options.stickers
+          const sink = this.options.stickers
+          const source = stickerId && sink ? this.stickerSource(raw.key?.remoteJid) : undefined
+          if (stickerId && sink && source && (sink.accepts?.(stickerId, source) ?? true)) {
             void (this.options.downloadMedia ?? defaultDownloadMedia)(raw, sock)
-              .then((data) => sink.save(stickerId, data))
+              .then((data) => sink.save(stickerId, data, source))
               .catch(() => undefined)
           }
         }
@@ -575,6 +589,13 @@ export class BaileysTransport extends TransportEmitter implements WaTransport {
    * Grupo mudou (aviso do WhatsApp, reconexão): a lista fica "velha" mas é mantida, para servir de reserva no
    * rate-overlimit. `force` (a própria conta entrou/adicionou alguém) consulta de novo na próxima chamada.
    */
+  /** Origem da figurinha; o nome do grupo vem só do cache da lista de grupos. */
+  private stickerSource(chatId: string | null | undefined): StickerSource | undefined {
+    if (!chatId) return undefined
+    const group = chatId.endsWith('@g.us') ? this.groupsCache?.groups.find((g) => g.id === chatId) : undefined
+    return group ? { chatId, groupName: group.name } : { chatId }
+  }
+
   private invalidateGroups(force = false): void {
     if (!this.groupsCache) return
     this.groupsCache.stale = true

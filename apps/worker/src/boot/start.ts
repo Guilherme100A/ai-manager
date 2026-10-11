@@ -8,7 +8,7 @@ import { Redis } from 'ioredis'
 import {
   AiAssistant,
   AiSettingsService,
-  SmallStickerModerator,
+  nsfwjsScorer,
   AutoReplyTargets,
   SmallGroupModel,
   SmallConversationModel,
@@ -115,23 +115,30 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     const inflight: InflightStore = redisInflightStore(redis, config.queuePrefix)
 
     // Figurinhas do aquecimento: .webp da pasta + as recebidas pelos chips (guardadas em <pasta>/coletadas).
-    // As recebidas passam pelo filtro da IA (sem +18); com o estoque cheio, novas deixam de ser coletadas.
-    const stickerSettings = new AiSettingsService({ db, env })
+    // Recebidas: grupo com nome suspeito é ignorado na hora; o resto espera o NSFWJS (local) em <coletadas>/pendentes.
+    const blockedGroupWords = env.STICKER_BLOCKED_GROUP_WORDS?.split(',').map((w) => w.trim()).filter(Boolean)
     const stickers = fileStickerPool(env.STICKERS_DIR?.trim() || '/app/stickers', {
-      moderator: new SmallStickerModerator(() => stickerSettings.resolve()),
+      scorer: nsfwjsScorer(),
+      ...(blockedGroupWords?.length ? { blockedGroupWords } : {}),
       logger,
     })
-    // Revisa as já coletadas (no boot e a cada 6 h, para as que ficaram sem veredito). Uma por vez, em segundo plano.
-    let stickerReview: Promise<unknown> | undefined
-    const reviewStickers = () => {
-      stickerReview ??= stickers.reviewPending()
-        .catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'sticker review failed'))
-        .finally(() => { stickerReview = undefined })
+    // Avalia as pendentes de hora em hora (a primeira 10 min após o boot, longe da reconexão dos chips). Uma rodada
+    // por vez; o modelo só fica na memória durante a rodada.
+    let stickerRound: Promise<unknown> | undefined
+    const processStickers = () => {
+      stickerRound ??= stickers.processPending()
+        .catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'sticker round failed'))
+        .finally(() => { stickerRound = undefined })
     }
-    reviewStickers()
-    const stickerTimer = setInterval(reviewStickers, 6 * 60 * 60_000)
+    const stickerFirst = setTimeout(processStickers, 10 * 60_000)
+    const stickerTimer = setInterval(processStickers, 60 * 60_000)
+    stickerFirst.unref?.()
     stickerTimer.unref?.()
-    onStop('sticker-review', () => clearInterval(stickerTimer))
+    onStop('sticker-filter', async () => {
+      clearTimeout(stickerFirst)
+      clearInterval(stickerTimer)
+      await stickerRound
+    })
     // ---- transporte ------------------------------------------------------------------------
     const fake = config.transport === 'fake' ? new FakeControl({ redis, prefix: config.queuePrefix, bootId, logger }) : undefined
     const baseFactory = opts.transportFactory ?? fake?.factory ?? createTransportFactory({ kind: config.transport, disappearing: (id) => redisDisappearingStore(redis, id, config.queuePrefix), stickers })
