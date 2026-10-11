@@ -8,6 +8,7 @@ import { Redis } from 'ioredis'
 import {
   AiAssistant,
   AiSettingsService,
+  SmallStickerModerator,
   AutoReplyTargets,
   SmallGroupModel,
   SmallConversationModel,
@@ -114,7 +115,23 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     const inflight: InflightStore = redisInflightStore(redis, config.queuePrefix)
 
     // Figurinhas do aquecimento: .webp da pasta + as recebidas pelos chips (guardadas em <pasta>/coletadas).
-    const stickers = fileStickerPool(env.STICKERS_DIR?.trim() || '/app/stickers')
+    // As recebidas passam pelo filtro da IA (sem +18); com o estoque cheio, novas deixam de ser coletadas.
+    const stickerSettings = new AiSettingsService({ db, env })
+    const stickers = fileStickerPool(env.STICKERS_DIR?.trim() || '/app/stickers', {
+      moderator: new SmallStickerModerator(() => stickerSettings.resolve()),
+      logger,
+    })
+    // Revisa as já coletadas (no boot e a cada 6 h, para as que ficaram sem veredito). Uma por vez, em segundo plano.
+    let stickerReview: Promise<unknown> | undefined
+    const reviewStickers = () => {
+      stickerReview ??= stickers.reviewPending()
+        .catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'sticker review failed'))
+        .finally(() => { stickerReview = undefined })
+    }
+    reviewStickers()
+    const stickerTimer = setInterval(reviewStickers, 6 * 60 * 60_000)
+    stickerTimer.unref?.()
+    onStop('sticker-review', () => clearInterval(stickerTimer))
     // ---- transporte ------------------------------------------------------------------------
     const fake = config.transport === 'fake' ? new FakeControl({ redis, prefix: config.queuePrefix, bootId, logger }) : undefined
     const baseFactory = opts.transportFactory ?? fake?.factory ?? createTransportFactory({ kind: config.transport, disappearing: (id) => redisDisappearingStore(redis, id, config.queuePrefix), stickers })
