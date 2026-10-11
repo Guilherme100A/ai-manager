@@ -48,6 +48,13 @@ describe('modelo de conversas', () => {
     expect(splitConversationParts('a\nb\nc\nd', 3)).toEqual(['a', 'b', 'c d'])
     expect(splitConversationParts('uma fala só', 3)).toEqual(['uma fala só'])
   })
+  it('barra usada como separador vira quebra de linha e nunca vai para a mensagem', async () => {
+    expect(splitConversationParts('Boa sorte com o bot aí / Qualquer hora a gente conversa', 3)).toEqual(['Boa sorte com o bot aí', 'Qualquer hora a gente conversa'])
+    expect(splitConversationParts('que jogo absurdo\n/ a galera não para de falar nele\n/ vale cada minuto /', 3))
+      .toEqual(['que jogo absurdo', 'a galera não para de falar nele', 'vale cada minuto'])
+    expect(splitConversationParts('zerei 1/2 do jogo e/ou mais', 3)).toEqual(['zerei 1/2 do jogo e/ou mais'])
+    expect(await setup('opa / viu o trailer novo?').model.message('jogos', 'a', [], 2)).toBe('opa\nviu o trailer novo?')
+  })
   it.each(['', 'x'.repeat(301), 'https://example.com'])('rejeita fala inválida', async (text) => {
     await expect(setup(text).model.message('jogos', 'a', [])).rejects.toThrow('inválida')
   })

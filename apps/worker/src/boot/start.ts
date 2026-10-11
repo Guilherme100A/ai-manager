@@ -188,7 +188,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     // Registrado depois das sessões → roda ANTES delas no shutdown: a fila espera o envio em curso terminar
     // (BullMQ Worker.close) enquanto o transporte ainda está aberto.
     onStop('queue', () => queue.close())
-    onStop('queue-attach', attachQueueToSessions(manager, queue, { logger }))
+    onStop('queue-attach', attachQueueToSessions(manager, queue, { logger, antiban }))
 
     // ---- reconciliação de mensagens presas em processing (AC-T16-05) -------------------------
     const requeueQueues = new Map<string, Queue>()

@@ -4,6 +4,7 @@ import { Hono, type Context } from 'hono'
 import { z } from 'zod'
 import { E164_REGEX, MESSAGE_STATUSES } from '@wsm/db'
 import {
+  ChatHistory,
   MessageNotFoundError,
   MessageStore,
   MessageTransitionError,
@@ -65,6 +66,13 @@ async function run<T>(fn: () => Promise<T>): Promise<T> {
 
 const id = (c: Context<AppEnv>) => c.req.param('id') ?? ''
 
+const chatsQuery = z.object({ limit: z.coerce.number().int().min(1).max(500).optional() })
+const sessionIdOf = (c: Context<AppEnv>) => {
+  const sid = id(c)
+  if (!z.uuid().safeParse(sid).success) throw new ApiError('SESSION_NOT_FOUND', 'Sessão inválida.')
+  return sid
+}
+
 const media = z.object({ url: z.string().trim().min(1) })
 const caption = z.string().max(4096).optional()
 const mimetype = z.string().trim().min(1).max(200)
@@ -96,11 +104,20 @@ function buildPipeline(deps: Pick<AppDeps, 'db' | 'messages' | 'sessions' | 'pip
 export function messagesRoutes(deps: Pick<AppDeps, 'db' | 'messages' | 'sessions' | 'pipeline'>) {
   const messages = deps.messages ?? dbOnlyMessages(new MessageStore(deps.db))
   const pipeline = buildPipeline(deps)
+  const chats = new ChatHistory(deps.db)
 
   return new Hono<AppEnv>()
     .get('/api/messages', validate('query', listMessagesQuery), async (c) => {
       const q = c.req.valid('query')
       return c.json({ items: await run(() => messages.list(q)) })
+    })
+    // Conversas do chip (só banco, nunca o WhatsApp): ver o histórico não gasta envio nem mexe nos limites.
+    .get('/api/sessions/:id/chats', validate('query', chatsQuery), async (c) =>
+      c.json({ items: await chats.list(sessionIdOf(c), c.req.valid('query').limit) }))
+    .get('/api/sessions/:id/chats/:phone', validate('query', chatsQuery), async (c) => {
+      const phone = c.req.param('phone') ?? ''
+      if (!E164_REGEX.test(phone)) throw new ApiError('VALIDATION_ERROR', 'Número inválido.')
+      return c.json({ items: await chats.messages(sessionIdOf(c), phone, c.req.valid('query').limit) })
     })
     .get('/api/messages/:id', async (c) => c.json(await run(() => messages.get(id(c)))))
     .get('/api/messages/:id/events', async (c) => c.json({ items: await run(() => messages.events(id(c))) }))

@@ -52,6 +52,7 @@ describe('createGuardedDeliver', () => {
       beforeSend: async () => ({ allowed: false, delayMs: 0, reason: 'spam' }),
       afterSend() {},
       afterSendFailed() {},
+      onDelivered() {},
       stats: () => ({ before: 0, allowed: 0, blocked: 0, sent: 0, failed: 0 }),
     }
     const marks: string[] = []

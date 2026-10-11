@@ -87,6 +87,7 @@ export function withMarkPoint(inner: AntibanAdapter | (() => AntibanAdapter)): A
     },
     afterSend: (key, to, content, messageId) => get().afterSend(key, to, content, messageId),
     afterSendFailed: (key, error) => get().afterSendFailed(key, error),
+    onDelivered: (key, messageId) => get().onDelivered(key, messageId),
     stats: (key) => get().stats(key),
   }
 }

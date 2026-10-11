@@ -2,11 +2,13 @@
 // - estado → PAUSED pausa a fila da sessão; saída de PAUSED a retoma (AC-T08-05);
 // - conexão aberta inicia o Worker da sessão e liga os receipts do transporte (AC-T08-02);
 // - o transporte só é entregue à fila enquanto a sessão está conectada.
-import type { MessageQueue, WaTransport } from '@wsm/core'
+import type { AntibanAdapter, MessageQueue, WaTransport } from '@wsm/core'
 import type { SessionManager } from '../sessions'
 
 export interface AttachQueueOptions {
   logger?: { error(obj: object, msg?: string): void }
+  /** Recebe as confirmações de entrega: o AntiBan usa a taxa de entrega para ajustar os limites. */
+  antiban?: Pick<AntibanAdapter, 'onDelivered'>
 }
 
 /** Devolve uma função que desfaz a ligação. Chame antes de conectar as sessões. */
@@ -27,6 +29,7 @@ export function attachQueueToSessions(manager: SessionManager, queue: MessageQue
       wired.add(transport)
       transport.on('receipt', (r) => {
         // O transporte pode ter sido substituído (restart); receipts do antigo ainda valem para mensagens dele.
+        opts.antiban?.onDelivered(sessionId, r.messageId)
         void queue.handleReceipt(sessionId, r).catch(fail(sessionId, 'receipt handling failed'))
       })
     }

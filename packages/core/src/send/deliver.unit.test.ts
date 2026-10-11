@@ -19,6 +19,7 @@ function spyAdapter(decision = { allowed: true, delayMs: 0 } as { allowed: boole
     beforeSend: vi.fn(async (key: string) => (calls.push(`before:${key}`), decision)),
     afterSend: vi.fn((key: string) => void calls.push(`after:${key}`)),
     afterSendFailed: vi.fn((key: string) => void calls.push(`failed:${key}`)),
+    onDelivered: vi.fn(),
     stats: () => ({ before: 0, allowed: 0, blocked: 0, sent: 0, failed: 0 }),
   }
   return { adapter, calls }

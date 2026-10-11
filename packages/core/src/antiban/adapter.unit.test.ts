@@ -1,3 +1,4 @@
+import { AntiBan } from 'baileys-antiban'
 import { describe, expect, it, vi } from 'vitest'
 import {
   AntibanConfigError,
@@ -89,6 +90,23 @@ describe('BaileysAntibanAdapter (real)', () => {
       { preset: 'moderate', logging: false, inactivityThresholdHours: 1e9 },
     ])
     expect(warmUps.every((w) => w.graduated)).toBe(true)
+  })
+
+  it('confirmações de entrega chegam ao AntiBan: sem elas ele vê 0% de entrega e corta o limite diário a 25%', () => {
+    const run = (receipts: boolean) => {
+      let inst: AntiBan | undefined
+      const a = new BaileysAntibanAdapter({ config: 'conservative', create: (cfg, w) => (inst = new AntiBan(cfg, w)) })
+      a.onDelivered('s1', 'antes') // receipt sem instância (ex.: envio anterior ao restart): ignora
+      for (let i = 0; i < 12; i++) {
+        a.afterSend('s1', TO, { text: `m ${i}` }, `m${i}`)
+        if (receipts) a.onDelivered('s1', `m${i}`)
+      }
+      return inst!.getStats()
+    }
+    const ok = run(true)
+    expect(ok.deliveryTracker.deliveredInWindow).toBe(12)
+    expect(ok.rateLimiter.limits.perDay).toBe(800)
+    expect(run(false).rateLimiter.limits.perDay).toBe(200)
   })
 
   it('o aquecimento do AntiBan não limita: o nosso (persistido) é o único limite diário', async () => {

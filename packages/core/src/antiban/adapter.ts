@@ -35,6 +35,11 @@ export interface AntibanAdapter {
   beforeSend(key: string, to: string, content: OutgoingContent): Promise<AntibanDecision>
   afterSend(key: string, to: string, content: OutgoingContent, messageId?: string): void
   afterSendFailed(key: string, error?: string): void
+  /**
+   * Confirmação de entrega/leitura de uma mensagem enviada (id do transporte). Sem isso o AntiBan vê 0% de entrega
+   * e, a partir de 10 envios na hora, corta os limites a 25% (200/dia) e bloqueia envios normais.
+   */
+  onDelivered(key: string, messageId: string): void
   stats(key: string): AntibanStats
 }
 
@@ -47,6 +52,7 @@ export interface AntiBanLike {
   beforeSend(recipient: string, content: string): Promise<{ allowed: boolean; delayMs: number; reason?: string }>
   afterSend(recipient: string, content: string, msgId?: string): void
   afterSendFailed(error?: string): void
+  onDeliveryReceipt?(msgId: string): void
   destroy?(): void
 }
 
@@ -109,6 +115,7 @@ abstract class BaseAdapter implements AntibanAdapter {
   abstract beforeSend(key: string, to: string, content: OutgoingContent): Promise<AntibanDecision>
   abstract afterSend(key: string, to: string, content: OutgoingContent, messageId?: string): void
   abstract afterSendFailed(key: string, error?: string): void
+  abstract onDelivered(key: string, messageId: string): void
 }
 
 export interface BaileysAntibanAdapterOptions {
@@ -174,6 +181,11 @@ export class BaileysAntibanAdapter extends BaseAdapter {
     this.instance(key).afterSendFailed(error)
   }
 
+  onDelivered(key: string, messageId: string): void {
+    // Sem instância ainda (ex.: receipt de envio anterior ao restart): nada a marcar.
+    this.instances.get(key)?.onDeliveryReceipt?.(messageId)
+  }
+
   /** Descarta o estado de uma sessão (ex.: sessão removida). */
   forget(key: string): void {
     this.instances.get(key)?.destroy?.()
@@ -204,6 +216,8 @@ export class PassthroughAntibanAdapter extends BaseAdapter {
   afterSendFailed(key: string, _error?: string): void {
     this.count(key).failed++
   }
+
+  onDelivered(_key: string, _messageId: string): void {}
 }
 
 export interface CreateAntibanAdapterOptions {
