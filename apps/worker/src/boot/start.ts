@@ -12,6 +12,7 @@ import {
   AutoReplyTargets,
   SmallGroupModel,
   SmallConversationModel,
+  FallbackConversationModel,
   ContactsService,
   canMessage,
   AlertDispatcher,
@@ -258,7 +259,8 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     const conversationSettings = new AiSettingsService({ db, env })
     const conversationContacts = new ContactsService(db)
     const conversationStore = new RedisConversationStore(redis, env.CONVERSATIONS_AUTO_ROTATE?.trim().toLowerCase() !== 'false')
-    const conversationModel = new SmallConversationModel(() => conversationSettings.resolve())
+    // Sem IA (sem crédito, sem chave, desligada, timeout) a conversa segue com o banco de frases.
+    const conversationModel = new FallbackConversationModel(new SmallConversationModel(() => conversationSettings.resolve()), undefined, logger)
     const conversations = new ConversationAutomation({
       manager, store: conversationStore, limits, pipeline: routingPipeline, messages: queue,
       model: conversationModel,
