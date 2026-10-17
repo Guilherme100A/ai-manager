@@ -19,6 +19,7 @@ import { aiSettingsRoutes } from './ai-settings'
 import { sessionLinksRoutes } from './session-links'
 import { reportsRoutes } from './reports'
 import { autoReplyRoutes } from './autoreply'
+import { crmSsoRoutes } from './crm-sso'
 
 export function registerRoutes(app: Hono<AppEnv>, deps: AppDeps) {
   app.route('/', healthRoutes(deps))
@@ -45,4 +46,6 @@ export function registerRoutes(app: Hono<AppEnv>, deps: AppDeps) {
   app.route('/', reportsRoutes(deps))
   // Números de autoresposta das conversas dos chips com proxy
   app.route('/', autoReplyRoutes(deps))
+  // Integração CRM: SSO do painel para o CRM no iframe (501 sem CRM_SSO_SECRET)
+  app.route('/', crmSsoRoutes(deps))
 }
