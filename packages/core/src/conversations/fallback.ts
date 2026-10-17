@@ -110,7 +110,7 @@ export class PhraseConversationModel implements ConversationModel {
 
 export interface FallbackLogger { warn(obj: object, message?: string): void }
 
-/** Tenta a IA e, se ela falhar por qualquer motivo, usa o banco de frases. */
+/** Tenta a IA e, se ela falhar por qualquer motivo, usa o banco de frases. Com a IA desligada, vai direto às frases (sem aviso). */
 export class FallbackConversationModel implements ConversationModel {
   constructor(
     private readonly primary: ConversationModel,
@@ -122,7 +122,9 @@ export class FallbackConversationModel implements ConversationModel {
     try {
       return await this.primary.message(topic, senderId, history, parts)
     } catch (err) {
-      this.logger?.warn({ session_id: senderId, err: err instanceof Error ? err.message.slice(0, 160) : String(err) }, 'conversation ai failed; using phrase fallback')
+      if (!(err instanceof Error && err.name === 'ConversationAiDisabledError')) {
+        this.logger?.warn({ session_id: senderId, err: err instanceof Error ? err.message.slice(0, 160) : String(err) }, 'conversation ai failed; using phrase fallback')
+      }
       return this.fallback.message(topic, senderId, history, parts)
     }
   }

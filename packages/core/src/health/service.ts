@@ -109,6 +109,7 @@ export class HealthService {
         kind: sql<string>`case
           when ${messages.direction} = 'inbound' then 'received'
           when ${messages.status} in ('sent','delivered','read') then 'sent'
+          when ${messages.status} = 'failed' and coalesce(${messages.error}, '') like 'blocked by antiban%' then 'other'
           when ${messages.status} = 'failed' then 'failed'
           else 'other' end`,
         total: count(),

@@ -47,12 +47,20 @@ export interface ConversationModel {
   message(topic: string, senderId: string, history: ConversationTurn[], parts?: number): Promise<string>
 }
 
+/** IA desligada (ou sem chave): as falas saem do banco de frases, sem chamar o provedor. Não é falha. */
+export class ConversationAiDisabledError extends Error {
+  constructor() {
+    super('Habilite a IA e configure sua chave.')
+    this.name = 'ConversationAiDisabledError'
+  }
+}
+
 /** Diálogo interno entre contas selecionadas; apenas o modelo pequeno, sem busca ou escalada. */
 export class SmallConversationModel implements ConversationModel {
   constructor(private readonly settings: () => Promise<ResolvedAiSettings>, private readonly clientFactory = (apiKey: string) => new Anthropic({ apiKey, maxRetries: 0 })) {}
   async message(topic: string, senderId: string, history: ConversationTurn[], parts = 1): Promise<string> {
     const settings = await this.settings()
-    if (!settings.enabled || !settings.config.apiKey) throw new Error('Habilite a IA e configure sua chave.')
+    if (!settings.enabled || !settings.config.apiKey) throw new ConversationAiDisabledError()
     // Autor relativo a quem fala: a última fala pode ser do próprio remetente (ex.: disparo incompleto).
     const turns = history.slice(-10).map((t) => ({ autor: t.senderId === senderId ? 'você' : 'outra conta', texto: t.text }))
     const last = turns.at(-1)

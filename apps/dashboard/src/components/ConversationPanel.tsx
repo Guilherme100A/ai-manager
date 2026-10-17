@@ -20,7 +20,18 @@ export function ConversationPanel({ sessionId }: { sessionId: string }) {
   const [sessions, setSessions] = useState<Session[]>([])
   const [error, setError] = useState<unknown>()
   const [busy, setBusy] = useState(false)
+  const [ai, setAi] = useState<{ enabled: boolean; hasApiKey: boolean }>()
   const endpoint = `/api/sessions/${encodeURIComponent(sessionId)}/conversation`
+  useEffect(() => {
+    let active = true
+    void request<{ enabled: boolean; hasApiKey: boolean }>('/api/ai/settings').then((s) => { if (active) setAi(s) }, () => undefined)
+    return () => { active = false }
+  }, [])
+  async function toggleAi(enabled: boolean) {
+    setBusy(true); setError(undefined)
+    try { setAi(await request<{ enabled: boolean; hasApiKey: boolean }>('/api/ai/settings', { method: 'PUT', body: { enabled } })) }
+    catch (err) { setError(err) } finally { setBusy(false) }
+  }
   useEffect(() => {
     let active = true
     setView(undefined); setConfig(undefined); setError(undefined)
@@ -64,6 +75,10 @@ export function ConversationPanel({ sessionId }: { sessionId: string }) {
         </select>
         <small className="hint">Autorize os dois números em Contatos. Ative o par apenas aqui; não é necessário criar o vínculo inverso na outra conta.</small>
       </div> : <p className="hint">Ative também o rodízio nas outras contas. Só entram no sorteio contas conectadas e com cota. Se o número de contas for ímpar, quem ficar de fora ganha prioridade na próxima formação.</p>}
+      {ai ? <>
+        <label><input type="checkbox" data-testid="conversation-ai" checked={ai.enabled} disabled={busy} onChange={(e) => void toggleAi(e.target.checked)} /> Usar IA nas falas</label>
+        <p className="hint">{ai.enabled ? (ai.hasApiKey ? 'As falas são geradas pela IA; se ela falhar, saem do banco de frases prontas.' : 'IA ligada, mas sem chave: as falas saem do banco de frases prontas.') : 'Desligado: as falas saem do banco de frases prontas, sem chamar a IA.'} Vale para todas as contas.</p>
+      </> : null}
       <div className="dialog-field"><label htmlFor="conversation-topic">Tema</label><input id="conversation-topic" value={config.topic} maxLength={300} disabled={busy} onChange={(e) => setConfig({ ...config, topic: e.target.value })} /></div>
       {([{ key: 'maxMessagesPerDay', label: 'Teto de envios por conta em 24 horas', min: 1, max: 800 },
         { key: 'turnsPerConversation', label: 'Falas por rodada (somando as duas contas)', min: 2, max: 10 },

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { FallbackConversationModel, PhraseConversationModel } from './fallback'
+import { ConversationAiDisabledError } from './index'
 
 const seeded = (seed: number) => () => ((seed = (seed * 16807) % 2147483647) - 1) / 2147483646
 
@@ -62,6 +63,17 @@ describe('FallbackConversationModel', () => {
     )
     expect(await model.message('t', 'a', [], 2)).toBe('reserva 2')
     expect(warn).toHaveBeenCalledWith(expect.objectContaining({ session_id: 'a', err: expect.stringContaining('credit') }), expect.any(String))
+  })
+
+  it('com a IA desligada usa as frases sem registrar falha', async () => {
+    const warn = vi.fn()
+    const model = new FallbackConversationModel(
+      { message: async () => { throw new ConversationAiDisabledError() } },
+      { message: async () => 'reserva' },
+      { warn },
+    )
+    expect(await model.message('t', 'a', [])).toBe('reserva')
+    expect(warn).not.toHaveBeenCalled()
   })
 })
 

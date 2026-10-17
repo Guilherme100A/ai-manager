@@ -30,8 +30,8 @@ async function session(over: Partial<typeof sessions.$inferInsert> = {}) {
 }
 
 type MsgStatus = (typeof messages.$inferInsert)['status']
-async function msg(sessionId: string, status: MsgStatus, createdAt: Date, direction: 'outbound' | 'inbound' = 'outbound') {
-  await db.insert(messages).values({ sessionId, phone: '+5511999990002', content: { text: 'x' }, status, direction, createdAt })
+async function msg(sessionId: string, status: MsgStatus, createdAt: Date, direction: 'outbound' | 'inbound' = 'outbound', error?: string) {
+  await db.insert(messages).values({ sessionId, phone: '+5511999990002', content: { text: 'x' }, status, direction, createdAt, error })
 }
 async function ev(sessionId: string, type: string, createdAt: Date) {
   await db.insert(healthEvents).values({ sessionId, type, createdAt })
@@ -71,6 +71,14 @@ describe('HealthService', () => {
     const h = await service().getHealth(s.id)
     expect(h).toMatchObject({ sent: 3, received: 1, failed: 1, disconnects: 1, forbidden403: 0 })
     expect(h.lastEventAt).toBe(ago(10 * 60 * 1000).toISOString())
+  })
+
+  it('bloqueio do nosso antiban (mensagem que nem saiu) não conta como falha do chip', async () => {
+    const s = await session()
+    await msg(s.id, 'sent', ago(H))
+    await msg(s.id, 'failed', ago(H), 'outbound', 'blocked by antiban: Rate limit exceeded or identical message spam detected')
+    await msg(s.id, 'failed', ago(H), 'outbound', 'timeout')
+    expect(await service().getHealth(s.id)).toMatchObject({ sent: 1, failed: 1 })
   })
 
   it('tendência de erros: falhas de envio da metade recente menos a anterior (quedas não entram)', async () => {
