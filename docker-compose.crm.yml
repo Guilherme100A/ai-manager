@@ -1,0 +1,115 @@
+# Override OPCIONAL: CRM em "modo extensão" sobre o ai-manager (não é usado pelo deploy; o compose principal não
+# depende dele). Uso, com o checkout do CRM em CRM_DIR (default ../crm):
+#
+#   docker compose -f docker-compose.yml -f docker-compose.crm.yml up -d
+#
+# O que muda:
+#  - worker do ai-manager com CRM_BRIDGE=on: publica WaEvent v1 no stream `wsm:events` e expõe ao CRM os alvos
+#    RPC messages.send/sendGroup (pelo SendPipeline: warm-up, limites e antiban do ai-manager), media.download,
+#    presence.update e contacts.recordConsent/optOut/list.
+#  - api do ai-manager com CRM_SSO_SECRET: POST /api/crm/sso (página #/crm do painel abre o CRM num iframe).
+#  - crm-api, crm-worker e crm-web: o CRM com WA_GATEWAY=rpc + WA_RPC_PROFILE=ai-manager, no MESMO Postgres
+#    (o CRM só aplica as migrations `crm`, schema crm.*) e no MESMO Redis/db do ai-manager. O wa-worker do CRM
+#    NÃO roda (um dono por socket: só o worker do ai-manager abre as sessões).
+#  - Para o painel servir o CRM em /crm/ e a API dele em /crm/api/, descomente o bloco "Integração CRM" em
+#    apps/dashboard/nginx.conf e reconstrua o dashboard.
+#
+# Variáveis: CRM_SSO_SECRET (obrigatória aqui; a MESMA na api do ai-manager e no crm-api), CRM_CREDENTIALS_KEY
+# (32 bytes base64, chave do CRM), CRM_DIR. As imagens abaixo rodam o código-fonte do CRM com Node 22 + pnpm
+# (o CRM ainda não tem Dockerfiles); troque por imagens próprias quando existirem.
+
+x-crm-env: &crm-env
+  NODE_ENV: production
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  # Mesmo banco e mesmo Redis (e db) do ai-manager.
+  DATABASE_URL: postgres://${POSTGRES_USER:-wsm}:${POSTGRES_PASSWORD:-wsm}@postgres:5432/${POSTGRES_DB:-wsm}
+  REDIS_URL: redis://redis:6379
+  CREDENTIALS_KEY: ${CRM_CREDENTIALS_KEY:?defina CRM_CREDENTIALS_KEY (32 bytes base64)}
+  STORAGE_DIR: /data/storage
+  # Modo extensão (docs/extension/ai-manager.md do CRM).
+  WA_GATEWAY: rpc
+  WA_RPC_PROFILE: ai-manager
+  WA_RPC_URL: http://worker:9465
+  INTERNAL_TOKEN: ${INTERNAL_TOKEN:-dev-internal-token}
+  WA_EVENTS_STREAM: wsm:events
+  CRM_QUEUE_PREFIX: crm
+  CRM_SSO_SECRET: ${CRM_SSO_SECRET:?defina CRM_SSO_SECRET}
+  API_PUBLIC_URL: ${CRM_API_PUBLIC_URL:-http://localhost:8080/crm}
+  WEB_PUBLIC_URL: ${CRM_WEB_PUBLIC_URL:-http://localhost:8080/crm}
+  TRUST_PROXY: 'true'
+
+x-crm-node: &crm-node
+  image: node:22-alpine
+  working_dir: /crm
+  volumes:
+    - ${CRM_DIR:-../crm}:/crm
+    - crm-node-modules:/crm/node_modules
+    - crm-storage:/data/storage
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    worker:
+      condition: service_healthy
+
+services:
+  worker:
+    environment:
+      CRM_BRIDGE: 'on'
+      WA_EVENTS_STREAM: wsm:events
+
+  api:
+    environment:
+      CRM_SSO_SECRET: ${CRM_SSO_SECRET:?defina CRM_SSO_SECRET}
+      CRM_PUBLIC_PATH: /crm/
+
+  crm-api:
+    <<: *crm-node
+    environment:
+      <<: *crm-env
+      HOST: 0.0.0.0
+      PORT: '3000'
+    command: ['sh', '-c', 'corepack enable && pnpm install --frozen-lockfile && pnpm --filter @crm/api exec tsx --conditions=development src/server.ts']
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q -O /dev/null http://127.0.0.1:3000/health || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+
+  crm-worker:
+    <<: *crm-node
+    environment:
+      <<: *crm-env
+    command: ['sh', '-c', 'corepack enable && pnpm install --frozen-lockfile && pnpm --filter @crm/worker exec tsx --conditions=development src/main.ts']
+    depends_on:
+      crm-api:
+        condition: service_healthy
+
+  # Build da SPA com base /crm/ (API em /crm/api) servido por nginx na raiz: o nginx do dashboard tira o prefixo.
+  crm-web:
+    image: nginx:1.27-alpine
+    volumes:
+      - crm-web-dist:/usr/share/nginx/html:ro
+    command: ['sh', '-c', "printf 'server { listen 80; root /usr/share/nginx/html; location / { try_files $$uri $$uri/ /index.html; } }' > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"]
+    depends_on:
+      crm-web-build:
+        condition: service_completed_successfully
+
+  crm-web-build:
+    image: node:22-alpine
+    working_dir: /crm
+    environment:
+      VITE_BASE_PATH: /crm/
+      VITE_API_BASE: /crm/api
+    volumes:
+      - ${CRM_DIR:-../crm}:/crm
+      - crm-node-modules:/crm/node_modules
+      - crm-web-dist:/out
+    command: ['sh', '-c', 'corepack enable && pnpm install --frozen-lockfile && pnpm --filter @crm/web build && rm -rf /out/* && cp -r apps/web/dist/. /out/']
+
+volumes:
+  crm-node-modules:
+  crm-storage:
+  crm-web-dist:

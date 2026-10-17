@@ -103,6 +103,8 @@ export const api = {
   me: () => request<{ user: AuthUser; expiresAt: string | null }>('/api/auth/me'),
   /** Revoga o token atual (204). */
   logout: () => request<void>('/api/auth/logout', { method: 'POST', keepTokenOn401: true }),
+  /** Integração CRM: token de SSO (120 s) e URL do CRM no mesmo origin. 501 = integração desligada. */
+  crmSso: () => request<{ token: string; url: string }>('/api/crm/sso', { method: 'POST' }),
 
   sessions: () => request<{ items: Session[] }>('/api/sessions').then((r) => r.items),
   session: (id: string) => request<Session>(`/api/sessions/${enc(id)}`),

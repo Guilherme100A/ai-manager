@@ -2,7 +2,7 @@ import { useEffect, useState, useSyncExternalStore, type ReactNode } from 'react
 import { signOut } from '../lib/signout'
 import { navigate, type Route } from '../lib/router'
 import { getTheme, subscribeTheme, toggleTheme } from '../lib/theme'
-import { IconBell, IconClose, IconGroups, IconHome, IconLogout, IconMenu, IconMoon, IconPhone, IconSpark, IconSun, IconUsers, Logo } from './icons'
+import { IconBell, IconBriefcase, IconClose, IconGroups, IconHome, IconLogout, IconMenu, IconMoon, IconPhone, IconSpark, IconSun, IconUsers, Logo } from './icons'
 
 const LINKS: Array<{ route: Route['name']; href: string; label: string; testId: string; icon: () => ReactNode }> = [
   { route: 'home', href: '#/', label: 'Início', testId: 'nav-home', icon: IconHome },
@@ -14,6 +14,7 @@ const LINKS: Array<{ route: Route['name']; href: string; label: string; testId: 
   { route: 'autoreply', href: '#/autoreply', label: 'Autoresposta', testId: 'nav-autoreply', icon: IconUsers },
   { route: 'alerts', href: '#/alerts', label: 'Alertas', testId: 'nav-alerts', icon: IconBell },
   { route: 'ai', href: '#/ai', label: 'IA / Modelo LLM', testId: 'nav-ai', icon: IconSpark },
+  { route: 'crm', href: '#/crm', label: 'CRM', testId: 'nav-crm', icon: IconBriefcase },
 ]
 
 export function ThemeToggle() {
@@ -34,7 +35,7 @@ export function Layout({ route, children }: { route: Route; children: ReactNode 
   useEffect(() => setOpen(false), [route])
 
   return (
-    <div className="layout">
+    <div className="layout" data-page={route.name}>
       <aside className="sidebar" data-open={open ? 'true' : 'false'}>
         <div className="sidebar-head">
           <a className="brand" href="#/">
@@ -83,7 +84,8 @@ export function Layout({ route, children }: { route: Route; children: ReactNode 
         </nav>
       </aside>
       <main className="main">
-        <div className="main-inner">{children}</div>
+        {/* O CRM ocupa a área de conteúdo inteira (sem largura máxima nem padding). */}
+        <div className={route.name === 'crm' ? 'main-inner main-inner--full' : 'main-inner'}>{children}</div>
       </main>
     </div>
   )

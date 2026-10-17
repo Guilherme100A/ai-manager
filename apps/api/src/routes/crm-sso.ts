@@ -36,8 +36,9 @@ export function crmPublicPath(raw: string | undefined): string {
 export function crmSsoRoutes(deps: Pick<AppDeps, 'crmEnv' | 'crmNow'>) {
   return new Hono<AppEnv>().post('/api/crm/sso', async (c) => {
     const env = deps.crmEnv ?? process.env
-    const secret = env.CRM_SSO_SECRET
-    if (!secret?.trim()) throw new ApiError('NOT_IMPLEMENTED', 'CRM integration is disabled (CRM_SSO_SECRET not set)')
+    // Mesmo tratamento do CRM (que verifica com o segredo sem espaços nas pontas).
+    const secret = env.CRM_SSO_SECRET?.trim()
+    if (!secret) throw new ApiError('NOT_IMPLEMENTED', 'CRM integration is disabled (CRM_SSO_SECRET not set)')
     const username = c.get('actor')
     if (!username || NON_USER_ACTORS.has(username)) throw new ApiError('FORBIDDEN', 'CRM SSO requires a dashboard login')
     const iat = Math.floor((deps.crmNow?.() ?? Date.now()) / 1000)

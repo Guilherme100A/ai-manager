@@ -8,6 +8,7 @@ import { Report } from './pages/Report'
 import { AutoReply } from './pages/AutoReply'
 import { AiSettingsPage } from './pages/AiSettings'
 import { Contacts } from './pages/Contacts'
+import { Crm } from './pages/Crm'
 import { Groups } from './pages/Groups'
 import { Home } from './pages/Home'
 import { Login } from './pages/Login'
@@ -43,6 +44,8 @@ function Page({ route }: { route: Route }) {
       return <AutoReply />
     case 'ai':
       return <AiSettingsPage />
+    case 'crm':
+      return <Crm />
     case 'login':
       return null
     case 'not-found':
