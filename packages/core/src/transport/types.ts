@@ -42,6 +42,58 @@ export interface IncomingMessage {
   text?: string
   /** Tipo do conteúdo (ex.: `conversation`, `imageMessage`). */
   type: string
+  /** Mídia da mensagem (imagem, vídeo, áudio, documento, figurinha). Bytes sob demanda: `downloadMedia(id)`. */
+  media?: IncomingMedia
+  /** Id da mensagem citada (resposta), de `contextInfo.stanzaId`. */
+  quotedId?: string
+  /** Anúncio Click-to-WhatsApp (`contextInfo.externalAdReply`). */
+  ad?: CtwaInfo
+}
+
+export type IncomingMediaKind = 'image' | 'video' | 'audio' | 'document' | 'sticker'
+
+export interface IncomingMedia {
+  kind: IncomingMediaKind
+  mime: string
+  /** Bytes, quando o WhatsApp informa. */
+  size: number | null
+  /** SHA-256 (hex) do arquivo, quando o WhatsApp informa. */
+  sha256: string | null
+  fileName?: string
+}
+
+/** Dados de anúncio Click-to-WhatsApp. */
+export interface CtwaInfo {
+  ctwaClid: string | null
+  sourceId: string | null
+  sourceUrl: string | null
+  sourceType?: string
+  mediaUrl?: string
+  title?: string
+  body?: string
+}
+
+/** Bytes de uma mídia recebida (`downloadMedia`). */
+export interface DownloadedMedia {
+  data: Buffer
+  mime: string
+}
+
+/** Presença enviada a um chat ("digitando…", "gravando…", parar). */
+export type PresenceKind = 'composing' | 'recording' | 'paused'
+
+/** Contato da agenda da conta (sincronizado pelo WhatsApp). */
+export interface TransportContact {
+  /** JID como o WhatsApp entrega (PN ou LID). */
+  jid: string
+  /** E.164, quando conhecido. */
+  phone: string | null
+  /** `…@lid`, quando conhecido. */
+  lid: string | null
+  /** Nome salvo na agenda. */
+  name: string | null
+  /** Nome que o contato definiu no WhatsApp. */
+  pushName: string | null
 }
 
 export interface ReceiptUpdate {
@@ -115,6 +167,12 @@ export interface WaTransport {
   syncChatSettings?(to: string): Promise<void>
   /** Mostra (`true`) ou encerra (`false`) o "digitando…" para o JID. Opcional; falhar não impede o envio. */
   sendTyping?(to: string, typing: boolean): Promise<void>
+  /** Bytes da mídia de uma mensagem recebida recentemente (pelo id). Opcional (A2: integração CRM). */
+  downloadMedia?(messageId: string): Promise<DownloadedMedia>
+  /** Presença para o JID (composing/recording/paused). Opcional (A3: integração CRM). */
+  sendPresence?(to: string, kind: PresenceKind): Promise<void>
+  /** Agenda da conta conhecida pelo transporte. Opcional (A7: integração CRM). */
+  listContacts?(): Promise<TransportContact[]>
   /** Salva o JID como contato com o nome dado. Opcional; falhar não impede o envio. */
   saveContact?(jid: string, name: string): Promise<void>
   fetchGroups(): Promise<GroupSummary[]>
@@ -129,6 +187,16 @@ export interface WaTransport {
   ownPhone?(): string | undefined
   logout(): Promise<void>
   close(): Promise<void>
+}
+
+/** A mídia pedida não está mais disponível no transporte (mensagem antiga, sem mídia ou expirada). */
+export class MediaNotFoundError extends Error {
+  readonly code = 'MEDIA_NOT_FOUND'
+  readonly status = 404
+  constructor(readonly messageId: string) {
+    super(`media of message ${messageId} not found`)
+    this.name = 'MediaNotFoundError'
+  }
 }
 
 export class TransportNotConnectedError extends Error {

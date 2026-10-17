@@ -88,6 +88,19 @@ export interface OptOutContext {
   sessionId?: string
   messageId?: string
   actor?: string
+  /** Origem gravada na auditoria. Default `inbound_message`. */
+  source?: string
+}
+
+/** Origens de consentimento aceitas da integração CRM (A7). */
+export const CONSENT_SOURCES = ['inbound', 'manual', 'import', 'webhook', 'sale'] as const
+export type ConsentSource = (typeof CONSENT_SOURCES)[number]
+
+export interface RecordConsentInput {
+  phone: string
+  source: ConsentSource
+  actor?: string
+  name?: string | null
 }
 
 const UNIQUE_VIOLATION = '23505'
@@ -221,6 +234,37 @@ export class ContactsService {
   }
 
   /**
+   * A7 (integração CRM): registra consentimento (cria o contato se não existir). NÃO reverte opt-out, exceto com
+   * `source: 'manual'` (ação explícita de um usuário, com novo consentimento: a regra do AC-T07-05).
+   * Grava `audit_logs` (`contact.consent`) na mesma transação.
+   */
+  async recordConsent(input: RecordConsentInput): Promise<Contact> {
+    assertPhone(input.phone)
+    if (!(CONSENT_SOURCES as readonly string[]).includes(input.source)) {
+      throw new ContactError('consent_required', `invalid consent source: ${String(input.source)}`)
+    }
+    const at = new Date()
+    const name = input.name?.trim() || null
+    return this.db.transaction(async (tx) => {
+      const set: Partial<typeof contacts.$inferInsert> = { consent: true, consentAt: at, consentSource: input.source, updatedAt: at }
+      if (input.source === 'manual') set.optOut = false
+      const [row] = await tx
+        .insert(contacts)
+        .values({ phone: input.phone, name, consent: true, consentAt: at, consentSource: input.source })
+        .onConflictDoUpdate({ target: contacts.phone, set: name ? { ...set, name: sql`coalesce(${contacts.name}, ${name})` } : set })
+        .returning()
+      await tx.insert(auditLogs).values({
+        actor: input.actor ?? 'crm',
+        action: 'contact.consent',
+        targetType: 'contact',
+        targetId: row!.id,
+        detail: { phone: input.phone, source: input.source, via: 'crm' },
+      })
+      return row!
+    })
+  }
+
+  /**
    * Opt-out pedido pelo próprio contato (mensagem recebida). Nunca reverte nada: só marca `opt_out=true`.
    * Contato desconhecido é criado já com opt-out (sem consentimento), para que o pedido fique registrado.
    * Grava `audit_logs` (`contact.opt_out`, target `contact`) na mesma transação.
@@ -257,7 +301,7 @@ export class ContactsService {
         detail: {
           phone,
           keyword: ctx.keyword,
-          source: 'inbound_message',
+          source: ctx.source ?? 'inbound_message',
           created,
           ...(ctx.sessionId ? { session_id: ctx.sessionId } : {}),
           ...(ctx.messageId ? { message_id: ctx.messageId } : {}),

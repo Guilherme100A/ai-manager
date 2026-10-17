@@ -6,7 +6,14 @@ import { HttpsProxyAgent } from 'https-proxy-agent'
 import { SocksProxyAgent } from 'socks-proxy-agent'
 import { TransportEmitter } from './emitter'
 import {
+  MediaNotFoundError,
   TransportNotConnectedError,
+  type CtwaInfo,
+  type DownloadedMedia,
+  type IncomingMedia,
+  type IncomingMediaKind,
+  type PresenceKind,
+  type TransportContact,
   type ConnectOptions,
   type DisconnectKind,
   type GroupParticipantResult,
@@ -93,7 +100,7 @@ export interface BaileysSocketLike {
   groupGetInviteInfo?(code: string): Promise<BaileysGroupLike & { desc?: string }>
   groupInviteCode?(jid: string): Promise<string | undefined>
   groupAcceptInvite?(code: string): Promise<string | undefined>
-  sendPresenceUpdate?(type: 'composing' | 'paused', jid?: string): Promise<void>
+  sendPresenceUpdate?(type: 'composing' | 'recording' | 'paused', jid?: string): Promise<void>
   /** Pede ao celular o histórico sob demanda de uma conversa (a resposta chega em messaging-history.set). */
   fetchMessageHistory?(count: number, oldestMsgKey: { remoteJid: string; fromMe: boolean; id: string }, oldestMsgTimestamp: number): Promise<string>
   addOrEditContact?(jid: string, contact: { fullName?: string | null; firstName?: string | null }): Promise<void>
@@ -145,6 +152,13 @@ export interface BaileysTransportOptions {
   stickers?: StickerSink
   /** Baixa a mídia de uma mensagem recebida; default: `downloadMediaMessage` do Baileys. */
   downloadMedia?: (raw: unknown, sock: BaileysSocketLike) => Promise<Buffer>
+  /**
+   * A2 (integração CRM): quantas mensagens recebidas com mídia guardar para `downloadMedia(id)`. Default 0 = não
+   * guarda nada (comportamento sem a integração).
+   */
+  mediaCacheSize?: number
+  /** A7 (integração CRM): mantém a agenda (contacts.upsert/update, histórico) para `listContacts()`. Default false. */
+  trackContacts?: boolean
   /** Validade da lista de grupos em cache (default GROUPS_CACHE_MS). */
   groupsCacheMs?: number
   /** Relógio (injetável em testes). */
@@ -216,6 +230,9 @@ export function ackFor(node: BinaryNodeLike): BinaryNodeLike {
   return { tag: 'ack', attrs }
 }
 
+/** Contato no formato do Baileys (`Contact`). */
+interface BaileysContactLike { id: string; lid?: string; phoneNumber?: string; name?: string; notify?: string }
+
 interface ChatEphemeralLike { id?: string | null; pnJid?: string | null; lidJid?: string | null; ephemeralExpiration?: number | null }
 
 async function defaultSocketFactory(): Promise<BaileysSocketFactory> {
@@ -231,6 +248,99 @@ interface RawMessage {
 }
 
 const IGNORED_CONTENT_KEYS = new Set(['messageContextInfo', 'senderKeyDistributionMessage'])
+
+/** Invólucros cujo conteúdo real fica em `<wrapper>.message` (temporária, visualização única, doc com legenda). */
+const WRAPPERS = ['ephemeralMessage', 'viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension', 'documentWithCaptionMessage', 'editedMessage'] as const
+
+/** Remove os invólucros da mensagem (como o `normalizeMessageContent` do Baileys). */
+export function unwrapContent(content: Record<string, unknown> | null | undefined): Record<string, unknown> | undefined {
+  let current = content ?? undefined
+  for (let depth = 0; current && depth < 5; depth++) {
+    const wrapper = WRAPPERS.find((w) => current![w] != null)
+    if (!wrapper) break
+    const inner = (current[wrapper] as { message?: Record<string, unknown> | null } | null)?.message
+    if (!inner) break
+    current = inner
+  }
+  return current
+}
+
+const MEDIA_KINDS: Record<string, IncomingMediaKind> = {
+  imageMessage: 'image',
+  videoMessage: 'video',
+  ptvMessage: 'video',
+  audioMessage: 'audio',
+  documentMessage: 'document',
+  stickerMessage: 'sticker',
+}
+
+const DEFAULT_MIME: Record<IncomingMediaKind, string> = {
+  image: 'image/jpeg',
+  video: 'video/mp4',
+  audio: 'audio/ogg; codecs=opus',
+  document: 'application/octet-stream',
+  sticker: 'image/webp',
+}
+
+const toNumberish = (v: unknown): number | undefined => {
+  if (typeof v === 'number') return v
+  if (typeof v === 'bigint') return Number(v)
+  if (v && typeof (v as { toNumber?: unknown }).toNumber === 'function') return (v as { toNumber(): number }).toNumber()
+  if (typeof v === 'string' && /^\d+$/.test(v)) return Number(v)
+  return undefined
+}
+
+const toHex = (v: unknown): string | null => {
+  if (typeof v === 'string') return v ? Buffer.from(v, 'base64').toString('hex') : null
+  if (v instanceof Uint8Array) return v.length ? Buffer.from(v).toString('hex') : null
+  return null
+}
+
+const nonEmpty = (v: unknown): string | undefined => (typeof v === 'string' && v !== '' ? v : undefined)
+
+/** Descrição da mídia de um corpo de mensagem (`imageMessage`, `documentMessage`…); `undefined` se não for mídia. */
+export function mediaOf(type: string, body: Record<string, unknown>): IncomingMedia | undefined {
+  const kind = MEDIA_KINDS[type]
+  if (!kind) return undefined
+  const media: IncomingMedia = {
+    kind,
+    mime: nonEmpty(body.mimetype) ?? DEFAULT_MIME[kind],
+    size: toNumberish(body.fileLength) ?? null,
+    sha256: toHex(body.fileSha256),
+  }
+  const fileName = nonEmpty(body.fileName)
+  if (fileName) media.fileName = fileName
+  return media
+}
+
+/** `contextInfo` do primeiro corpo da mensagem que o tiver. */
+export function contextInfoOf(content: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  for (const body of Object.values(content ?? {})) {
+    const ctx = (body as { contextInfo?: unknown } | null)?.contextInfo
+    if (ctx && typeof ctx === 'object') return ctx as Record<string, unknown>
+  }
+  return undefined
+}
+
+/** A4: anúncio CTWA de `contextInfo.externalAdReply`; `undefined` sem `sourceId`/`ctwaClid`/`sourceUrl`. */
+export function adFromContext(ctx: Record<string, unknown> | undefined): CtwaInfo | undefined {
+  const ad = ctx?.externalAdReply as Record<string, unknown> | null | undefined
+  if (!ad || typeof ad !== 'object') return undefined
+  const sourceId = nonEmpty(ad.sourceId)
+  const ctwaClid = nonEmpty(ad.ctwaClid)
+  const sourceUrl = nonEmpty(ad.sourceUrl)
+  if (!sourceId && !ctwaClid && !sourceUrl) return undefined
+  const info: CtwaInfo = { sourceId: sourceId ?? null, ctwaClid: ctwaClid ?? null, sourceUrl: sourceUrl ?? null }
+  const sourceType = nonEmpty(ad.sourceType)
+  const mediaUrl = nonEmpty(ad.mediaUrl) ?? nonEmpty(ad.thumbnailUrl) ?? nonEmpty(ad.originalImageUrl)
+  const title = nonEmpty(ad.title)
+  const adBody = nonEmpty(ad.body)
+  if (sourceType) info.sourceType = sourceType
+  if (mediaUrl) info.mediaUrl = mediaUrl
+  if (title) info.title = title
+  if (adBody) info.body = adBody
+  return info
+}
 
 /** Converte uma `WAMessage` do Baileys em `IncomingMessage`; devolve `undefined` se não houver conteúdo. */
 export function toIncomingMessage(raw: RawMessage): IncomingMessage | undefined {
@@ -264,6 +374,19 @@ export function toIncomingMessage(raw: RawMessage): IncomingMessage | undefined 
   if (raw.key?.participant) msg.participant = raw.key.participant
   if (raw.pushName) msg.pushName = raw.pushName
   if (text !== undefined) msg.text = text
+  // A2/A4 (integração CRM): mídia, mensagem citada e anúncio CTWA. Só acréscimos opcionais.
+  const inner = unwrapContent(content)
+  const innerType = inner ? Object.keys(inner).find((k) => !IGNORED_CONTENT_KEYS.has(k) && inner[k] != null) : undefined
+  const innerBody = innerType ? inner![innerType] : undefined
+  if (innerType && innerBody && typeof innerBody === 'object') {
+    const media = mediaOf(innerType, innerBody as Record<string, unknown>)
+    if (media) msg.media = media
+  }
+  const ctx = contextInfoOf(inner)
+  const quoted = typeof ctx?.stanzaId === 'string' && ctx.stanzaId ? ctx.stanzaId : undefined
+  if (quoted) msg.quotedId = quoted
+  const ad = adFromContext(ctx)
+  if (ad) msg.ad = ad
   return msg
 }
 
@@ -332,6 +455,37 @@ export class BaileysTransport extends TransportEmitter implements WaTransport {
 
   private groupsCache: { at: number; groups: GroupSummary[]; stale: boolean; force: boolean; retryAfter: number } | undefined
   private groupsInFlight: Promise<GroupSummary[]> | undefined
+  /** A2: mensagens recebidas com mídia (id → WAMessage crua), em ordem de chegada, até `mediaCacheSize`. */
+  private readonly mediaCache = new Map<string, { raw: RawMessage; mime: string }>()
+  /** A7: agenda da conta (JID → contato). */
+  private readonly contactBook = new Map<string, TransportContact>()
+
+  private rememberMedia(raw: RawMessage, msg: IncomingMessage) {
+    const limit = this.options.mediaCacheSize ?? 0
+    if (limit <= 0 || !msg.media) return
+    this.mediaCache.delete(msg.id)
+    this.mediaCache.set(msg.id, { raw, mime: msg.media.mime })
+    while (this.mediaCache.size > limit) this.mediaCache.delete(this.mediaCache.keys().next().value!)
+  }
+
+  private rememberContacts(list: unknown) {
+    if (!this.options.trackContacts || !Array.isArray(list)) return
+    for (const item of list as Array<Partial<BaileysContactLike> | null>) {
+      const id = item?.id
+      if (!id || id.endsWith('@g.us') || id.endsWith('@broadcast') || id.endsWith('@newsletter')) continue
+      const jid = normalizeJid(id)
+      const prev = this.contactBook.get(jid)
+      const pn = item.phoneNumber ?? (jid.endsWith('@s.whatsapp.net') ? jid : undefined)
+      const lid = item.lid ?? (jid.endsWith('@lid') ? jid : undefined)
+      this.contactBook.set(jid, {
+        jid,
+        phone: (pn ? phoneFromUserJid(normalizeJid(pn)) : undefined) ?? prev?.phone ?? null,
+        lid: lid ? normalizeJid(lid) : (prev?.lid ?? null),
+        name: item.name ?? prev?.name ?? null,
+        pushName: item.notify ?? prev?.pushName ?? null,
+      })
+    }
+  }
 
   constructor(private readonly options: BaileysTransportOptions = {}) {
     super()
@@ -453,7 +607,9 @@ export class BaileysTransport extends TransportEmitter implements WaTransport {
         if (u.type !== 'notify') return
         for (const raw of u.messages ?? []) {
           const msg = toIncomingMessage(raw)
-          if (msg) this.emit('message', msg)
+          if (!msg) continue
+          this.rememberMedia(raw, msg)
+          this.emit('message', msg)
         }
       }),
     )
@@ -468,7 +624,14 @@ export class BaileysTransport extends TransportEmitter implements WaTransport {
     // Ligar/desligar temporárias (inclusive pelo celular) chega como chats.update; o histórico inicial traz o estado.
     sock.ev.on('chats.upsert', guard<ChatEphemeralLike[]>((chats) => this.rememberChats(chats)))
     sock.ev.on('chats.update', guard<ChatEphemeralLike[]>((chats) => this.rememberChats(chats)))
-    sock.ev.on('messaging-history.set', guard<{ chats?: ChatEphemeralLike[] }>((h) => this.rememberChats(h.chats)))
+    sock.ev.on('messaging-history.set', guard<{ chats?: ChatEphemeralLike[]; contacts?: unknown }>((h) => {
+      this.rememberChats(h.chats)
+      this.rememberContacts(h.contacts)
+    }))
+    if (this.options.trackContacts) {
+      sock.ev.on('contacts.upsert', guard<unknown>((list) => this.rememberContacts(list)))
+      sock.ev.on('contacts.update', guard<unknown>((list) => this.rememberContacts(list)))
+    }
     // Mudança de grupo avisada pelo WhatsApp (entrou, saiu, nome, admins): a lista em cache deixa de valer.
     for (const event of ['groups.upsert', 'groups.update', 'group-participants.update']) sock.ev.on(event, guard(() => this.invalidateGroups()))
 
@@ -539,6 +702,26 @@ export class BaileysTransport extends TransportEmitter implements WaTransport {
 
   async sendTyping(to: string, typing: boolean): Promise<void> {
     await this.requireSocket().sendPresenceUpdate?.(typing ? 'composing' : 'paused', to)
+  }
+
+  /** A3: presença no chat (`recording` = "gravando áudio…"). */
+  async sendPresence(to: string, kind: PresenceKind): Promise<void> {
+    await this.requireSocket().sendPresenceUpdate?.(kind, to)
+  }
+
+  /** A2: bytes da mídia de uma mensagem recebida que ainda está no cache (`mediaCacheSize`). */
+  async downloadMedia(messageId: string): Promise<DownloadedMedia> {
+    const sock = this.requireSocket()
+    const entry = this.mediaCache.get(messageId)
+    if (!entry) throw new MediaNotFoundError(messageId)
+    const data = await (this.options.downloadMedia ?? defaultDownloadMedia)(entry.raw, sock)
+    return { data, mime: entry.mime }
+  }
+
+  /** A7: agenda conhecida (sincronizada pelo WhatsApp desde a conexão; precisa de `trackContacts`). */
+  async listContacts(): Promise<TransportContact[]> {
+    this.requireSocket()
+    return [...this.contactBook.values()].map((c) => ({ ...c }))
   }
 
   async saveContact(jid: string, name: string): Promise<void> {
