@@ -47,7 +47,12 @@ import { attachQueueToSessions } from '../queue'
 import { createTransportFactory, disappearingKey, ensureOwnContact, redisDisappearingStore, SessionManager, type TransportFactory } from '../sessions'
 import { loadWorkerConfig, type WorkerConfig } from './config'
 import { FakeControl } from './fake-control'
-import { startInternalServer, type InternalServer } from './internal-server'
+import { startInternalServer, type BridgeTargets, type InternalServer } from './internal-server'
+import { createCrmBridgeTargets } from '../crm/bridge'
+import { attachEventOutbox } from '../events/outbox'
+
+/** Mídias recebidas guardadas por sessão para o `media.download` do CRM. */
+const CRM_MEDIA_CACHE_SIZE = 500
 import { createBridgeTargets } from './bridge-targets'
 import { GroupAutomation } from '../groups/automation'
 import { groupHistoryEntry, redisGroupHistory } from '../groups/history'
@@ -142,7 +147,13 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     })
     // ---- transporte ------------------------------------------------------------------------
     const fake = config.transport === 'fake' ? new FakeControl({ redis, prefix: config.queuePrefix, bootId, logger }) : undefined
-    const baseFactory = opts.transportFactory ?? fake?.factory ?? createTransportFactory({ kind: config.transport, disappearing: (id) => redisDisappearingStore(redis, id, config.queuePrefix), stickers })
+    const baseFactory = opts.transportFactory ?? fake?.factory ?? createTransportFactory({
+      kind: config.transport,
+      disappearing: (id) => redisDisappearingStore(redis, id, config.queuePrefix),
+      stickers,
+      // Integração CRM: guarda as últimas mídias recebidas (media.download) e a agenda (contacts.list).
+      ...(config.crmBridge ? { baileys: { mediaCacheSize: CRM_MEDIA_CACHE_SIZE, trackContacts: true } } : {}),
+    })
     // Últimas mensagens dos grupos (contexto da postagem automática): gravadas ao chegar, por sessão.
     const groupHistory = redisGroupHistory(redis, config.queuePrefix)
     // Travamentos do processo: registro com a atividade anterior e modo alívio (automações não essenciais pausadas).
@@ -377,11 +388,49 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
       },
     })
     onStop('observability', () => observability.close())
+    // ---- integração CRM (CRM_BRIDGE=on): outbox WaEvent v1 + alvos A3/A7/A8 -----------------------
+    let internalTargets: BridgeTargets = bridgeTargets
+    if (config.crmBridge) {
+      // ioredis tem sobrecargas com callback: os adaptadores expõem só a forma usada (args variádicos → Promise).
+      type Variadic = (...args: (string | number)[]) => Promise<unknown>
+      const call = (fn: unknown) => (...args: (string | number)[]) => (fn as Variadic).apply(redis, args)
+      const outbox = attachEventOutbox(manager, queue, { xadd: call(redis.xadd) }, { stream: config.eventsStream, logger })
+      onStop('events-outbox', async () => {
+        outbox.detach()
+        await Promise.race([outbox.flush(), new Promise((r) => setTimeout(r, 2000).unref())])
+      })
+      const crm = createCrmBridgeTargets({
+        db,
+        queue,
+        limits,
+        redis: { set: call(redis.set), get: (key) => redis.get(key), del: (key) => redis.del(key) },
+        prefix: config.queuePrefix,
+        idempotencyTtlSeconds: config.crmIdempotencyTtlSeconds,
+        getTransport: (id) => (manager.isConnected(id) ? manager.getTransport(id) : undefined),
+      })
+      internalTargets = {
+        ...bridgeTargets,
+        // Objeto próprio: a MessageQueue (bridgeTargets.messages) não ganha métodos novos.
+        messages: {
+          get: (id) => queue.get(id),
+          list: (filter) => queue.list(filter),
+          events: (id) => queue.events(id),
+          cancel: (id) => queue.cancel(id),
+          enqueue: (input) => queue.enqueue(input),
+          send: crm.messages.send,
+          sendGroup: crm.messages.sendGroup,
+        },
+        media: crm.media,
+        presence: crm.presence,
+        contacts: crm.contacts,
+      }
+      logger.info({ stream: config.eventsStream }, 'CRM bridge on: events outbox and CRM RPC targets mounted')
+    }
     const internal = await startInternalServer({
       port: config.internalPort,
       host: config.internalHost,
       token: config.internalToken,
-      targets: bridgeTargets,
+      targets: internalTargets,
       ...(fake ? { fake } : {}),
       logger,
     })

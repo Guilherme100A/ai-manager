@@ -7,6 +7,8 @@ import type { AddressInfo } from 'node:net'
 import { serve, type ServerType } from '@hono/node-server'
 import { Hono, type Context } from 'hono'
 import { TransportNotConnectedError, type ConversationConfig, type GroupAutomationConfig, type GroupInviteInput, type EnqueueMessageInput, type GroupSummary, type ListMessagesFilter, type WaTransport } from '@wsm/core'
+import type { CrmBridgeTargets } from '../crm/bridge'
+import { requireObject, requireString } from '../crm/bridge'
 import type { FakeControl } from './fake-control'
 
 /** Operações do worker expostas à API. */
@@ -42,18 +44,67 @@ export interface BridgeTargets {
     events(id: string): Promise<unknown>
     cancel(id: string): Promise<unknown>
     enqueue(input: EnqueueMessageInput): Promise<unknown>
+    /** A8 (CRM_BRIDGE=on): envio pelo SendPipeline com idempotência por clientMessageId. */
+    send?: CrmBridgeTargets['messages']['send']
+    sendGroup?: CrmBridgeTargets['messages']['sendGroup']
   }
   health: { getHealth(sessionId: string): Promise<unknown> }
+  /** A3 (CRM_BRIDGE=on). */
+  media?: CrmBridgeTargets['media']
+  presence?: CrmBridgeTargets['presence']
+  /** A7 (CRM_BRIDGE=on). */
+  contacts?: CrmBridgeTargets['contacts']
 }
 
 type Handler = (args: unknown[]) => Promise<unknown>
+
+/**
+ * Alvos da integração CRM (A3/A7/A8): cada bloco só existe se o alvo foi montado (CRM_BRIDGE=on). Sem ele, a lista
+ * fechada responde UNKNOWN_METHOD. Os argumentos são validados: a chamada vazia (sonda do CRM) é recusada sem efeito.
+ */
+function crmHandlers(t: BridgeTargets): { messages: Record<string, Handler>; extra: Record<string, Record<string, Handler>> } {
+  const messages: Record<string, Handler> = {}
+  const extra: Record<string, Record<string, Handler>> = {}
+  const send = t.messages.send
+  const sendGroup = t.messages.sendGroup
+  if (send) messages.send = ([req]) => send(requireObject(req, 'request'))
+  if (sendGroup) messages.sendGroup = ([req]) => sendGroup(requireObject(req, 'request'))
+  const media = t.media
+  if (media) extra.media = { download: ([id, handle]) => media.download(requireString(id, 'sessionId'), requireObject(handle, 'ref')) }
+  const presence = t.presence
+  if (presence) {
+    extra.presence = {
+      update: async ([id, to, kind]) => {
+        await presence.update(requireString(id, 'sessionId'), requireString(to, 'to'), kind)
+        return null
+      },
+    }
+  }
+  const contacts = t.contacts
+  if (contacts) {
+    extra.contacts = {
+      recordConsent: async ([input]) => {
+        await contacts.recordConsent(requireObject(input, 'input'))
+        return null
+      },
+      optOut: async ([input]) => {
+        await contacts.optOut(requireObject(input, 'input'))
+        return null
+      },
+      list: ([id]) => contacts.list(requireString(id, 'sessionId')),
+    }
+  }
+  return { messages, extra }
+}
 
 /** Métodos permitidos pela ponte (lista fechada). */
 export function bridgeHandlers(t: BridgeTargets): Record<string, Record<string, Handler>> {
   const s = t.sessions
   const m = t.messages
   const str = (v: unknown) => String(v)
+  const crm = crmHandlers(t)
   return {
+    ...crm.extra,
     sessions: {
       getConversation: async ([id]) => {
         if (!s.getConversation) throw new Error('conversation unavailable')
@@ -111,6 +162,7 @@ export function bridgeHandlers(t: BridgeTargets): Record<string, Record<string, 
       events: ([id]) => m.events(str(id)),
       cancel: ([id]) => m.cancel(str(id)),
       enqueue: ([input]) => m.enqueue(input as EnqueueMessageInput),
+      ...crm.messages,
     },
     health: {
       getHealth: ([id]) => t.health.getHealth(str(id)),
@@ -187,7 +239,7 @@ export function createInternalApp(opts: InternalAppOptions) {
       return c.json({ result: result ?? null })
     } catch (err) {
       const e = serializeError(err)
-      if (!['SessionError', 'InvalidTransitionError', 'MessageNotFoundError', 'MessageTransitionError', 'ProxyError', 'ProxyUnavailableError', 'TransportNotConnectedError', 'GroupAddError'].includes(e.name)) {
+      if (!['SessionError', 'InvalidTransitionError', 'MessageNotFoundError', 'MessageTransitionError', 'ProxyError', 'ProxyUnavailableError', 'TransportNotConnectedError', 'GroupAddError', 'ValidationError', 'SendRejectedError', 'MediaNotFoundError', 'ContactError'].includes(e.name)) {
         opts.logger?.error({ err: e, target: req.target, method: req.method }, 'internal rpc failed')
       }
       return c.json({ error: e })
@@ -228,7 +280,8 @@ export function createInternalApp(opts: InternalAppOptions) {
     app.post('/internal/fake/sessions/:id/receive', (c) =>
       run(c, (b) => {
         if (typeof b.from !== 'string' || !b.from) throw Object.assign(new Error('from is required'), { name: 'SyntaxError' })
-        const msg: { from: string; text?: string; fromMe?: boolean; type?: string } = { from: b.from }
+        const msg: { id?: string; from: string; text?: string; fromMe?: boolean; type?: string } = { from: b.from }
+        if (typeof b.id === 'string' && b.id) msg.id = b.id
         if (typeof b.text === 'string') msg.text = b.text
         if (typeof b.fromMe === 'boolean') msg.fromMe = b.fromMe
         if (typeof b.type === 'string') msg.type = b.type
