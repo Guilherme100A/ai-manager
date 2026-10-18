@@ -1542,37 +1542,87 @@ legend {
   }
 }
 
-/* ---- CRM (integração): o CRM do mesmo origin num iframe na área de conteúdo ---- */
-.main-inner--full {
-  max-width: none;
-  padding: 0;
-  height: 100vh;
-}
-
-.crm-page {
+/* ---- CRM (integração): outra parte do site, em tela cheia ------------------------------
+   Sem o menu lateral do painel: barra fina no topo (mesmos tokens, fonte e raios do painel) + o CRM num iframe
+   com o menu próprio dele. 100dvh para o teclado/barras do celular não cortarem o chat. */
+.crm-shell {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  height: 100vh;
+  height: 100dvh;
   min-height: 0;
+  background: var(--bg);
+  overflow: hidden;
 }
 
-.crm-bar {
+.crm-topbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  padding: 0.5rem 1rem;
+  gap: 0.5rem;
+  flex-shrink: 0;
+  height: 44px;
+  padding: 0 0.75rem;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
+  min-width: 0;
 }
 
-.crm-bar h1 {
-  margin: 0;
-  font-size: 1rem;
+.crm-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  height: 2rem;
+  padding: 0 0.6rem;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
 }
 
-.crm-bar-actions button {
-  padding-block: 0.3rem;
+.crm-back:hover {
+  background: var(--surface-2);
+  color: var(--text);
+  text-decoration: none;
+}
+
+.crm-back:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+.crm-back-short {
+  display: none;
+}
+
+.crm-topbar-sep {
+  width: 1px;
+  height: 20px;
+  background: var(--border);
+}
+
+.crm-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  color: var(--text);
+  font-weight: 600;
+  font-size: 0.875rem;
+  letter-spacing: -0.01em;
+}
+
+.crm-topbar-spacer {
+  flex: 1;
+}
+
+.crm-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .crm-frame {
@@ -1581,7 +1631,7 @@ legend {
   min-height: 0;
   border: 0;
   display: block;
-  background: var(--surface);
+  background: var(--bg);
 }
 
 .crm-status {
@@ -1601,20 +1651,16 @@ legend {
   color: var(--text-muted);
 }
 
-@media (max-width: 767px) {
-  /* A barra do menu fica no topo (sticky): o CRM usa o resto da altura da tela. */
-  .layout[data-page='crm'] {
-    height: 100dvh;
-    min-height: 0;
+@media (max-width: 479px) {
+  .crm-topbar {
+    padding: 0 0.5rem;
   }
 
-  .layout[data-page='crm'] .main {
-    flex: 1;
-    min-height: 0;
+  .crm-back-long {
+    display: none;
   }
 
-  .main-inner--full {
-    height: 100%;
-    padding: 0;
+  .crm-back-short {
+    display: inline;
   }
 }

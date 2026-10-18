@@ -1,5 +1,6 @@
 // Estado da página CRM (integração): SSO pedido ao abrir; 501 = integração desligada no servidor.
 import { ApiRequestError } from '../lib/api'
+import type { Route } from '../lib/router'
 
 export type CrmState =
   | { kind: 'loading' }
@@ -24,4 +25,13 @@ export function safeCrmUrl(url: string): string | undefined {
   } catch {
     return undefined
   }
+}
+
+/**
+ * Para onde o "Voltar ao painel" leva: a última página do painel antes de entrar no CRM (ou o início, quando o CRM foi
+ * aberto direto). Nunca volta para o próprio CRM nem para o login.
+ */
+export function backRoute(last: Route | null | undefined): Route {
+  if (!last || last.name === 'crm' || last.name === 'login' || last.name === 'not-found') return { name: 'home' }
+  return last
 }

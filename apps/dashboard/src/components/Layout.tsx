@@ -35,7 +35,7 @@ export function Layout({ route, children }: { route: Route; children: ReactNode 
   useEffect(() => setOpen(false), [route])
 
   return (
-    <div className="layout" data-page={route.name}>
+    <div className="layout">
       <aside className="sidebar" data-open={open ? 'true' : 'false'}>
         <div className="sidebar-head">
           <a className="brand" href="#/">
@@ -84,8 +84,7 @@ export function Layout({ route, children }: { route: Route; children: ReactNode 
         </nav>
       </aside>
       <main className="main">
-        {/* O CRM ocupa a área de conteúdo inteira (sem largura máxima nem padding). */}
-        <div className={route.name === 'crm' ? 'main-inner main-inner--full' : 'main-inner'}>{children}</div>
+        <div className="main-inner">{children}</div>
       </main>
     </div>
   )

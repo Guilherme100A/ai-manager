@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { api } from './lib/api'
 import { Layout } from './components/Layout'
 import { useRoute, useToken } from './lib/hooks'
@@ -9,6 +9,7 @@ import { AutoReply } from './pages/AutoReply'
 import { AiSettingsPage } from './pages/AiSettings'
 import { Contacts } from './pages/Contacts'
 import { Crm } from './pages/Crm'
+import { backRoute } from './pages/Crm.logic'
 import { Groups } from './pages/Groups'
 import { Home } from './pages/Home'
 import { Login } from './pages/Login'
@@ -45,7 +46,8 @@ function Page({ route }: { route: Route }) {
     case 'ai':
       return <AiSettingsPage />
     case 'crm':
-      return <Crm />
+      // Renderizado fora do Layout (tela cheia), em App.
+      return null
     case 'login':
       return null
     case 'not-found':
@@ -61,6 +63,11 @@ function Page({ route }: { route: Route }) {
 export function App() {
   const route = useRoute()
   const token = useToken()
+  // Última página do painel antes de entrar no CRM: destino do "Voltar ao painel".
+  const lastPanelRoute = useRef<Route | null>(null)
+  useEffect(() => {
+    if (route.name !== 'crm' && route.name !== 'login') lastPanelRoute.current = route
+  }, [route])
 
   // Página Proxies removida (AC-T18-03): #/proxies vai para #/sessions.
   useEffect(() => {
@@ -79,6 +86,8 @@ export function App() {
   }, [token, route.name])
 
   if (!token || route.name === 'login') return <Login />
+  // CRM = outra parte do site: tela cheia, sem o menu lateral do painel (a barra do topo leva de volta).
+  if (route.name === 'crm') return <Crm back={backRoute(lastPanelRoute.current)} />
   return (
     <Layout route={route}>
       <Page route={route} />
