@@ -19,7 +19,8 @@
 # (o CRM ainda não tem Dockerfiles); troque por imagens próprias quando existirem.
 
 x-crm-env: &crm-env
-  NODE_ENV: production
+  # production = cookie de login Secure (só https). Painel servido em http puro: CRM_NODE_ENV=development.
+  NODE_ENV: ${CRM_NODE_ENV:-production}
   LOG_LEVEL: ${LOG_LEVEL:-info}
   # Mesmo banco e mesmo Redis (e db) do ai-manager.
   DATABASE_URL: postgres://${POSTGRES_USER:-wsm}:${POSTGRES_PASSWORD:-wsm}@postgres:5432/${POSTGRES_DB:-wsm}
