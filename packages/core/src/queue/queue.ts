@@ -383,7 +383,7 @@ export class MessageQueue extends EventEmitter<MessageQueueEvents> implements Se
 
     let transportMessageId: string
     try {
-      const res = await this.deliverFn(transport, phoneToJid(claimed.row.phone), claimed.row.content as OutgoingContent)
+      const res = await this.deliverFn(transport, phoneToJid(claimed.row.phone), claimed.row.content as OutgoingContent, { origin: claimed.row.origin })
       transportMessageId = res.messageId
     } catch (err) {
       const error = errorMessage(err)

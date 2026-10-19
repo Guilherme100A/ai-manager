@@ -186,10 +186,15 @@ describe('integração CRM no worker', () => {
       }
       expect(state.sent).toEqual([expect.objectContaining({ to: '5511977770001@s.whatsapp.net', content: { text: 'uma vez' } })])
 
-      // Limite de taxa da sessão vale para o CRM (o mesmo SessionLimitsService do worker).
+      // Limite de taxa da sessão NÃO vale para o CRM: o envio passa com o limite estourado, sai com origin crm e
+      // não conta para os envios do próprio ai-manager.
+      expect(sent.result).toMatchObject({ status: 'sent' })
       await new SessionLimitsService(db).set(id, { perMinute: 1 })
-      expect((await rpc(w, 'messages', 'send', { ...req, clientMessageId: 'cm-2' })).error).toMatchObject({ code: 'RATE_LIMIT', status: 429, gate: 'rateLimit' })
-      expect(await redis.get(`${w.config.queuePrefix}:crm:client-msg:${id}:cm-2`)).toBeNull()
+      const over = (await rpc(w, 'messages', 'send', { ...req, clientMessageId: 'cm-2' })).result!
+      expect(over).toMatchObject({ status: 'queued' })
+      expect((await db.select().from(messages).where(eq(messages.id, String(over.id))))[0]!.origin).toBe('crm')
+      expect(await new SessionLimitsService(db).countOutbound(id, new Date(0))).toBe(0)
+      await until(() => rpc(w, 'messages', 'get', String(over.id)), (r) => r.result?.status === 'sent')
       await new SessionLimitsService(db).set(id, { perMinute: 50 })
 
       // Opt-out bloqueia o envio; consentimento de import NÃO reverte; manual reverte.

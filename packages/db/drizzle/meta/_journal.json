@@ -57,6 +57,13 @@
       "when": 1791253914557,
       "tag": "0007_session_browser",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1792378589035,
+      "tag": "0008_message_origin",
+      "breakpoints": true
     }
   ]
 }

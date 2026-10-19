@@ -79,6 +79,28 @@ describe('createDeliver', () => {
     expect(sleeps.every((ms) => ms > 0)).toBe(true)
   })
 
+  it('origem crm: não passa pelo antiban (nem idênticas) e não conta nele; o 403 continua indo para o health', async () => {
+    const sleeps: number[] = []
+    const t = connected()
+    const antiban = new BaileysAntibanAdapter()
+    const deliver = createDeliver({ antiban, sleep: async (ms) => void sleeps.push(ms) })
+    for (let i = 0; i < 5; i++) await deliver(t, TO, { text: 'mesma saudação do fluxo' }, { origin: 'crm' })
+    expect(t.sent).toHaveLength(5)
+    expect(sleeps).toEqual([1, 1, 1, 1, 1])
+    expect(antiban.stats('s1')).toMatchObject({ before: 0, sent: 0 })
+    // o mesmo texto pelo ai-manager ainda passa pelo antiban, que não viu os 5 do CRM
+    await deliver(t, TO, { text: 'mesma saudação do fluxo' })
+    expect(antiban.stats('s1')).toMatchObject({ before: 1, sent: 1 })
+
+    const { adapter, calls } = spyAdapter()
+    const t403 = connected('sess-crm-403')
+    t403.failNextSend(Object.assign(new Error('forbidden'), { output: { statusCode: 403 } }))
+    const health = { recordSignal: vi.fn(async () => undefined) }
+    await expect(createDeliver({ antiban: adapter, health })(t403, TO, { text: 'oi' }, { origin: 'crm' })).rejects.toThrow('forbidden')
+    expect(health.recordSignal).toHaveBeenCalledWith('sess-crm-403', 'forbidden_403', expect.objectContaining({ source: 'send' }))
+    expect(calls).toEqual([])
+  })
+
   it('sessão do transporte: registro explícito e lastConnect', () => {
     const t = connected('abc')
     expect(defaultSessionIdOf(t)).toBe('abc')

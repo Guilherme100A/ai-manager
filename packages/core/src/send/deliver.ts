@@ -4,8 +4,14 @@
 import { defaultAntibanAdapter, type AntibanAdapter } from '../antiban/adapter'
 import type { OutgoingContent, WaTransport } from '../transport'
 
+/** Dados da mensagem que mudam a entrega. */
+export interface DeliverMeta {
+  /** `crm`: envio da ponte do CRM, que não passa pelo antiban (limites, idênticas, atrasos) nem entra nas contas dele. */
+  origin?: string | null
+}
+
 /** Assinatura da entrega: injetável na fila (spies em teste, wrapper do T09 em produção). */
-export type DeliverFn = (transport: WaTransport, to: string, content: OutgoingContent) => Promise<{ messageId: string }>
+export type DeliverFn = (transport: WaTransport, to: string, content: OutgoingContent, meta?: DeliverMeta) => Promise<{ messageId: string }>
 
 /** Destino dos sinais de saúde (HealthMonitor do T10). */
 export interface HealthSignalSink {
@@ -87,23 +93,28 @@ export function createDeliver(opts: CreateDeliverOptions = {}): DeliverFn {
   const sleep = opts.sleep ?? defaultSleep
   const sessionIdOf = opts.sessionIdOf ?? defaultSessionIdOf
 
-  return async (transport, to, content) => {
+  return async (transport, to, content, meta) => {
     const antiban = resolveAdapter()
     const sessionId = sessionIdOf(transport)
     const key = sessionId ?? UNKNOWN_SESSION_KEY
-    const decision = await antiban.beforeSend(key, to, content)
-    if (!decision.allowed) throw new AntibanBlockedError(decision.reason, decision.delayMs)
-    if (decision.delayMs > 0) await sleep(decision.delayMs)
+    // Envio do CRM: fora do antiban (o fluxo do CRM já tem os próprios atrasos). O `sleep` ainda roda porque é
+    // nele que o worker grava a marca de envio em curso; o 403 continua indo para o health e os limites.
+    const viaAntiban = meta?.origin !== 'crm'
+    if (viaAntiban) {
+      const decision = await antiban.beforeSend(key, to, content)
+      if (!decision.allowed) throw new AntibanBlockedError(decision.reason, decision.delayMs)
+      if (decision.delayMs > 0) await sleep(decision.delayMs)
+    } else await sleep(1)
 
     let result: { messageId: string }
     try {
       result = await transport.sendMessage(to, content)
     } catch (err) {
-      antiban.afterSendFailed(key, errorMessage(err))
+      if (viaAntiban) antiban.afterSendFailed(key, errorMessage(err))
       if (isForbiddenError(err) && sessionId) await reportForbidden(opts, sessionId, err)
       throw err
     }
-    antiban.afterSend(key, to, content, result.messageId)
+    if (viaAntiban) antiban.afterSend(key, to, content, result.messageId)
     return result
   }
 }

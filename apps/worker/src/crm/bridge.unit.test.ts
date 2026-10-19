@@ -98,6 +98,13 @@ describe('bridgeHandlers com e sem os alvos do CRM', () => {
     expect(Object.keys(withCrm.messages!)).toEqual(expect.arrayContaining(['send', 'sendGroup']))
   })
 
+  it('envio do CRM vai para o pipeline marcado com origin crm', async () => {
+    const pipeline = { send: vi.fn(async () => view('m1')), sendGroup: vi.fn() }
+    const crm = createCrmBridgeTargets({ db: {} as Database, queue: { enqueue: vi.fn(), get: vi.fn() } as never, getTransport: () => undefined, redis: new MemoryRedis(), pipeline })
+    await crm.messages.send({ sessionId: 's', phone: '+5511999999999', content: { text: 'oi' }, actor: 'flow:r1' })
+    expect(pipeline.send).toHaveBeenCalledWith({ sessionId: 's', phone: '+5511999999999', content: { text: 'oi' }, actor: 'flow:r1', origin: 'crm' })
+  })
+
   it('pela rota: sessão desconectada responde TransportNotConnectedError; args vazios não chamam o pipeline', async () => {
     const pipeline = { send: vi.fn(), sendGroup: vi.fn() }
     const crm = createCrmBridgeTargets({ db: {} as Database, queue: { enqueue: vi.fn(), get: vi.fn() } as never, getTransport: () => undefined, redis: new MemoryRedis(), pipeline })

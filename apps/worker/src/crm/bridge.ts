@@ -170,7 +170,7 @@ export function createCrmBridgeTargets(opts: CreateCrmBridgeOptions): CrmBridgeT
       send: async (input) => {
         const sessionId = String(input.sessionId ?? '')
         const clientMessageId = optionalString(input.clientMessageId)
-        const req: SendRequest = { sessionId, phone: String(input.phone ?? ''), content: input.content as OutgoingContent }
+        const req: SendRequest = { sessionId, phone: String(input.phone ?? ''), content: input.content as OutgoingContent, origin: 'crm' }
         if (typeof input.actor === 'string') req.actor = input.actor
         if (typeof input.contactId === 'string') req.contactId = input.contactId
         if (typeof input.groupId === 'string') req.groupId = input.groupId
@@ -240,6 +240,10 @@ export function createCrmBridgeTargets(opts: CreateCrmBridgeOptions): CrmBridgeT
 }
 
 /** SendPipeline do worker + checagem do conteúdo logo antes do enqueue (depois de todos os gates de segurança). */
+// Envios do CRM ficam fora dos limites do chip (por minuto/hora/dia e warm-up) e não contam neles: o CRM controla
+// o próprio ritmo. Os demais gates (auth, sessão conectada, contato permitido) continuam.
+const skipGate = async () => undefined
+
 function buildPipeline(opts: CreateCrmBridgeOptions): SendPipeline {
   const base = new SendPipeline({ db: opts.db, queue: opts.queue, getTransport: opts.getTransport, ...(opts.limits ? { limits: opts.limits } : {}) })
   return new SendPipeline({
@@ -248,6 +252,8 @@ function buildPipeline(opts: CreateCrmBridgeOptions): SendPipeline {
     getTransport: opts.getTransport,
     limits: base.limits,
     gates: {
+      warmupLimit: skipGate,
+      rateLimit: skipGate,
       enqueue: async (req, ctx) => {
         assertSupportedContent(req.content)
         await base.gates.enqueue(req, ctx)

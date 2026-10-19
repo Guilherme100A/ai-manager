@@ -1,7 +1,7 @@
 // Limites de envio por sessão (T09, AC-T09-05): configuráveis, com defaults conservadores.
 // O sistema pode REDUZIR limites automaticamente (reduce), mas nunca aumentá-los; o limite diário efetivo
 // nunca passa do cronograma de warm-up (T10). Aumentar é sempre ação manual (set).
-import { and, count, eq, gt, ne } from 'drizzle-orm'
+import { and, count, eq, gt, isNull, ne, or } from 'drizzle-orm'
 import { messages, sessionLimits, type Database } from '@wsm/db'
 import { SessionStore, type SessionRow } from '../session/store'
 import type { SessionState } from '../session/states'
@@ -167,12 +167,19 @@ export class SessionLimitsService {
   }
 
   /** Mensagens outbound da sessão (qualquer status exceto cancelled) criadas depois de `since`. */
+  /** Envios que contam nos limites da sessão (e do warm-up). Os do CRM (`origin = 'crm'`) não contam. */
   async countOutbound(sessionId: string, since: Date): Promise<number> {
     const [row] = await this.db
       .select({ n: count() })
       .from(messages)
       .where(
-        and(eq(messages.sessionId, sessionId), eq(messages.direction, 'outbound'), ne(messages.status, 'cancelled'), gt(messages.createdAt, since)),
+        and(
+          eq(messages.sessionId, sessionId),
+          eq(messages.direction, 'outbound'),
+          ne(messages.status, 'cancelled'),
+          gt(messages.createdAt, since),
+          or(isNull(messages.origin), ne(messages.origin, 'crm')),
+        ),
       )
     return Number(row?.n ?? 0)
   }

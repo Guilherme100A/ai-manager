@@ -41,7 +41,11 @@ export interface EnqueueMessageInput {
   phone: string
   content: OutgoingContent
   contactId?: string | null
+  /** `crm`: envio da ponte do CRM (não conta nos limites do chip e não passa pelo antiban). */
+  origin?: MessageOrigin | null
 }
+
+export type MessageOrigin = 'crm'
 
 export interface ListMessagesFilter {
   sessionId?: string
@@ -119,6 +123,7 @@ export class MessageStore {
           contactId: input.contactId ?? null,
           phone: input.phone,
           content: input.content,
+          origin: input.origin ?? null,
           status: 'queued',
         })
         .returning()
