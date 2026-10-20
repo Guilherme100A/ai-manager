@@ -146,6 +146,9 @@ describe('SpyFinder', () => {
     ])
     expect(await new SpyFinder(fastHttp(about.fn)).findForAd(ad)).toMatchObject({ phone: '5584920022034', foundVia: 'pagina' })
 
+    const refused = fakeFetch([[/duckduckgo/, () => { throw new TypeError('fetch failed') }], [/sk=about_contact/, html('{"field_section_type":"about_contact_info","x":[{"title":{"text":"+55 84 92002-2034"},"field_type":"whatsapp"}]}')]])
+    expect(await new SpyFinder(fastHttp(refused.fn)).findForAd(ad)).toMatchObject({ phone: '5584920022034', foundVia: 'pagina' })
+
     const blocked = fakeFetch([[/duckduckgo/, html('anomaly-modal', 202)], [/facebook/, html('<html></html>')]])
     const r = await new SpyFinder(fastHttp(blocked.fn)).findForAd(ad)
     expect(r.phone).toBeUndefined()

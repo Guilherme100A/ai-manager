@@ -58,7 +58,8 @@ export class SpyFinder {
     let loginWall = false
     const tokens = [...new Set([ad.profileToken, ad.pageId].filter((t): t is string => Boolean(t)))]
     for (const token of tokens) {
-      const results = await this.http.search(`site:facebook.com ${token}`)
+      // Buscador fora do ar ou recusando o IP não derruba a cascata: segue para a página Sobre.
+      const results = await this.http.search(`site:facebook.com ${token}`).catch(() => ({ blocked: true, urls: [] as string[] }))
       if (results.blocked) blocked = true
       for (const url of profilePostLinks(results.urls, token)) {
         if (candidates.length >= this.maxCandidates) break
