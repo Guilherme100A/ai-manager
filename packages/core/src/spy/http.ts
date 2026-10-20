@@ -19,6 +19,8 @@ export interface SpyPage {
   url: string
   /** HTML com `\/` desfeito, pronto para as regex de extração. */
   text: string
+  /** A Facebook mandou para a tela de login (acontece com IP de datacenter nos posts). */
+  loginWall: boolean
 }
 
 export interface SearchResult {
@@ -75,7 +77,7 @@ export class SpyHttp {
         current = new URL(res.location, current).href
         continue
       }
-      return { status: res.status, url: current, text: res.text.split('\\/').join('/') }
+      return { status: res.status, url: current, text: res.text.split('\\/').join('/'), loginWall: new URL(current).pathname.startsWith('/login') }
     }
     throw new Error('redirecionamentos demais')
   }

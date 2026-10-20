@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { permalinkFor, SpyFinder } from './finder'
 import { resultUrls, SpyHttp, type FetchFn } from './http'
-import { classifyInput, isWhatsappAd, normalizePhone, parseLibraryAds, postButtonPhone, profilePostLinks, textPhone } from './parse'
+import { aboutPagePhone, classifyInput, isWhatsappAd, normalizePhone, parseLibraryAds, postButtonPhone, profilePostLinks, textPhone } from './parse'
 
 // Trecho no formato que a Biblioteca embute no HTML (JSON com `\/` e `\u00xx`).
 const adJson = (id: string, page: string, profile: string, link: string, body = 'Receitas que vendem') =>
@@ -44,6 +44,13 @@ describe('parse', () => {
     expect(postButtonPhone('nada aqui')).toBeUndefined()
     expect(textPhone('Chama no zap +55 79 9107-3072 agora')).toBe('557991073072')
     expect(textPhone('Fale conosco https%3A%2F%2Fwa.me%2F5579991073072')).toBe('5579991073072')
+  })
+
+  it('página Sobre: só o campo WhatsApp ou o botão da seção de contato, nunca telefone solto', () => {
+    const field = '{"field_section_type":"about_contact_info","profile_fields":{"nodes":[{"title":{"ranges":[],"text":"+55 79 9107-3072"},"field_type":"whatsapp"}]}}'
+    expect(aboutPagePhone(`sugestão +55 13 3150-1541 ${field}`)).toBe('557991073072')
+    expect(aboutPagePhone('{"field_section_type":"about_contact_info","link_url":"https://api.whatsapp.com/send?phone=5511919589408&token=eyJ"}')).toBe('5511919589408')
+    expect(aboutPagePhone('Fale com +55 13 3150-1541 e https://api.whatsapp.com/send?phone=5511999998888&token=x')).toBeUndefined()
   })
 
   it('resultados da busca: só posts/vídeos do próprio perfil, vídeos primeiro', () => {
@@ -135,7 +142,7 @@ describe('SpyFinder', () => {
   it('sem posts com botão: tenta a página Sobre; sem nada, explica o motivo', async () => {
     const about = fakeFetch([
       [/duckduckgo/, html('<html>sem resultados</html>')],
-      [/sk=about_contact/, html('WhatsApp +55 84 92002-2034')],
+      [/sk=about_contact/, html('{"field_section_type":"about_contact_info","profile_fields":{"nodes":[{"title":{"text":"+55 84 92002-2034"},"field_type":"whatsapp"}]}}')],
     ])
     expect(await new SpyFinder(fastHttp(about.fn)).findForAd(ad)).toMatchObject({ phone: '5584920022034', foundVia: 'pagina' })
 
@@ -143,6 +150,16 @@ describe('SpyFinder', () => {
     const r = await new SpyFinder(fastHttp(blocked.fn)).findForAd(ad)
     expect(r.phone).toBeUndefined()
     expect(r.reason).toMatch(/bloqueou/)
+  })
+
+  it('post que redireciona para o login (IP de servidor): motivo pede proxy residencial', async () => {
+    const { fn } = fakeFetch([
+      [/permalink\.php/, html('', 302, { location: 'https://www.facebook.com/login/?next=x' })],
+      [/\/login\//, html('<form id="login_form"></form>')],
+    ])
+    const r = await new SpyFinder(fastHttp(fn)).findForPost('https://www.facebook.com/61577928417447/videos/1738211550515405/')
+    expect(r.phone).toBeUndefined()
+    expect(r.reason).toMatch(/pediu login.*SPY_PROXY_URL/)
   })
 
   it('loadAd acha o anúncio pelo id na página da Biblioteca', async () => {

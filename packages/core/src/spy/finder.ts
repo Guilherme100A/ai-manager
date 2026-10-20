@@ -4,7 +4,7 @@
 // 4. página "Sobre" do perfil.
 import type { SpyFoundVia } from '@wsm/db'
 import type { SpyHttp } from './http'
-import { isWhatsappAd, parseLibraryAds, postButtonPhone, profilePostLinks, textPhone, whatsappLinkPhones, type LibraryAd } from './parse'
+import { aboutPagePhone, isWhatsappAd, parseLibraryAds, postButtonPhone, profilePostLinks, textPhone, whatsappLinkPhones, type LibraryAd } from './parse'
 
 export interface FindResult {
   phone?: string
@@ -55,6 +55,7 @@ export class SpyFinder {
 
     const candidates: string[] = []
     let blocked = false
+    let loginWall = false
     const tokens = [...new Set([ad.profileToken, ad.pageId].filter((t): t is string => Boolean(t)))]
     for (const token of tokens) {
       const results = await this.http.search(`site:facebook.com ${token}`)
@@ -65,7 +66,9 @@ export class SpyFinder {
         const target = permalinkFor(url, token) ?? url
         if (candidates.includes(target)) continue
         candidates.push(target)
-        const phone = postButtonPhone((await this.http.facebook(target)).text)
+        const page = await this.http.facebook(target)
+        if (page.loginWall) loginWall = true
+        const phone = postButtonPhone(page.text)
         if (phone) return { phone, foundVia: 'post', evidenceUrl: target, candidates }
       }
       if (candidates.length >= this.maxCandidates) break
@@ -73,11 +76,13 @@ export class SpyFinder {
 
     if (ad.pageId) {
       const about = `https://www.facebook.com/profile.php?id=${ad.pageId}&sk=about_contact_and_basic_info`
-      const phone = textPhone((await this.http.facebook(about)).text)
+      const phone = aboutPagePhone((await this.http.facebook(about)).text)
       if (phone) return { phone, foundVia: 'pagina', evidenceUrl: about, candidates }
     }
     return {
-      reason: candidates.length > 0
+      reason: loginWall
+        ? `a Facebook pediu login para abrir ${candidates.length} post(s) a partir deste servidor; configure um proxy residencial (SPY_PROXY_URL)`
+        : candidates.length > 0
         ? `nenhum dos ${candidates.length} posts do perfil mostrou o WhatsApp sem login, e a página Sobre não tem número`
         : blocked
           ? 'o buscador bloqueou a busca (anti-robô); configure a chave do Serper ou tente de novo mais tarde'
@@ -89,11 +94,17 @@ export class SpyFinder {
   async findForPost(url: string): Promise<FindResult> {
     const owner = new URL(url).pathname.split('/').filter(Boolean)[0]
     const urls = [...new Set([owner ? permalinkFor(url, owner) : undefined, url].filter((u): u is string => Boolean(u)))]
+    let loginWall = false
     for (const target of urls) {
-      const phone = postButtonPhone((await this.http.facebook(target)).text)
+      const page = await this.http.facebook(target)
+      if (page.loginWall) loginWall = true
+      const phone = postButtonPhone(page.text)
       if (phone) return { phone, foundVia: 'post', evidenceUrl: target, candidates: urls }
     }
-    return { reason: 'o post não tem botão de WhatsApp visível sem login', candidates: urls }
+    return {
+      reason: loginWall ? 'a Facebook pediu login para abrir o post a partir deste servidor; configure um proxy residencial (SPY_PROXY_URL)' : 'o post não tem botão de WhatsApp visível sem login',
+      candidates: urls,
+    }
   }
 }
 

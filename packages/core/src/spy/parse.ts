@@ -70,6 +70,25 @@ export function textPhone(text: string): string | undefined {
   return undefined
 }
 
+/**
+ * WhatsApp da página "Sobre → Contato": o campo `field_type: whatsapp` ou o link do botão (`send?phone=…&token=`).
+ * Só desses dois lugares: o HTML da página tem outros telefones (sugestões, rodapé) que não são do anunciante.
+ */
+export function aboutPagePhone(html: string): string | undefined {
+  const text = decodeLoose(html)
+  for (const m of text.matchAll(/"text":"(\+?[\d\s().-]{8,25})"\},"field_type":"whatsapp/g)) {
+    const phone = normalizePhone(m[1]!)
+    if (phone) return phone
+  }
+  const section = text.indexOf('"field_section_type":"about_contact_info"')
+  if (section < 0) return undefined
+  for (const m of text.slice(section, section + 20_000).matchAll(/api\.whatsapp\.com\/send\/?\?phone=(\d{10,15})&token=/g)) {
+    const phone = normalizePhone(m[1]!)
+    if (phone) return phone
+  }
+  return undefined
+}
+
 export function classifyInput(raw: string): SpyInput {
   const text = raw.trim()
   if (!text) return { kind: 'invalid', reason: 'link vazio' }
