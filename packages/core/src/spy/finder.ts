@@ -61,9 +61,16 @@ export class SpyFinder {
     const tokens = [...new Set([ad.profileToken, ad.pageId].filter((t): t is string => Boolean(t)))]
     for (const token of tokens) {
       // Buscador fora do ar ou recusando o IP não derruba a cascata: segue para a página Sobre.
-      const results = await this.http.search(`site:facebook.com ${token}`).catch(() => ({ blocked: true, urls: [] as string[] }))
+      const search = (q: string) => this.http.search(q).catch(() => ({ blocked: true, urls: [] as string[] }))
+      const results = await search(`site:facebook.com ${token}`)
       if (results.blocked) blocked = true
-      for (const url of profilePostLinks(results.urls, token)) {
+      let links = profilePostLinks(results.urls, token)
+      // Só vídeos na busca: uma busca a mais só pelos posts do perfil (os posts é que abrem com o botão).
+      if (!results.blocked && !links.some((l) => /\/posts\//.test(l))) {
+        const posts = await search(`site:facebook.com/${token}/posts`)
+        links = [...new Set([...profilePostLinks(posts.urls, token), ...links])]
+      }
+      for (const url of links) {
         if (candidates.length >= this.maxCandidates) break
         if (candidates.includes(url)) continue
         candidates.push(url)

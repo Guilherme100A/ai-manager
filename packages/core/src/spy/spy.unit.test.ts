@@ -53,14 +53,14 @@ describe('parse', () => {
     expect(aboutPagePhone('Fale com +55 13 3150-1541 e https://api.whatsapp.com/send?phone=5511999998888&token=x')).toBeUndefined()
   })
 
-  it('resultados da busca: só posts/vídeos do próprio perfil, vídeos primeiro', () => {
-    const html = '<a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.facebook.com%2F61577928417447%2Fposts%2F122166543716930947%2F&rut=x">' +
-      '<a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.facebook.com%2F61577928417447%2Fvideos%2F1738211550515405%2F&rut=y">' +
+  it('resultados da busca: só posts/vídeos do próprio perfil, posts primeiro', () => {
+    const html = '<a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.facebook.com%2F61577928417447%2Fvideos%2F1738211550515405%2F&rut=y">' +
+      '<a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.facebook.com%2F61577928417447%2Fposts%2F122166543716930947%2F&rut=x">' +
       '<a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.facebook.com%2Foutra.pessoa%2Fposts%2F1%2F&rut=z">' +
       '<a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.facebook.com%2F61577928417447%2F&rut=w">'
     expect(profilePostLinks(resultUrls(html), '61577928417447')).toEqual([
-      'https://www.facebook.com/61577928417447/videos/1738211550515405/',
       'https://www.facebook.com/61577928417447/posts/122166543716930947/',
+      'https://www.facebook.com/61577928417447/videos/1738211550515405/',
     ])
   })
 
@@ -178,6 +178,22 @@ describe('SpyFinder', () => {
     const r = await new SpyFinder(fastHttp(blocked.fn)).findForAd(ad)
     expect(r.phone).toBeUndefined()
     expect(r.reason).toMatch(/bloqueou/)
+  })
+
+  it('busca só com vídeos: faz uma busca a mais pelos posts do perfil e abre o post primeiro', async () => {
+    const queries: string[] = []
+    const { fn } = fakeFetch([
+      [/serper/, (init) => {
+        const q = (JSON.parse(String(init!.body)) as { q: string }).q
+        queries.push(q)
+        return Response.json({ organic: q.endsWith('/posts') ? [{ link: 'https://www.facebook.com/61577928417447/posts/doce/122174154788930947/' }] : [{ link: 'https://www.facebook.com/61577928417447/videos/x/1396529699123895/' }] })
+      }],
+      [/\/posts\/doce\/122174154788930947/, html('"https://api.whatsapp.com/send?phone=5584920022034&source=FB_Post"')],
+    ])
+    const r = await new SpyFinder(fastHttp(fn, 'k')).findForAd(ad)
+    expect(queries).toEqual(['site:facebook.com 61577928417447', 'site:facebook.com/61577928417447/posts'])
+    expect(r).toMatchObject({ phone: '5584920022034', foundVia: 'post' })
+    expect(r.candidates[0]).toContain('/posts/')
   })
 
   it('pelo proxy: o link direto do post traz o botão mesmo quando o permalink pede login', async () => {

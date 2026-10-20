@@ -169,7 +169,10 @@ export function profileToken(uri: string): string | undefined {
   }
 }
 
-/** Dos links de resultado da busca, só os posts/vídeos do próprio perfil (vídeos primeiro: são o criativo do anúncio). */
+/**
+ * Dos links de resultado da busca, só os posts/vídeos do próprio perfil. Posts primeiro: abrem com o botão do
+ * WhatsApp tanto direto quanto pelo proxy; a página de vídeo pelo proxy esconde o botão.
+ */
 export function profilePostLinks(results: string[], token: string): string[] {
   const urls = new Set<string>()
   for (const raw of results) {
@@ -180,7 +183,7 @@ export function profilePostLinks(results: string[], token: string): string[] {
     if (!ownProfile || !/\/(posts|videos|reel)\/|story_fbid=/.test(path)) continue
     urls.add(url.replace(/^https:\/\/(m|web)\./, 'https://www.'))
   }
-  return [...urls].sort((a, b) => Number(/\/posts\//.test(a)) - Number(/\/posts\//.test(b)))
+  return [...urls].sort((a, b) => Number(!/\/posts\//.test(a)) - Number(!/\/posts\//.test(b)))
 }
 
 function unescapeJson(raw: string): string {
