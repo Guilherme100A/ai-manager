@@ -97,6 +97,9 @@ describe('SpyStore + SpyRunner', () => {
     const claimed = await store.claimNext()
     expect(claimed).toMatchObject({ status: 'lendo', attempts: 1 })
     expect(await store.claimNext()).toBeUndefined()
-    expect(await store.requeueStale(0)).toBe(1)
+    expect(await store.requeueStale()).toBe(0) // recente: ainda pode estar em andamento
+    // envelhece a linha pelo banco (o relógio do Postgres e o do Node podem empatar no mesmo ms)
+    await db.update(spyAds).set({ updatedAt: new Date(Date.now() - 11 * 60_000) })
+    expect(await store.requeueStale()).toBe(1)
   })
 })
