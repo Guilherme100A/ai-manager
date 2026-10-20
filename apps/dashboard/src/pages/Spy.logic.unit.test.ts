@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { SpyAd } from '../lib/types'
-import { adLibraryUrl, formatPhone, parseLinks, rowTitle, summarize } from './Spy.logic'
+import { adLibraryUrl, formatPhone, parseLinks, probeStatusLabel, rowTitle, summarize } from './Spy.logic'
 
 describe('Spy.logic', () => {
   it('um link por linha, sem vazios nem repetidos', () => {
@@ -29,5 +29,15 @@ describe('rowTitle', () => {
     expect(rowTitle({ status: 'lendo', inputUrl: 'x', adArchiveId: '1' })).toBe('Lendo anúncio…')
     expect(rowTitle({ status: 'achado', inputUrl: 'https://wa.me/55', adArchiveId: null })).toBe('Link do WhatsApp')
     expect(rowTitle({ status: 'achado', inputUrl: 'https://www.facebook.com/p/videos/1/', adArchiveId: null })).toBe('Post da página')
+  })
+})
+
+describe('probeStatusLabel', () => {
+  const now = Date.parse('2026-10-20T12:00:00Z')
+  it('ativa (vai responder / esperando), concluída ouvindo remarketing e parada', () => {
+    expect(probeStatusLabel({ status: 'ativa', replyDueAt: '2026-10-20T12:01:00Z', listenUntil: null }, now)).toBe('Vai responder…')
+    expect(probeStatusLabel({ status: 'ativa', replyDueAt: null, listenUntil: null }, now)).toBe('Esperando a oferta')
+    expect(probeStatusLabel({ status: 'concluida', replyDueAt: null, listenUntil: '2026-10-27T12:00:00Z' }, now)).toBe('Concluída · ouvindo remarketing')
+    expect(probeStatusLabel({ status: 'parada', replyDueAt: null, listenUntil: null }, now)).toBe('Parada')
   })
 })

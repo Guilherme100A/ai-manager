@@ -78,6 +78,13 @@
       "when": 1792461822362,
       "tag": "0010_spy_retry",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1792463410055,
+      "tag": "0011_spy_probes",
+      "breakpoints": true
     }
   ]
 }

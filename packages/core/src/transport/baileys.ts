@@ -249,6 +249,53 @@ interface RawMessage {
 
 const IGNORED_CONTENT_KEYS = new Set(['messageContextInfo', 'senderKeyDistributionMessage'])
 
+/**
+ * Texto de uma mensagem já sem invólucro: texto simples/legenda ou mensagem interativa. Botões e itens de lista
+ * vão numa linha `[opções: 1) A | 2) B]` e links de botão em `[link: url]`, para quem lê saber o que dá para escolher.
+ */
+export function innerText(type: string, body: unknown): string | undefined {
+  if (typeof body === 'string') return body
+  if (!body || typeof body !== 'object') return undefined
+  const b = body as Record<string, any> // eslint-disable-line @typescript-eslint/no-explicit-any -- protobuf do Baileys
+  const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined)
+  const compose = (main: Array<string | undefined>, options: Array<string | undefined>, links: Array<string | undefined> = []) => {
+    const lines = main.filter((l): l is string => Boolean(l))
+    const opts = options.filter((o): o is string => Boolean(o))
+    if (opts.length) lines.push(`[opções: ${opts.map((o, i) => `${i + 1}) ${o}`).join(' | ')}]`)
+    for (const link of links.filter((l): l is string => Boolean(l))) lines.push(`[link: ${link}]`)
+    return lines.length ? lines.join('\n') : undefined
+  }
+  switch (type) {
+    case 'buttonsMessage':
+      return compose([str(b.contentText), str(b.footerText)], (b.buttons ?? []).map((x: any) => str(x?.buttonText?.displayText))) // eslint-disable-line @typescript-eslint/no-explicit-any
+    case 'listMessage':
+      return compose([str(b.title), str(b.description), str(b.footerText)],
+        (b.sections ?? []).flatMap((s: any) => (s?.rows ?? []).map((r: any) => str(r?.title)))) // eslint-disable-line @typescript-eslint/no-explicit-any
+    case 'templateMessage': {
+      const t = b.hydratedTemplate ?? b.hydratedFourRowTemplate ?? {}
+      const buttons = (t.hydratedButtons ?? []) as any[] // eslint-disable-line @typescript-eslint/no-explicit-any
+      return compose([str(t.hydratedTitleText), str(t.hydratedContentText), str(t.hydratedFooterText)],
+        buttons.map((x) => str(x?.quickReplyButton?.displayText) ?? str(x?.urlButton?.displayText) ?? str(x?.callButton?.displayText)),
+        buttons.map((x) => str(x?.urlButton?.url)))
+    }
+    case 'interactiveMessage': {
+      const buttons = (b.nativeFlowMessage?.buttons ?? []) as Array<{ buttonParamsJson?: string }>
+      const params = buttons.map((x) => { try { return JSON.parse(x.buttonParamsJson ?? '{}') as { display_text?: string; url?: string } } catch { return {} } })
+      return compose([str(b.header?.title), str(b.body?.text), str(b.footer?.text)], params.map((p) => str(p.display_text)), params.map((p) => str(p.url)))
+    }
+    case 'buttonsResponseMessage':
+      return str(b.selectedDisplayText)
+    case 'listResponseMessage':
+      return str(b.title) ?? str(b.singleSelectReply?.selectedRowId)
+    case 'templateButtonReplyMessage':
+      return str(b.selectedDisplayText)
+    case 'interactiveResponseMessage':
+      return str(b.body?.text)
+    default:
+      return str(b.text) ?? str(b.caption)
+  }
+}
+
 /** Invólucros cujo conteúdo real fica em `<wrapper>.message` (temporária, visualização única, doc com legenda). */
 const WRAPPERS = ['ephemeralMessage', 'viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension', 'documentWithCaptionMessage', 'editedMessage'] as const
 
@@ -373,11 +420,14 @@ export function toIncomingMessage(raw: RawMessage): IncomingMessage | undefined 
   if (raw.key?.remoteJidAlt) msg.fromAlt = raw.key.remoteJidAlt
   if (raw.key?.participant) msg.participant = raw.key.participant
   if (raw.pushName) msg.pushName = raw.pushName
-  if (text !== undefined) msg.text = text
   // A2/A4 (integração CRM): mídia, mensagem citada e anúncio CTWA. Só acréscimos opcionais.
   const inner = unwrapContent(content)
   const innerType = inner ? Object.keys(inner).find((k) => !IGNORED_CONTENT_KEYS.has(k) && inner[k] != null) : undefined
   const innerBody = innerType ? inner![innerType] : undefined
+  // Sem texto no nível de cima: mensagem temporária/visualização única (texto dentro do invólucro) ou com
+  // botões/lista/modelo (texto + opções), comuns em contas Business. Antes chegavam sem texto.
+  if (text === undefined && innerType && innerBody != null) text = innerText(innerType, innerBody)
+  if (text !== undefined) msg.text = text
   if (innerType && innerBody && typeof innerBody === 'object') {
     const media = mediaOf(innerType, innerBody as Record<string, unknown>)
     if (media) msg.media = media

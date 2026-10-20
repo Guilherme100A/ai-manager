@@ -1,4 +1,4 @@
-import type { SpyAd, SpyAdStatus, SpyFoundVia } from '../lib/types'
+import type { SessionState, SpyAd, SpyAdStatus, SpyFoundVia, SpyProbe } from '../lib/types'
 
 export const STATUS_LABEL: Record<SpyAdStatus, string> = {
   na_fila: 'Na fila',
@@ -48,4 +48,14 @@ export function summarize(ads: SpyAd[]) {
     found: rows.filter((a) => a.status === 'achado').length,
     missing: rows.filter((a) => a.status === 'sem_numero' || a.status === 'erro').length,
   }
+}
+
+/** Estados de chip que podem enviar (mesma regra do servidor). */
+export const SENDABLE: readonly SessionState[] = ['WARMING', 'STABLE', 'DEGRADED']
+export const PROBES_PER_DAY = 5
+
+export function probeStatusLabel(p: Pick<SpyProbe, 'status' | 'listenUntil' | 'replyDueAt'>, now: number): string {
+  if (p.status === 'ativa') return p.replyDueAt && Date.parse(p.replyDueAt) > now ? 'Vai responder…' : p.replyDueAt ? 'Respondendo…' : 'Esperando a oferta'
+  if (p.listenUntil && Date.parse(p.listenUntil) > now) return 'Concluída · ouvindo remarketing'
+  return p.status === 'concluida' ? 'Concluída' : p.status === 'parada' ? 'Parada' : 'Erro'
 }

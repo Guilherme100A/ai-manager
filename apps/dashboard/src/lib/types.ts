@@ -259,3 +259,29 @@ export interface SpyEnqueueResult {
   created: SpyAd[]
   skipped: Array<{ link: string; reason: string }>
 }
+
+export type SpyProbeStatus = 'ativa' | 'concluida' | 'parada' | 'erro'
+
+export interface SpyProbe {
+  id: string
+  offerId: string
+  sessionId: string
+  phone: string
+  status: SpyProbeStatus
+  turns: number
+  maxTurns: number
+  replyDueAt: string | null
+  listenUntil: string | null
+  summary: { etapa?: string; preco?: string; checkout?: string[]; opcoes?: string[]; notas?: string; humano?: boolean; links?: string[] }
+  endedReason: string | null
+  startedAt: string
+  endedAt: string | null
+  sessionName: string | null
+  pageName: string | null
+}
+
+export interface SpyProbeTurn {
+  de: 'eu' | 'oferta'
+  texto: string
+  at: string
+}

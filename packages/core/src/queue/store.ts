@@ -45,7 +45,7 @@ export interface EnqueueMessageInput {
   origin?: MessageOrigin | null
 }
 
-export type MessageOrigin = 'crm'
+export type MessageOrigin = 'crm' | 'spy'
 
 export interface ListMessagesFilter {
   sessionId?: string

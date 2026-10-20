@@ -28,12 +28,15 @@ import {
   SessionLinkStore,
   SessionRouter,
   SendPipeline,
+  SpyProbeModel,
+  SpyProbeStore,
   toConnectionOptions,
   type Logger,
 } from '@wsm/core'
-import { createDb, runMigrations, sessions, messages, auditLogs, type Database } from '@wsm/db'
+import { createDb, runMigrations, sessions, messages, auditLogs, spyAds, spyOffers, type Database } from '@wsm/db'
 import { and, eq, gt, sql } from 'drizzle-orm'
 import { ConversationAutomation } from '../conversations/automation'
+import { SpyProbeRunner } from '../spy/probes'
 import { AutoReplyAutomation } from '../conversations/autoreply'
 import { RedisConversationStore } from '../conversations/store'
 import { attachAlerts } from '../alerts'
@@ -297,12 +300,23 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
       audit: async (id, detail) => { await db.insert(auditLogs).values({ actor: 'session-conversations', action: 'conversation.turn', targetType: 'session', targetId: id, detail }) },
       logger,
     })
+    // Espião de funil: sondas (chip conversa com a oferta como lead, IA) — SPY_PROBES=off desliga.
+    const spyProbes = env.SPY_PROBES?.trim().toLowerCase() === 'off' ? undefined : new SpyProbeRunner({
+      store: new SpyProbeStore(db), model: new SpyProbeModel(() => conversationSettings.resolve()),
+      manager, pipeline: routingPipeline, messages: queue, logger, paused: () => stallMonitor.underPressure(),
+      allowed: async (phone) => canMessage(await conversationContacts.findByPhone(phone)).ok,
+      offerContext: async (offerId) => {
+        const [row] = await db.select({ pageName: spyOffers.pageName, data: spyAds.data }).from(spyOffers)
+          .leftJoin(spyAds, eq(spyAds.offerId, spyOffers.id)).where(eq(spyOffers.id, offerId)).limit(1)
+        return { ...(row?.pageName ? { pagina: row.pageName } : {}), ...(row?.data?.body ? { anuncio: row.data.body } : {}) }
+      },
+    })
     const ai = attachAi(manager, {
       db,
       logger,
       routeIncoming: (event) => sessionRouter.route(event),
       // Resposta automática dos números de autoresposta não vira sugestão da IA assistiva.
-      consumeConversation: async (id, phone, text) => (await conversations.handlesInbound(id, phone, text)) || autoReplyTargets.isTarget(phone),
+      consumeConversation: async (id, phone, text) => (await conversations.handlesInbound(id, phone, text)) || autoReplyTargets.isTarget(phone) || Boolean(await spyProbes?.handlesInbound(id, phone)),
       // T19 — configuração dinâmica: tabela ai_settings (painel) com fallback no ambiente AI_*, relida a cada
       // AI_SETTINGS_REFRESH_MS (default 5 s) sem restart. Sem chave ou enabled=false → só o fallback determinístico.
       assistant: new AiAssistant({
@@ -322,6 +336,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     bridgeTargets.sessions.configureConversation = (id, config) => conversations.configure(id, config)
     bridgeTargets.sessions.tickConversation = async (id) => { await manager.get(id); return conversations.requestTick(id) }
     onStop('session-conversations', () => conversations.stop())
+    if (spyProbes) onStop('spy-probes', () => spyProbes.stop())
     // Números de autoresposta próprios: só os chips com proxy conversam com eles (mesmo limite diário do chip).
     const autoReplyTargets = new AutoReplyTargets(db)
     const autoReply = new AutoReplyAutomation({
@@ -441,6 +456,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     await resumeQueues(db, queue, logger)
     await groupAutomation.start()
     conversations.start()
+    spyProbes?.start()
     autoReply.start()
 
     logger.info(

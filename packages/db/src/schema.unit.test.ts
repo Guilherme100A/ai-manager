@@ -45,6 +45,7 @@ const TABLES = [
   // migration 0009_spy (Espião de funil)
   'spy_offers',
   'spy_ads',
+  'spy_probes',
 ]
 
 /** Quantidade de migrations declaradas no journal do drizzle (cresce a cada migration nova). */

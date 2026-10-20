@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm'
 import { index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core'
+import { sessions } from './tables.js'
 
 // Espião de funil: cada link colado vira uma linha em spy_ads; o número achado agrupa os anúncios em spy_offers.
 export type SpyAdStatus = 'na_fila' | 'lendo' | 'achado' | 'sem_numero' | 'erro' | 'expandido'
@@ -53,4 +54,49 @@ export const spyAds = pgTable('spy_ads', {
 }, (t) => [
   uniqueIndex('spy_ads_archive_idx').on(t.adArchiveId).where(sql`${t.adArchiveId} is not null`),
   index('spy_ads_status_idx').on(t.status, t.createdAt),
+])
+
+export type SpyProbeStatus = 'ativa' | 'concluida' | 'parada' | 'erro'
+
+/** O que a IA da sonda anotou sobre o funil (preço, checkout, etapas, opções vistas). */
+export interface SpyProbeSummary {
+  etapa?: string
+  preco?: string
+  checkout?: string[]
+  opcoes?: string[]
+  notas?: string
+  humano?: boolean
+  /** Todos os links que a oferta mandou. */
+  links?: string[]
+}
+
+/**
+ * Sonda: um chip conversa com a oferta (número achado) como um lead, até o preço/checkout. Depois de encerrar,
+ * continua só ouvindo até `listenUntil` para gravar o remarketing. Uma sonda ativa por número.
+ */
+export const spyProbes = pgTable('spy_probes', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  offerId: uuid('offer_id').notNull().references(() => spyOffers.id, { onDelete: 'cascade' }),
+  sessionId: uuid('session_id').notNull().references(() => sessions.id, { onDelete: 'cascade' }),
+  phone: text('phone').notNull(),
+  branch: text('branch').notNull().default('principal'),
+  status: text('status').$type<SpyProbeStatus>().notNull().default('ativa'),
+  turns: integer('turns').notNull().default(0),
+  maxTurns: integer('max_turns').notNull().default(12),
+  /** Resposta pendente: a sonda responde a partir deste horário (atraso humano, junta mensagens seguidas). */
+  replyDueAt: timestamp('reply_due_at', { withTimezone: true }),
+  /** Última mensagem da oferta já vista (inclui áudio/imagem, que não têm texto). */
+  lastInboundAt: timestamp('last_inbound_at', { withTimezone: true }),
+  /** Última mensagem enviada pela sonda (oferta que parou de responder encerra a sonda). */
+  lastOutboundAt: timestamp('last_outbound_at', { withTimezone: true }),
+  listenUntil: timestamp('listen_until', { withTimezone: true }),
+  summary: jsonb('summary').$type<SpyProbeSummary>().notNull().default({}),
+  endedReason: text('ended_reason'),
+  createdBy: text('created_by').notNull(),
+  startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
+  endedAt: timestamp('ended_at', { withTimezone: true }),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex('spy_probes_active_phone_idx').on(t.phone).where(sql`${t.status} = 'ativa'`),
+  index('spy_probes_session_idx').on(t.sessionId, t.status),
 ])
