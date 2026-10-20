@@ -39,6 +39,8 @@ export interface AttachAiOptions {
   /** Central routing after persistence and opt-out, before optional AI suggestions. */
   routeIncoming?: (event: RouteEvent) => Promise<number>
   consumeConversation?: (sessionId: string, phone: string, text: string) => Promise<boolean>
+  /** Mídia recebida (áudio/PDF): o Espião baixa e lê o conteúdo para a sonda. Best-effort; nunca deve lançar. */
+  enrichMedia?: (event: { sessionId: string; inboundId: string; phone: string; msg: IncomingMessage }) => Promise<void>
 }
 
 export type InboundOutcome =
@@ -152,6 +154,12 @@ export class AiAttachment extends EventEmitter<AiAttachmentEvents> {
     const inbound = recorded.message
     if (!recorded.created) return { kind: 'duplicate', messageId: inbound.id }
     this.emit('inbound', { sessionId, messageId: inbound.id })
+
+    // (1b) Espião: mídia (áudio/PDF) é lida agora, enquanto os bytes ainda estão no cache do transporte.
+    if (msg.media && this.opts.enrichMedia) {
+      await this.opts.enrichMedia({ sessionId, inboundId: inbound.id, phone: inbound.phone, msg })
+        .catch((err: unknown) => this.log.warn({ session_id: sessionId, message_id: inbound.id, err: err instanceof Error ? err.message : String(err) }, 'enrichMedia falhou'))
+    }
 
     // (2) Opt-out tem prioridade: se marcou opt-out, não há sugestão.
     const optOut = await this.optOutHandler(sessionId)(msg)

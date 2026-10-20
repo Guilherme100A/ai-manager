@@ -1,6 +1,6 @@
 // Sondas do Espião no banco: criação com as travas (chip, limite diário, consentimento), estado da conversa e histórico.
 import { and, asc, desc, eq, gt, gte, inArray, isNotNull, lte, or, sql } from 'drizzle-orm'
-import { auditLogs, contacts, messages, sessions, spyOffers, spyProbes, type Database, type SpyBranch, type SpyProbeSummary } from '@wsm/db'
+import { auditLogs, contacts, messages, sessions, spyMedia, spyOffers, spyProbes, type Database, type SpyBranch, type SpyMediaKind, type SpyProbeSummary } from '@wsm/db'
 import { SENDABLE_STATES } from '../session/states'
 import type { ProbeTurn } from './probe-model'
 
@@ -104,6 +104,24 @@ export class SpyProbeStore {
       .map((r) => ({ de: r.direction === 'inbound' ? 'oferta' as const : 'eu' as const, texto: contentText(r.content), at: r.at }))
   }
 
+  /** Guarda o conteúdo lido de uma mídia (transcript do áudio, docText/fileName do PDF) na própria mensagem. */
+  async attachMedia(messageId: string, patch: Record<string, string>) {
+    await this.db.update(messages)
+      .set({ content: sql`${messages.content} || ${JSON.stringify(patch)}::jsonb`, updatedAt: new Date(this.now()) })
+      .where(eq(messages.id, messageId))
+  }
+
+  /** Guarda o arquivo de uma mídia (imagem/PDF/áudio/vídeo) para o pacote do fluxo. Repetição na mesma mensagem é ignorada. */
+  async saveMediaFile(input: { offerId: string; probeId?: string; messageId?: string; branch?: string; kind: SpyMediaKind; mime: string; fileName?: string; bytes: Buffer }) {
+    await this.db.insert(spyMedia).values({
+      offerId: input.offerId, kind: input.kind, mime: input.mime, bytes: input.bytes, size: input.bytes.byteLength,
+      ...(input.probeId ? { probeId: input.probeId } : {}),
+      ...(input.messageId ? { messageId: input.messageId } : {}),
+      ...(input.branch ? { branch: input.branch } : {}),
+      ...(input.fileName ? { fileName: input.fileName } : {}),
+    }).onConflictDoNothing({ target: spyMedia.messageId })
+  }
+
   /** Mensagem nova da oferta: responde depois de `delayMs` (reinicia a cada mensagem, para juntar as que vêm em sequência). */
   async inboundSeen(id: string, at: Date, delayMs: number) {
     await this.db.update(spyProbes).set({ lastInboundAt: at, replyDueAt: new Date(this.now() + delayMs), updatedAt: new Date(this.now()) }).where(eq(spyProbes.id, id))
@@ -146,13 +164,22 @@ const MEDIA_LABEL: Record<string, string> = {
 }
 
 /** Texto de uma linha de `messages.content` (recebida `{type,text}` ou enviada `{text}`/mídia). */
+// `transcript` (áudio) e `docText`/`fileName` (PDF) são preenchidos pelo espião (probe-store.attachMedia): quando há,
+// a sonda enxerga o conteúdo real da mídia no lugar do rótulo "[áudio]"/"[documento]".
 export function contentText(content: unknown): string {
-  const c = (content ?? {}) as { text?: unknown; caption?: unknown; type?: unknown; image?: unknown; audio?: unknown; document?: unknown; video?: unknown }
-  const label = typeof c.type === 'string' ? MEDIA_LABEL[c.type] : undefined
-  const text = typeof c.text === 'string' ? c.text : typeof c.caption === 'string' ? c.caption : undefined
-  if (label && text) return `${label} ${text}`
-  if (text) return text
-  if (label) return label
+  const c = (content ?? {}) as {
+    text?: unknown; caption?: unknown; type?: unknown; image?: unknown; audio?: unknown; document?: unknown; video?: unknown
+    transcript?: unknown; docText?: unknown; imageText?: unknown; fileName?: unknown
+  }
+  const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined)
+  let label = typeof c.type === 'string' ? MEDIA_LABEL[c.type] : undefined
+  const fileName = str(c.fileName)
+  if (label === '[documento]' && fileName) label = `[documento: ${fileName}]`
+  const caption = str(c.text) ?? str(c.caption)
+  // Conteúdo lido da mídia: transcrição (áudio/vídeo), texto do PDF ou leitura da imagem.
+  const media = str(c.transcript) ?? str(c.docText) ?? str(c.imageText)
+  const parts = [label, caption, media].filter((p): p is string => Boolean(p))
+  if (parts.length) return parts.join(' ')
   if (c.image) return '[imagem]'
   if (c.audio) return '[áudio]'
   if (c.video) return '[vídeo]'

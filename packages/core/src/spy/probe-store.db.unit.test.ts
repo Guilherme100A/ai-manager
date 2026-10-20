@@ -1,5 +1,6 @@
 // Sondas com Postgres local: travas da criação, histórico da conversa e janela do remarketing.
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { eq } from 'drizzle-orm'
 import { auditLogs, contacts, createDb, createTempDatabase, messages, sessions, spyOffers, spyProbes, type Database, type TempDatabase } from '@wsm/db'
 import { parseDecision, ProbeAiDisabledError, SpyProbeModel } from './probe-model'
 import { contentText, SPY_CONSENT_SOURCE, SpyProbeError, SpyProbeStore } from './probe-store'
@@ -93,6 +94,19 @@ describe('SpyProbeStore', () => {
     now += 8 * 86_400_000
     expect(await store.listening(session.id, probe.phone)).toBeUndefined()
   })
+
+  it('attachMedia grava o conteúdo lido e o histórico passa a mostrá-lo', async () => {
+    const { session, offer, store } = await fixture()
+    const probe = await store.create({ offerId: offer.id, sessionId: session.id, createdBy: 'a' })
+    const [audio] = await db.insert(messages).values(
+      { sessionId: session.id, phone: probe.phone, direction: 'inbound', status: 'delivered', content: { type: 'audioMessage', pushName: 'Maria' }, createdAt: new Date(now + 2000) },
+    ).returning()
+    await store.attachMedia(audio!.id, { transcript: 'é só clicar no link e pagar 97' })
+    // Merge preserva o que já havia no content.
+    const [row] = await db.select().from(messages).where(eq(messages.id, audio!.id))
+    expect(row!.content).toMatchObject({ type: 'audioMessage', pushName: 'Maria', transcript: 'é só clicar no link e pagar 97' })
+    expect((await store.history(probe)).map((t) => t.texto)).toEqual(['[áudio] é só clicar no link e pagar 97'])
+  })
 })
 
 describe('parseDecision e contentText', () => {
@@ -109,6 +123,16 @@ describe('parseDecision e contentText', () => {
     expect(contentText({ image: { url: 'x' }, caption: 'c' })).toBe('c')
     expect(contentText({ audio: { url: 'x' } })).toBe('[áudio]')
     expect(contentText(null)).toBe('[mensagem]')
+  })
+
+  it('áudio/vídeo transcrito, PDF e imagem lidos entram no texto (mídia do Espião)', () => {
+    expect(contentText({ type: 'audioMessage', transcript: 'o curso custa 97 reais' })).toBe('[áudio] o curso custa 97 reais')
+    expect(contentText({ type: 'videoMessage', transcript: 'nesse vídeo eu te explico o método' })).toBe('[vídeo] nesse vídeo eu te explico o método')
+    expect(contentText({ type: 'documentMessage', docText: 'Plano Premium — R$ 497', fileName: 'oferta.pdf' })).toBe('[documento: oferta.pdf] Plano Premium — R$ 497')
+    expect(contentText({ type: 'documentMessage', docText: 'texto do pdf' })).toBe('[documento] texto do pdf')
+    expect(contentText({ type: 'imageMessage', imageText: 'OFERTA R$ 47 no pix' })).toBe('[imagem] OFERTA R$ 47 no pix')
+    // Sem conteúdo lido, continua só o rótulo.
+    expect(contentText({ type: 'audioMessage' })).toBe('[áudio]')
   })
 })
 

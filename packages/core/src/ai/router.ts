@@ -42,7 +42,7 @@ export interface AiAssistantOptions {
 /** Campos que, se mudarem, recriam o provedor e invalidam o cache de classificação. */
 function settingsFingerprint(s: ResolvedAiSettings): string {
   const c = s.config
-  return JSON.stringify([s.provider, s.enabled, c.apiKey ?? null, c.smallModel, c.largeModel, c.confidenceThreshold, c.maxTokens, c.timeoutMs])
+  return JSON.stringify([s.provider, s.enabled, c.apiKey ?? null, c.smallModel, c.largeModel, c.confidenceThreshold, c.maxTokens, c.timeoutMs, c.businessContext ?? null])
 }
 
 export class AiTimeoutError extends Error {
@@ -194,7 +194,7 @@ export class AiAssistant {
   }
 
   private async call(model: string, text: string): Promise<Classification> {
-    const { maxTokens, timeoutMs } = this.config
+    const { maxTokens, timeoutMs, businessContext } = this.config
     const controller = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
     const timeout = new Promise<never>((_, reject) => {
@@ -204,7 +204,7 @@ export class AiAssistant {
       }, timeoutMs)
     })
     try {
-      const out = await Promise.race([this.provider!.generate({ model, maxTokens, text, signal: controller.signal }), timeout])
+      const out = await Promise.race([this.provider!.generate({ model, maxTokens, text, ...(businessContext ? { businessContext } : {}), signal: controller.signal }), timeout])
       return validate(out)
     } finally {
       clearTimeout(timer)

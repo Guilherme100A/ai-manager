@@ -70,3 +70,8 @@ export const BRANCHES = [
 export function branchLabel(id: string): string {
   return id === 'objecao' ? 'Objeção' : id === 'sumiu' ? 'Sumiu' : 'Principal'
 }
+
+/** O fluxo já tem conteúdo para baixar (ZIP) quando uma sonda começou (sondando) ou terminou (completa). */
+export function canDownloadFlow(offerStatus: string): boolean {
+  return offerStatus === 'sondando' || offerStatus === 'completa'
+}

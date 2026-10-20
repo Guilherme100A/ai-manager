@@ -28,6 +28,7 @@ import {
   SessionLinkStore,
   SessionRouter,
   SendPipeline,
+  SpyMediaReader,
   SpyProbeModel,
   SpyProbeStore,
   toConnectionOptions,
@@ -37,6 +38,7 @@ import { createDb, runMigrations, sessions, messages, auditLogs, spyAds, spyOffe
 import { and, eq, gt, sql } from 'drizzle-orm'
 import { ConversationAutomation } from '../conversations/automation'
 import { SpyProbeRunner } from '../spy/probes'
+import { SpyMediaCapture } from '../spy/media'
 import { AutoReplyAutomation } from '../conversations/autoreply'
 import { RedisConversationStore } from '../conversations/store'
 import { attachAlerts } from '../alerts'
@@ -149,13 +151,15 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
       await stickerRound
     })
     // ---- transporte ------------------------------------------------------------------------
+    // Espião ligado (SPY_PROBES != off) também precisa do cache de mídia: as sondas baixam o áudio/PDF da oferta.
+    const spyEnabled = env.SPY_PROBES?.trim().toLowerCase() !== 'off'
     const fake = config.transport === 'fake' ? new FakeControl({ redis, prefix: config.queuePrefix, bootId, logger }) : undefined
     const baseFactory = opts.transportFactory ?? fake?.factory ?? createTransportFactory({
       kind: config.transport,
       disappearing: (id) => redisDisappearingStore(redis, id, config.queuePrefix),
       stickers,
-      // Integração CRM: guarda as últimas mídias recebidas (media.download) e a agenda (contacts.list).
-      ...(config.crmBridge ? { baileys: { mediaCacheSize: CRM_MEDIA_CACHE_SIZE, trackContacts: true } } : {}),
+      // Integração CRM / Espião: guarda as últimas mídias recebidas (media.download) e, no CRM, a agenda (contacts.list).
+      ...(config.crmBridge || spyEnabled ? { baileys: { mediaCacheSize: CRM_MEDIA_CACHE_SIZE, ...(config.crmBridge ? { trackContacts: true } : {}) } } : {}),
     })
     // Últimas mensagens dos grupos (contexto da postagem automática): gravadas ao chegar, por sessão.
     const groupHistory = redisGroupHistory(redis, config.queuePrefix)
@@ -314,10 +318,21 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
         return { ...(row?.pageName ? { pagina: row.pageName } : {}), ...(row?.data?.body ? { anuncio: row.data.body } : {}) }
       },
     })
+    // Espião: lê o áudio/PDF que a oferta manda (Whisper + bloco de documento da Anthropic) para a sonda ver o funil todo.
+    const spyMedia = spyProbes ? new SpyMediaCapture({
+      store: new SpyProbeStore(db),
+      reader: new SpyMediaReader(() => conversationSettings.resolve(),
+        env.SPY_OPENAI_KEY?.trim()
+          ? { apiKey: env.SPY_OPENAI_KEY.trim(), ...(env.SPY_WHISPER_MODEL?.trim() ? { model: env.SPY_WHISPER_MODEL.trim() } : {}) }
+          : undefined),
+      getTransport: (id) => (manager.isConnected(id) ? manager.getTransport(id) : undefined),
+      logger,
+    }) : undefined
     const ai = attachAi(manager, {
       db,
       logger,
       routeIncoming: (event) => sessionRouter.route(event),
+      ...(spyMedia ? { enrichMedia: (event) => spyMedia.capture(event) } : {}),
       // Resposta automática dos números de autoresposta não vira sugestão da IA assistiva.
       consumeConversation: async (id, phone, text) => (await conversations.handlesInbound(id, phone, text)) || autoReplyTargets.isTarget(phone) || Boolean(await spyProbes?.handlesInbound(id, phone)),
       // T19 — configuração dinâmica: tabela ai_settings (painel) com fallback no ambiente AI_*, relida a cada

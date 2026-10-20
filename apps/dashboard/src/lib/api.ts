@@ -105,6 +105,16 @@ export const api = {
   spyProbeMessages: (id: string) => request<{ items: SpyProbeTurn[] }>(`/api/spy/probes/${enc(id)}/messages`).then((r) => r.items),
   spyStartProbe: (offerId: string, sessionId: string, branch = 'principal') => request<SpyProbe>(`/api/spy/offers/${enc(offerId)}/probes`, { body: { sessionId, branch } }),
   spyStopProbe: (id: string) => request<SpyProbe>(`/api/spy/probes/${enc(id)}/stop`, { method: 'POST' }),
+  /** Baixa o pacote (ZIP) do fluxo da oferta. Resposta binária, por isso não passa pelo `request` (JSON). */
+  spyFlowZip: async (offerId: string): Promise<{ blob: Blob; filename: string }> => {
+    const token = getToken()
+    const res = await fetchImpl(`/api/spy/offers/${enc(offerId)}/flow.zip`, token ? { headers: { authorization: `Bearer ${token}` } } : undefined)
+    if (!res.ok) throw new ApiRequestError(res.status, `HTTP_${res.status}`, `HTTP ${res.status}`)
+    const match = /filename="?([^"]+)"?/.exec(res.headers.get('content-disposition') ?? '')
+    return { blob: await res.blob(), filename: match?.[1] ?? `funil-${offerId}.zip` }
+  },
+  /** Copia o funil pra IA do CRM (vira contexto das sugestões). */
+  spyCopyToCrm: (offerId: string) => request<{ ok: boolean; chars: number }>(`/api/spy/offers/${enc(offerId)}/copy-to-crm`, { method: 'POST' }),
   sessionLinks: () => request<{ items: SessionLink[] }>('/api/session-links').then((r) => r.items),
   sessionRouteRuns: () => request<{ items: SessionRouteRun[] }>('/api/session-links/runs').then((r) => r.items),
   createSessionLink: (input: Pick<SessionLink, 'sourceSessionId' | 'targetSessionId' | 'rules'>) =>

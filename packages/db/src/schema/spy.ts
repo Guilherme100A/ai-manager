@@ -1,6 +1,7 @@
 import { sql } from 'drizzle-orm'
 import { index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core'
-import { sessions } from './tables.js'
+import { bytea } from './bytea.js'
+import { messages, sessions } from './tables.js'
 
 // Espião de funil: cada link colado vira uma linha em spy_ads; o número achado agrupa os anúncios em spy_offers.
 export type SpyAdStatus = 'na_fila' | 'lendo' | 'achado' | 'sem_numero' | 'erro' | 'expandido'
@@ -104,4 +105,29 @@ export const spyProbes = pgTable('spy_probes', {
   uniqueIndex('spy_probes_active_branch_idx').on(t.phone, t.branch).where(sql`${t.status} = 'ativa'`),
   uniqueIndex('spy_probes_active_session_idx').on(t.phone, t.sessionId).where(sql`${t.status} = 'ativa'`),
   index('spy_probes_session_idx').on(t.sessionId, t.status),
+])
+
+export type SpyMediaKind = 'image' | 'document' | 'audio' | 'video'
+
+/**
+ * Arquivos de mídia que a oferta mandou numa sonda (imagem, PDF, áudio e vídeo), guardados para o pacote (ZIP) do
+ * fluxo. Os bytes ficam no banco porque worker (captura) e API (download do ZIP) não compartilham disco; o cache do
+ * transporte já expirou quando o usuário baixa. Áudio/vídeo também viram transcrição no texto da mensagem.
+ */
+export const spyMedia = pgTable('spy_media', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  offerId: uuid('offer_id').notNull().references(() => spyOffers.id, { onDelete: 'cascade' }),
+  probeId: uuid('probe_id').references(() => spyProbes.id, { onDelete: 'set null' }),
+  messageId: uuid('message_id').references(() => messages.id, { onDelete: 'set null' }),
+  branch: text('branch'),
+  kind: text('kind').$type<SpyMediaKind>().notNull(),
+  mime: text('mime').notNull(),
+  fileName: text('file_name'),
+  bytes: bytea('bytes').notNull(),
+  size: integer('size').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index('spy_media_offer_idx').on(t.offerId, t.createdAt),
+  // Uma mídia por mensagem (não duplica se a captura rodar de novo).
+  uniqueIndex('spy_media_message_idx').on(t.messageId).where(sql`${t.messageId} is not null`),
 ])

@@ -1,6 +1,8 @@
 // Rotas do Espião com Postgres local: fila de links, número manual, tentar de novo e remover.
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { createDb, createTempDatabase, messages, sessions, spyOffers, type Database, type TempDatabase } from '@wsm/db'
+import JSZip from 'jszip'
+import { AiSettingsService } from '@wsm/core'
+import { createDb, createTempDatabase, messages, sessions, spyMedia, spyOffers, spyProbes, type Database, type TempDatabase } from '@wsm/db'
 import { createApp } from '../app'
 import { captureLogger, fakeRedis } from '../test-utils'
 
@@ -76,5 +78,46 @@ describe('/api/spy', () => {
     expect(stop.status).toBe(200)
     expect(await stop.json()).toMatchObject({ status: 'parada', listenUntil: null })
     expect((await app.request(`/api/spy/probes/${probe.id}/stop`, { method: 'POST', headers: auth })).status).toBe(404)
+  })
+
+  it('baixa o fluxo em ZIP com resumo, conversa (transcrições) e as imagens/PDF', async () => {
+    const [offer] = await db.insert(spyOffers).values({ phone: '557991063916', pageName: 'Receitas Que Nutrem', status: 'completa' }).returning()
+    const [chip] = await db.insert(sessions).values({ name: 'chipZ', phone: '+5531900000009', status: 'STABLE' }).returning()
+    const [probe] = await db.insert(spyProbes).values({ offerId: offer!.id, sessionId: chip!.id, phone: '+557991063916', branch: 'principal', status: 'concluida', createdBy: 'a', summary: { preco: 'R$ 47', checkout: ['https://pay.x/abc'] } }).returning()
+    const [audio] = await db.insert(messages).values({ sessionId: chip!.id, phone: '+557991063916', direction: 'inbound', status: 'delivered', content: { type: 'audioMessage', transcript: 'é só pagar 47 no pix' } }).returning()
+    await db.insert(spyMedia).values({ offerId: offer!.id, probeId: probe!.id, messageId: audio!.id, branch: 'principal', kind: 'image', mime: 'image/jpeg', fileName: 'card.jpg', bytes: Buffer.from('fake-jpeg'), size: 9 })
+    await db.insert(spyMedia).values({ offerId: offer!.id, probeId: probe!.id, branch: 'principal', kind: 'audio', mime: 'audio/ogg; codecs=opus', bytes: Buffer.from('fake-ogg'), size: 8 })
+
+    const res = await app.request(`/api/spy/offers/${offer!.id}/flow.zip`, { headers: { authorization: 'Bearer spy-test' } })
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toBe('application/zip')
+    const zip = await JSZip.loadAsync(await res.arrayBuffer())
+    expect(Object.keys(zip.files)).toEqual(expect.arrayContaining(['resumo.md', 'roteiro.txt', 'conversa-principal.md']))
+    expect(await zip.file('resumo.md')!.async('string')).toContain('R$ 47')
+    expect(await zip.file('conversa-principal.md')!.async('string')).toContain('[áudio] é só pagar 47 no pix')
+    const mediaPaths = Object.keys(zip.files).filter((p) => p.startsWith('midias/') && !zip.files[p]!.dir)
+    const imgPath = mediaPaths.find((p) => p.endsWith('card.jpg'))
+    expect(imgPath).toBeTruthy()
+    expect(await zip.file(imgPath!)!.async('string')).toBe('fake-jpeg')
+    const audioPath = mediaPaths.find((p) => p.endsWith('.ogg'))
+    expect(audioPath).toBeTruthy()
+    expect(await zip.file(audioPath!)!.async('string')).toBe('fake-ogg')
+
+    expect((await app.request('/api/spy/offers/00000000-0000-0000-0000-000000000000/flow.zip', { headers: { authorization: 'Bearer spy-test' } })).status).toBe(404)
+  })
+
+  it('copia o fluxo pra IA do CRM (vira contexto do negócio)', async () => {
+    const [offer] = await db.insert(spyOffers).values({ phone: '558781794012', pageName: 'Delícias da Mih', status: 'completa' }).returning()
+    const [chip] = await db.insert(sessions).values({ name: 'chipC', phone: '+5531900000010', status: 'STABLE' }).returning()
+    await db.insert(spyProbes).values({ offerId: offer!.id, sessionId: chip!.id, phone: '+558781794012', branch: 'principal', status: 'concluida', createdBy: 'a', summary: { preco: 'R$ 37', checkout: ['https://pay.x/mih'] } }).returning()
+
+    const res = await app.request(`/api/spy/offers/${offer!.id}/copy-to-crm`, { method: 'POST', headers: auth })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ ok: true })
+
+    const settings = await new AiSettingsService({ db, env: {} }).resolve()
+    expect(settings.config.businessContext).toContain('R$ 37')
+
+    expect((await app.request('/api/spy/offers/00000000-0000-0000-0000-000000000000/copy-to-crm', { method: 'POST', headers: auth })).status).toBe(404)
   })
 })

@@ -12,6 +12,8 @@ export interface AiConfig {
   timeoutMs: number
   /** Chave do provedor (AI_PROVIDER_API_KEY). Sem chave, só o fallback determinístico. */
   apiKey: string | undefined
+  /** Contexto do negócio/funil (AI_BUSINESS_CONTEXT ou copiado do Espião) injetado no prompt das sugestões. */
+  businessContext?: string
 }
 
 export const DEFAULT_AI_CONFIG: Readonly<Omit<AiConfig, 'apiKey'>> = Object.freeze({
@@ -38,6 +40,7 @@ export function aiConfigFromEnv(env: Record<string, string | undefined> = proces
     maxTokens: Math.floor(num(env.AI_MAX_TOKENS, DEFAULT_AI_CONFIG.maxTokens, (n) => n >= 1)),
     timeoutMs: num(env.AI_TIMEOUT_MS, DEFAULT_AI_CONFIG.timeoutMs, (n) => n > 0),
     apiKey: str(env.AI_PROVIDER_API_KEY),
+    businessContext: str(env.AI_BUSINESS_CONTEXT),
   }
 }
 

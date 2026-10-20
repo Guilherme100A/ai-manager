@@ -1,8 +1,10 @@
 // Espião de funil: links de anúncios entram na fila; o SpyRunner (server.ts) acha o WhatsApp de cada oferta.
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { SpyProbeError, SpyProbeStore, SpyStore, normalizePhone } from '@wsm/core'
-import { SPY_BRANCHES } from '@wsm/db'
+import JSZip from 'jszip'
+import { asc, eq } from 'drizzle-orm'
+import { AiSettingsService, buildSpyFlow, mediaZipPath, renderBranchConversation, renderFlowPlaybook, renderFlowSummary, SpyProbeError, SpyProbeStore, SpyStore, normalizePhone } from '@wsm/core'
+import { spyMedia, SPY_BRANCHES } from '@wsm/db'
 import { ApiError, type ErrorCode } from '../errors'
 import { setAudit } from '../middleware/audit'
 import type { AppDeps, AppEnv } from '../types'
@@ -52,6 +54,30 @@ export function spyRoutes(deps: Pick<AppDeps, 'db'>) {
       const probe = await probes.get(c.req.valid('param').id)
       if (!probe) throw new ApiError('NOT_FOUND', 'Sonda não encontrada')
       return c.json({ items: (await probes.history(probe)).map((t) => ({ de: t.de, texto: t.texto, at: t.at.toISOString() })) })
+    })
+    // Pacote (ZIP) do fluxo de uma oferta: resumo, roteiro, a conversa de cada ramificação e as imagens/PDFs.
+    .get('/api/spy/offers/:id/flow.zip', validate('param', adParam), async (c) => {
+      const flow = await buildSpyFlow(deps.db, c.req.valid('param').id)
+      if (!flow) throw new ApiError('NOT_FOUND', 'Oferta não encontrada')
+      const zip = new JSZip()
+      zip.file('resumo.md', renderFlowSummary(flow))
+      zip.file('roteiro.txt', renderFlowPlaybook(flow))
+      for (const b of flow.branches) zip.file(`conversa-${b.branch}.md`, renderBranchConversation(flow, b))
+      const files = await deps.db.select().from(spyMedia).where(eq(spyMedia.offerId, flow.offerId)).orderBy(asc(spyMedia.createdAt))
+      files.forEach((m, i) => zip.file(mediaZipPath({ id: m.id, probeId: m.probeId, branch: m.branch, kind: m.kind, mime: m.mime, fileName: m.fileName, size: m.size }, i + 1), m.bytes))
+      const buf = await zip.generateAsync({ type: 'nodebuffer' })
+      const slug = (flow.pageName ?? flow.phone).replace(/[^\w.-]+/g, '-').slice(0, 60) || flow.phone
+      c.header('Content-Type', 'application/zip')
+      c.header('Content-Disposition', `attachment; filename="funil-${slug}.zip"`)
+      return c.body(new Uint8Array(buf))
+    })
+    // Copia o fluxo pra IA do CRM: salva o roteiro como contexto do negócio; as sugestões passam a seguir o funil.
+    .post('/api/spy/offers/:id/copy-to-crm', validate('param', adParam), async (c) => {
+      const flow = await buildSpyFlow(deps.db, c.req.valid('param').id)
+      if (!flow) throw new ApiError('NOT_FOUND', 'Oferta não encontrada')
+      const { chars } = await new AiSettingsService({ db: deps.db }).setBusinessContext(renderFlowPlaybook(flow))
+      setAudit(c, { action: 'spy.copy_to_crm', targetType: 'spy_offer', targetId: flow.offerId, detail: { chars } })
+      return c.json({ ok: true, chars })
     })
     .post('/api/spy/offers/:id/probes', validate('param', adParam), validate('json', startProbeSchema), async (c) => {
       try {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { SpyAd } from '../lib/types'
-import { adLibraryUrl, formatPhone, parseLinks, probeStatusLabel, rowTitle, summarize } from './Spy.logic'
+import { adLibraryUrl, canDownloadFlow, formatPhone, parseLinks, probeStatusLabel, rowTitle, summarize } from './Spy.logic'
 
 describe('Spy.logic', () => {
   it('um link por linha, sem vazios nem repetidos', () => {
@@ -39,5 +39,13 @@ describe('probeStatusLabel', () => {
     expect(probeStatusLabel({ status: 'ativa', replyDueAt: null, listenUntil: null }, now)).toBe('Esperando a oferta')
     expect(probeStatusLabel({ status: 'concluida', replyDueAt: null, listenUntil: '2026-10-27T12:00:00Z' }, now)).toBe('Concluída · ouvindo remarketing')
     expect(probeStatusLabel({ status: 'parada', replyDueAt: null, listenUntil: null }, now)).toBe('Parada')
+  })
+})
+
+describe('canDownloadFlow', () => {
+  it('libera o ZIP quando a oferta está sondando ou completa', () => {
+    expect(canDownloadFlow('sondando')).toBe(true)
+    expect(canDownloadFlow('completa')).toBe(true)
+    expect(canDownloadFlow('nova')).toBe(false)
   })
 })

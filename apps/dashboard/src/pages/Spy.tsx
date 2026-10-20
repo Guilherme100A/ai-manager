@@ -3,7 +3,7 @@ import { Card, ErrorText, PageHeader } from '../components/ui'
 import { api } from '../lib/api'
 import { POLL, usePoll } from '../lib/hooks'
 import type { SpyAd, SpyEnqueueResult, SpyProbe } from '../lib/types'
-import { adLibraryUrl, BRANCHES, branchLabel, formatPhone, parseLinks, PROBES_PER_DAY, probeStatusLabel, rowTitle, SENDABLE, STATUS_LABEL, summarize, VIA_LABEL } from './Spy.logic'
+import { adLibraryUrl, BRANCHES, branchLabel, canDownloadFlow, formatPhone, parseLinks, PROBES_PER_DAY, probeStatusLabel, rowTitle, SENDABLE, STATUS_LABEL, summarize, VIA_LABEL } from './Spy.logic'
 
 export function Spy() {
   const ads = usePoll(() => api.spyAds(), POLL.list)
@@ -19,6 +19,7 @@ export function Spy() {
   const [error, setError] = useState<unknown>()
   const [last, setLast] = useState<SpyEnqueueResult>()
   const [manual, setManual] = useState<Record<string, string>>({})
+  const [copied, setCopied] = useState<string>()
   const links = parseLinks(text)
   const rows = ads.data?.filter((a) => a.status !== 'expandido') ?? []
   const searches = ads.data?.filter((a) => a.status === 'expandido') ?? []
@@ -30,6 +31,34 @@ export function Spy() {
     try { await action(); ads.reload(); offers.reload(); probes.reload() }
     catch (err) { setError(err) }
     finally { setBusy(false) }
+  }
+  async function downloadFlow(offerId: string) {
+    setError(undefined)
+    try {
+      const { blob, filename } = await api.spyFlowZip(offerId)
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      setError(err)
+    }
+  }
+  async function copyToCrm(offerId: string) {
+    setError(undefined)
+    setBusy(true)
+    try {
+      await api.spyCopyToCrm(offerId)
+      setCopied(offerId)
+    } catch (err) {
+      setError(err)
+    } finally {
+      setBusy(false)
+    }
   }
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -85,6 +114,11 @@ export function Spy() {
                     {free.map((b) => <option key={b.id} value={b.id}>{b.label}</option>)}
                   </select>
                   <button type="button" className="secondary btn-sm" disabled={busy || !chip[o.id]} onClick={() => mutate(() => api.spyStartProbe(o.id, chip[o.id]!, pick))}>Sondar</button>
+                </div>}
+                {canDownloadFlow(o.status) && <div className="row">
+                  <button type="button" className="secondary btn-sm" data-testid="spy-download-flow" onClick={() => downloadFlow(o.id)}>Baixar fluxo (ZIP)</button>
+                  <button type="button" className="secondary btn-sm" data-testid="spy-copy-crm" disabled={busy} onClick={() => copyToCrm(o.id)}>Copiar pro CRM</button>
+                  {copied === o.id && <span className="hint">✓ funil na IA do CRM</span>}
                 </div>}
               </td>
             </tr>
