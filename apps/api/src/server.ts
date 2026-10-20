@@ -34,11 +34,13 @@ const server = serve({ fetch: app.fetch, port: config.PORT, hostname: config.HOS
   logger.info({ port: info.port, worker_bridge: Boolean(bridge) }, 'api listening')
 })
 
-// Espião de funil: um link por vez, devagar (Facebook e buscador sem login).
+// Espião de funil: um link por vez, devagar (Facebook e buscador sem login). Com SPY_PROXY_SESSION, Facebook
+// e DuckDuckGo (que barram IP de servidor) saem pelo proxy daquele chip; o Serper sai direto.
+const spyProxy = config.SPY_PROXY_SESSION ? sessionProxyFetch(db, config.SPY_PROXY_SESSION) : undefined
 const spy = config.SPY_RUNNER === 'on'
   ? new SpyRunner({ store: new SpyStore(db), finder: new SpyFinder(new SpyHttp({
     serperKey: config.SPY_SERPER_KEY,
-    ...(config.SPY_PROXY_SESSION ? { facebookFetch: sessionProxyFetch(db, config.SPY_PROXY_SESSION) } : {}),
+    ...(spyProxy ? { facebookFetch: spyProxy, searchFetch: spyProxy } : {}),
   })), logger })
   : undefined
 spy?.start()

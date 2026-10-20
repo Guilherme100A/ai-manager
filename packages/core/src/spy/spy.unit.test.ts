@@ -112,6 +112,11 @@ describe('SpyHttp', () => {
     await http.search('site:facebook.com 2')
     expect(proxied).toEqual(['https://www.facebook.com/permalink.php?story_fbid=1&id=2'])
     expect(direct).toEqual(['https://html.duckduckgo.com/html/?q=site%3Afacebook.com%202'])
+
+    const searched: string[] = []
+    const viaProxy = new SpyHttp({ fetch: async (url) => { direct.push(url); return new Response('') }, searchFetch: async (url) => { searched.push(url); return new Response('') }, minIntervalMs: 0, sleep: async () => undefined })
+    await viaProxy.search('q')
+    expect(searched).toEqual(['https://html.duckduckgo.com/html/?q=q'])
   })
 
   it('conexão que cai no meio é repetida uma vez; a segunda queda propaga', async () => {

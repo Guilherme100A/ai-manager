@@ -14,6 +14,8 @@ export interface SpyHttpOptions {
   serperKey?: string
   /** Fetch só para a Facebook (ex.: pelo proxy residencial de um chip); o buscador continua direto. */
   facebookFetch?: FetchFn
+  /** Fetch da busca no DuckDuckGo (que bloqueia IP de datacenter); o Serper sempre sai direto. */
+  searchFetch?: FetchFn
 }
 
 export interface SpyPage {
@@ -48,6 +50,7 @@ const MAX_REDIRECTS = 5
 export class SpyHttp {
   private readonly fetchFn: FetchFn
   private readonly facebookFetch: FetchFn
+  private readonly searchFetch: FetchFn
   private readonly minIntervalMs: number
   private readonly sleep: (ms: number) => Promise<void>
   private readonly now: () => number
@@ -59,6 +62,7 @@ export class SpyHttp {
   constructor(options: SpyHttpOptions = {}) {
     this.fetchFn = options.fetch ?? ((input, init) => fetch(input, init))
     this.facebookFetch = options.facebookFetch ?? this.fetchFn
+    this.searchFetch = options.searchFetch ?? this.fetchFn
     this.minIntervalMs = options.minIntervalMs ?? 2_000
     this.sleep = options.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)))
     this.now = options.now ?? Date.now
@@ -132,8 +136,8 @@ export class SpyHttp {
       ...opts.headers,
     }
     if (useJar && this.jar.size > 0) headers.cookie = [...this.jar].map(([k, v]) => `${k}=${v}`).join('; ')
-    const viaFacebook = /(^|\.)facebook\.com$/.test(host) ? this.facebookFetch : this.fetchFn
-    const res = await viaFacebook(url, { method: opts.method ?? 'GET', headers, redirect: 'manual', signal: AbortSignal.timeout(30_000) })
+    const via = /(^|\.)facebook\.com$/.test(host) ? this.facebookFetch : /(^|\.)duckduckgo\.com$/.test(host) ? this.searchFetch : this.fetchFn
+    const res = await via(url, { method: opts.method ?? 'GET', headers, redirect: 'manual', signal: AbortSignal.timeout(30_000) })
     if (useJar) {
       for (const cookie of res.headers.getSetCookie?.() ?? []) {
         const [pair] = cookie.split(';')
