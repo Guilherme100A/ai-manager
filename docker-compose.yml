@@ -102,6 +102,9 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       AUTH_SECRET: ${AUTH_SECRET:-}
       AUTH_SESSION_TTL_MS: ${AUTH_SESSION_TTL_MS:-}
+      # Espião de funil (fila de links de anúncios); a chave do Serper deixa a busca de posts confiável.
+      SPY_RUNNER: ${SPY_RUNNER:-on}
+      SPY_SERPER_KEY: ${SPY_SERPER_KEY:-}
     ports:
       - '127.0.0.1:${API_HOST_PORT:-3000}:3000'
     depends_on:

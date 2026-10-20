@@ -20,6 +20,7 @@ import { sessionLinksRoutes } from './session-links'
 import { reportsRoutes } from './reports'
 import { autoReplyRoutes } from './autoreply'
 import { crmSsoRoutes } from './crm-sso'
+import { spyRoutes } from './spy'
 
 export function registerRoutes(app: Hono<AppEnv>, deps: AppDeps) {
   app.route('/', healthRoutes(deps))
@@ -48,4 +49,6 @@ export function registerRoutes(app: Hono<AppEnv>, deps: AppDeps) {
   app.route('/', autoReplyRoutes(deps))
   // Integração CRM: SSO do painel para o CRM no iframe (501 sem CRM_SSO_SECRET)
   app.route('/', crmSsoRoutes(deps))
+  // Espião de funil: links de anúncios → WhatsApp da oferta
+  app.route('/', spyRoutes(deps))
 }

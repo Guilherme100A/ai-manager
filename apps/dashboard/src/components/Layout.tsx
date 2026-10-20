@@ -2,7 +2,7 @@ import { useEffect, useState, useSyncExternalStore, type ReactNode } from 'react
 import { signOut } from '../lib/signout'
 import { navigate, type Route } from '../lib/router'
 import { getTheme, subscribeTheme, toggleTheme } from '../lib/theme'
-import { IconBell, IconBriefcase, IconClose, IconGroups, IconHome, IconLogout, IconMenu, IconMoon, IconPhone, IconSpark, IconSun, IconUsers, Logo } from './icons'
+import { IconBell, IconBriefcase, IconClose, IconGroups, IconHome, IconLogout, IconMenu, IconMoon, IconPhone, IconSearch, IconSpark, IconSun, IconUsers, Logo } from './icons'
 
 const LINKS: Array<{ route: Route['name']; href: string; label: string; testId: string; icon: () => ReactNode }> = [
   { route: 'home', href: '#/', label: 'Início', testId: 'nav-home', icon: IconHome },
@@ -14,6 +14,7 @@ const LINKS: Array<{ route: Route['name']; href: string; label: string; testId: 
   { route: 'autoreply', href: '#/autoreply', label: 'Autoresposta', testId: 'nav-autoreply', icon: IconUsers },
   { route: 'alerts', href: '#/alerts', label: 'Alertas', testId: 'nav-alerts', icon: IconBell },
   { route: 'ai', href: '#/ai', label: 'IA / Modelo LLM', testId: 'nav-ai', icon: IconSpark },
+  { route: 'spy', href: '#/spy', label: 'Espião', testId: 'nav-spy', icon: IconSearch },
   { route: 'crm', href: '#/crm', label: 'CRM', testId: 'nav-crm', icon: IconBriefcase },
 ]
 

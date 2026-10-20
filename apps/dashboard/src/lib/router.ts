@@ -13,6 +13,8 @@ export type Route =
   | { name: 'autoreply' }
   | { name: 'ai' }
   | { name: 'session-links' }
+  /** Espião de funil: links de anúncios → WhatsApp da oferta. */
+  | { name: 'spy' }
   /** CRM (integração): o CRM do mesmo origin num iframe, com SSO do painel. */
   | { name: 'crm' }
   | { name: 'not-found'; path: string }
@@ -38,6 +40,7 @@ export function parseHash(hash: string): Route {
     case 'autoreply':
     case 'ai':
     case 'session-links':
+    case 'spy':
     case 'crm':
       return second ? { name: 'not-found', path } : { name: head }
     default:

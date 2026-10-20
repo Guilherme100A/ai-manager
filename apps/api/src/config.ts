@@ -21,6 +21,9 @@ const schema = z.object({
   AUTH_SESSION_TTL_MS: z.preprocess(emptyAsUndefined, z.coerce.number().int().positive().optional()),
   // T17 — confiar em X-Forwarded-For (IP do limite de login) só atrás de um proxy que sobrescreve o header.
   TRUST_PROXY: z.preprocess(emptyAsUndefined, z.enum(['true', 'false', '1', '0', 'yes', 'no']).optional()),
+  // Espião de funil: fila de links processada neste processo (off desliga). Com a chave do Serper a busca de posts é confiável.
+  SPY_RUNNER: z.preprocess(emptyAsUndefined, z.enum(['on', 'off']).default('on')),
+  SPY_SERPER_KEY: z.preprocess(emptyAsUndefined, z.string().min(1).optional()),
 }).refine((c) => !c.WORKER_INTERNAL_URL || c.INTERNAL_TOKEN, { path: ['INTERNAL_TOKEN'], message: 'required with WORKER_INTERNAL_URL' })
 
 export type ApiConfig = z.output<typeof schema>

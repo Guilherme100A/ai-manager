@@ -66,6 +66,13 @@ export const IconSpark = () => (
   </Svg>
 )
 
+export const IconSearch = () => (
+  <Svg>
+    <circle cx="11" cy="11" r="7" />
+    <path d="m20 20-3.5-3.5" />
+  </Svg>
+)
+
 export const IconBriefcase = () => (
   <Svg>
     <rect x="3" y="7" width="18" height="13" rx="2" />

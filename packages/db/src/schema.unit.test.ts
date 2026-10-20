@@ -42,6 +42,9 @@ const TABLES = [
   'session_route_runs',
   // migration 0006_proxy_settings
   'proxy_settings',
+  // migration 0009_spy (Espião de funil)
+  'spy_offers',
+  'spy_ads',
 ]
 
 /** Quantidade de migrations declaradas no journal do drizzle (cresce a cada migration nova). */

@@ -17,6 +17,9 @@ import type {
   Session,
   SessionLink,
   SessionRouteRun,
+  SpyAd,
+  SpyEnqueueResult,
+  SpyOffer,
   SessionHealth,
   Webhook,
   WebhookChannel,
@@ -90,6 +93,12 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
 const enc = encodeURIComponent
 
 export const api = {
+  spyAds: () => request<{ items: SpyAd[] }>('/api/spy/ads').then((r) => r.items),
+  spyOffers: () => request<{ items: SpyOffer[] }>('/api/spy/offers').then((r) => r.items),
+  spyEnqueue: (links: string[]) => request<SpyEnqueueResult>('/api/spy/ads', { body: { links } }),
+  spyRetry: (id: string) => request<SpyAd>(`/api/spy/ads/${enc(id)}/retry`, { method: 'POST' }),
+  spySetPhone: (id: string, phone: string) => request<SpyAd>(`/api/spy/ads/${enc(id)}/phone`, { method: 'PUT', body: { phone } }),
+  spyDelete: (id: string) => request<void>(`/api/spy/ads/${enc(id)}`, { method: 'DELETE' }),
   sessionLinks: () => request<{ items: SessionLink[] }>('/api/session-links').then((r) => r.items),
   sessionRouteRuns: () => request<{ items: SessionRouteRun[] }>('/api/session-links/runs').then((r) => r.items),
   createSessionLink: (input: Pick<SessionLink, 'sourceSessionId' | 'targetSessionId' | 'rules'>) =>

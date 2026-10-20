@@ -1664,3 +1664,15 @@ legend {
     display: inline;
   }
 }
+
+/* ---- Espião ----------------------------------------------------------- */
+.spy-table .hint {
+  display: block;
+  max-width: 28rem;
+  overflow-wrap: anywhere;
+}
+
+.spy-table input {
+  width: 100%;
+  min-width: 10rem;
+}

@@ -222,3 +222,40 @@ export interface AutoReplyTarget {
   replies24h: number
   lastSentAt: string | null
 }
+
+/** Espião de funil: um link colado (anúncio, busca da Biblioteca, post ou wa.me) e o número achado. */
+export type SpyAdStatus = 'na_fila' | 'lendo' | 'achado' | 'sem_numero' | 'erro' | 'expandido'
+export type SpyFoundVia = 'link' | 'texto' | 'post' | 'pagina' | 'manual'
+
+export interface SpyAd {
+  id: string
+  inputUrl: string
+  parentId: string | null
+  adArchiveId: string | null
+  pageId: string | null
+  pageName: string | null
+  status: SpyAdStatus
+  phone: string | null
+  foundVia: SpyFoundVia | null
+  evidenceUrl: string | null
+  error: string | null
+  data: { body?: string; title?: string; ctaType?: string; profileUri?: string; candidates?: string[] }
+  offerId: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface SpyOffer {
+  id: string
+  phone: string
+  pageId: string | null
+  pageName: string | null
+  status: string
+  ads: number
+  createdAt: string
+}
+
+export interface SpyEnqueueResult {
+  created: SpyAd[]
+  skipped: Array<{ link: string; reason: string }>
+}

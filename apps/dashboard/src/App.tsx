@@ -17,6 +17,7 @@ import { NewSession } from './pages/NewSession'
 import { SessionDetail } from './pages/SessionDetail'
 import { Sessions } from './pages/Sessions'
 import { SessionLinks } from './pages/SessionLinks'
+import { Spy } from './pages/Spy'
 
 function Page({ route }: { route: Route }) {
   switch (route.name) {
@@ -26,6 +27,8 @@ function Page({ route }: { route: Route }) {
       return <Sessions />
     case 'session-links':
       return <SessionLinks />
+    case 'spy':
+      return <Spy />
     case 'new-session':
       return <NewSession />
     case 'session':
