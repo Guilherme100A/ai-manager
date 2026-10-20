@@ -106,7 +106,8 @@ export class SpyHttp {
     }
     const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`
     const res = await this.raw(url, { cookies: false })
-    return { provider: 'duckduckgo', blocked: res.status === 202 || /anomaly-modal|challenge-form/.test(res.text), urls: resultUrls(res.text) }
+    // 202 = tela anti-robô; outro status fora de 200 (ex.: 502 "dial failed" do proxy) também é busca que não aconteceu.
+    return { provider: 'duckduckgo', blocked: res.status !== 200 || /anomaly-modal|challenge-form/.test(res.text), urls: resultUrls(res.text) }
   }
 
   /** Uma nova tentativa quando a conexão cai no meio (`fetch failed`, `terminated`); timeout e HTTP de erro não repetem. */

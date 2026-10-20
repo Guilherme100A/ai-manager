@@ -135,6 +135,8 @@ describe('SpyHttp', () => {
     ])
     expect(await fastHttp(fn, 'k').search('q')).toEqual({ provider: 'serper', blocked: false, urls: ['https://www.facebook.com/p/videos/1/'] })
     expect(await fastHttp(fn).search('q')).toMatchObject({ provider: 'duckduckgo', blocked: true, urls: [] })
+    const proxyDown = fakeFetch([[/duckduckgo/, html('dial failed', 502)]])
+    expect(await fastHttp(proxyDown.fn).search('q')).toMatchObject({ blocked: true })
   })
 })
 
