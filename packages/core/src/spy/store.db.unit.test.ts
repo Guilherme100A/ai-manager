@@ -91,6 +91,42 @@ describe('SpyStore + SpyRunner', () => {
     expect(await store.remove(b!.id)).toBe(true)
   })
 
+  it('buscador bloqueado: volta para a fila com horário, tenta de novo sozinho e desiste depois de 4 tentativas', async () => {
+    // Sem chave do Serper: DuckDuckGo responde a tela anti-robô (202).
+    const fetch: FetchFn = async (url) => {
+      if (/ads\/library\/\?id=666/.test(url)) return new Response(ad('666', '60', '6150006', 'https://api.whatsapp.com/send'))
+      if (/duckduckgo/.test(url)) return new Response('anomaly-modal', { status: 202 })
+      return new Response('', { status: 404 })
+    }
+    const clock = Date.parse('2026-10-20T12:00:00Z')
+    const store = new SpyStore(db)
+    const runner = new SpyRunner({ store, finder: new SpyFinder(new SpyHttp({ fetch, minIntervalMs: 0, sleep: async () => undefined })), now: () => clock, retryDelayMs: 45 * 60_000 })
+    const { created } = await store.enqueue(['https://www.facebook.com/ads/library/?id=666'], 'admin')
+    const id = created[0]!.id
+    const row = async () => (await store.listAds()).find((r) => r.id === id)!
+
+    expect(await runner.tick()).toBe(true)
+    expect(await row()).toMatchObject({ status: 'na_fila', attempts: 1 })
+    expect((await row()).retryAt!.toISOString()).toBe('2026-10-20T12:45:00.000Z')
+    expect((await row()).error).toMatch(/bloqueou.*nova tentativa automática às 09:45 \(1\/4\)/)
+
+    // antes do horário a linha não sai da fila
+    await db.update(spyAds).set({ retryAt: new Date(Date.now() + 60_000) })
+    expect(await runner.tick()).toBe(false)
+
+    // "Tentar de novo" na tela adianta a tentativa
+    expect(await store.retry(id)).toMatchObject({ status: 'na_fila', retryAt: null })
+    for (let i = 2; i <= 3; i++) {
+      expect(await runner.tick()).toBe(true)
+      expect(await row()).toMatchObject({ status: 'na_fila', attempts: i })
+      await db.update(spyAds).set({ retryAt: new Date(Date.now() - 1000) })
+    }
+    expect(await runner.tick()).toBe(true) // 4ª e última tentativa: desiste
+    expect(await row()).toMatchObject({ status: 'sem_numero', attempts: 4, retryAt: null })
+    expect((await row()).error).toMatch(/desisti depois de 4 tentativas/)
+    expect(await runner.tick()).toBe(false)
+  })
+
   it('linha presa em "lendo" volta para a fila', async () => {
     const store = new SpyStore(db)
     await store.enqueue(['wa.me/5511999998888'], 'admin')

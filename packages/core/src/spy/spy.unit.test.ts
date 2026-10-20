@@ -183,7 +183,7 @@ describe('SpyFinder', () => {
     ])
     const r = await new SpyFinder(fastHttp(fn)).findForPost('https://www.facebook.com/61577928417447/videos/1738211550515405/')
     expect(r.phone).toBeUndefined()
-    expect(r.reason).toMatch(/pediu login.*SPY_PROXY_URL/)
+    expect(r.reason).toMatch(/pediu login.*SPY_PROXY_SESSION/)
   })
 
   it('loadAd acha o anúncio pelo id na página da Biblioteca', async () => {

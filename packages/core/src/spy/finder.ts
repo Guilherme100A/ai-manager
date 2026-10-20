@@ -14,6 +14,8 @@ export interface FindResult {
   reason?: string
   /** Posts/vídeos abertos na etapa 3. */
   candidates: string[]
+  /** A busca dos posts não aconteceu (buscador bloqueou ou caiu): vale tentar de novo mais tarde. */
+  searchBlocked?: boolean
 }
 
 export interface SpyFinderOptions {
@@ -80,15 +82,17 @@ export class SpyFinder {
       const phone = aboutPagePhone((await this.http.facebook(about)).text)
       if (phone) return { phone, foundVia: 'pagina', evidenceUrl: about, candidates }
     }
+    const searchBlocked = blocked && candidates.length === 0
     return {
       reason: loginWall
-        ? `a Facebook pediu login para abrir ${candidates.length} post(s) a partir deste servidor; configure um proxy residencial (SPY_PROXY_URL)`
+        ? `a Facebook pediu login para abrir ${candidates.length} post(s) a partir deste servidor; configure um proxy residencial (SPY_PROXY_SESSION)`
         : candidates.length > 0
         ? `nenhum dos ${candidates.length} posts do perfil mostrou o WhatsApp sem login, e a página Sobre não tem número`
-        : blocked
-          ? 'o buscador bloqueou a busca (anti-robô); configure a chave do Serper ou tente de novo mais tarde'
+        : searchBlocked
+          ? 'o buscador bloqueou a busca (anti-robô)'
           : 'o buscador não achou posts do perfil e a página Sobre não tem número',
       candidates,
+      ...(searchBlocked ? { searchBlocked: true } : {}),
     }
   }
 
@@ -103,7 +107,7 @@ export class SpyFinder {
       if (phone) return { phone, foundVia: 'post', evidenceUrl: target, candidates: urls }
     }
     return {
-      reason: loginWall ? 'a Facebook pediu login para abrir o post a partir deste servidor; configure um proxy residencial (SPY_PROXY_URL)' : 'o post não tem botão de WhatsApp visível sem login',
+      reason: loginWall ? 'a Facebook pediu login para abrir o post a partir deste servidor; configure um proxy residencial (SPY_PROXY_SESSION)' : 'o post não tem botão de WhatsApp visível sem login',
       candidates: urls,
     }
   }

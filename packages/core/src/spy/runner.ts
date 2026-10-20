@@ -15,6 +15,10 @@ export interface SpyRunnerOptions {
   logger?: SpyRunnerLogger
   /** Espera quando a fila está vazia (ms). */
   idleMs?: number
+  /** Buscador bloqueado: quantas novas tentativas automáticas e com que intervalo. */
+  maxRetries?: number
+  retryDelayMs?: number
+  now?: () => number
 }
 
 export class SpyRunner {
@@ -22,7 +26,15 @@ export class SpyRunner {
   private stopped = true
   private running: Promise<void> | undefined
 
-  constructor(private readonly options: SpyRunnerOptions) {}
+  private readonly maxRetries: number
+  private readonly retryDelayMs: number
+  private readonly now: () => number
+
+  constructor(private readonly options: SpyRunnerOptions) {
+    this.maxRetries = options.maxRetries ?? 3
+    this.retryDelayMs = options.retryDelayMs ?? 45 * 60_000
+    this.now = options.now ?? Date.now
+  }
 
   start() {
     if (!this.stopped) return
@@ -70,8 +82,13 @@ export class SpyRunner {
     if (result.phone && result.foundVia) {
       await store.found(row.id, { phone: result.phone, foundVia: result.foundVia, evidenceUrl: result.evidenceUrl, candidates: result.candidates })
       this.options.logger?.info({ id: row.id, via: result.foundVia }, 'spy: número achado')
+    } else if (result.searchBlocked && row.attempts <= this.maxRetries) {
+      // Bloqueio do buscador é passageiro: tenta de novo sozinho mais tarde, sem gastar nada.
+      const at = new Date(this.now() + this.retryDelayMs)
+      const hh = at.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' })
+      await store.retryLater(row.id, `${result.reason ?? 'buscador bloqueou'}; nova tentativa automática às ${hh} (${row.attempts}/${this.maxRetries + 1})`, at)
     } else {
-      await store.notFound(row.id, result.reason ?? 'número não encontrado', result.candidates)
+      await store.notFound(row.id, result.searchBlocked ? `${result.reason}; desisti depois de ${row.attempts} tentativas (a chave do Serper resolve)` : result.reason ?? 'número não encontrado', result.candidates)
     }
   }
 

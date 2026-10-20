@@ -45,6 +45,8 @@ export const spyAds = pgTable('spy_ads', {
   data: jsonb('data').$type<SpyAdData>().notNull().default({}),
   offerId: uuid('offer_id').references(() => spyOffers.id, { onDelete: 'set null' }),
   attempts: integer('attempts').notNull().default(0),
+  /** Buscador bloqueou: a linha volta para a fila, mas só sai dela a partir deste horário. */
+  retryAt: timestamp('retry_at', { withTimezone: true }),
   createdBy: text('created_by').notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),

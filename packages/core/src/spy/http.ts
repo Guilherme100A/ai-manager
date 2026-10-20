@@ -98,7 +98,7 @@ export class SpyHttp {
     if (this.serperKey) {
       const res = await this.fetchFn('https://google.serper.dev/search', {
         method: 'POST', headers: { 'X-API-KEY': this.serperKey, 'content-type': 'application/json' },
-        body: JSON.stringify({ q: query, num: 20 }), signal: AbortSignal.timeout(30_000),
+        body: JSON.stringify({ q: query }), signal: AbortSignal.timeout(30_000),
       })
       if (!res.ok) throw new Error(`busca (Serper) respondeu HTTP ${res.status}`)
       const body = await res.json() as { organic?: Array<{ link?: string }> }

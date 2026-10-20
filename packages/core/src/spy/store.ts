@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, lt, sql } from 'drizzle-orm'
+import { and, desc, eq, inArray, isNotNull, lt, or, sql } from 'drizzle-orm'
 import { spyAds, spyOffers, type Database, type SpyAdData, type SpyFoundVia } from '@wsm/db'
 import { classifyInput, type LibraryAd } from './parse'
 
@@ -48,7 +48,8 @@ export class SpyStore {
   async claimNext(): Promise<SpyAdRow | undefined> {
     const { rows } = await this.db.execute<{ id: string }>(sql`
       update spy_ads set status = 'lendo', attempts = attempts + 1, updated_at = now()
-      where id = (select id from spy_ads where status = 'na_fila' order by created_at limit 1 for update skip locked)
+      where id = (select id from spy_ads where status = 'na_fila' and (retry_at is null or retry_at <= now())
+        order by coalesce(retry_at, created_at) limit 1 for update skip locked)
       returning id`)
     const id = rows[0]?.id
     if (!id) return undefined
@@ -87,7 +88,7 @@ export class SpyStore {
     const [offer] = await this.db.insert(spyOffers).values({ phone: result.phone, pageId: ad.pageId, pageName: ad.pageName })
       .onConflictDoUpdate({ target: spyOffers.phone, set: { updatedAt: new Date() } }).returning()
     const [row] = await this.db.update(spyAds).set({
-      status: 'achado', phone: result.phone, foundVia: result.foundVia, evidenceUrl: result.evidenceUrl ?? null, error: null, offerId: offer!.id,
+      status: 'achado', phone: result.phone, foundVia: result.foundVia, evidenceUrl: result.evidenceUrl ?? null, error: null, retryAt: null, offerId: offer!.id,
       data: result.candidates ? { ...ad.data, candidates: result.candidates } : ad.data, updatedAt: new Date(),
     }).where(eq(spyAds.id, id)).returning()
     return row
@@ -96,17 +97,23 @@ export class SpyStore {
   async notFound(id: string, reason: string, candidates: string[]) {
     const [ad] = await this.db.select().from(spyAds).where(eq(spyAds.id, id))
     if (!ad) return
-    await this.db.update(spyAds).set({ status: 'sem_numero', error: reason, data: { ...ad.data, candidates }, updatedAt: new Date() }).where(eq(spyAds.id, id))
+    await this.db.update(spyAds).set({ status: 'sem_numero', error: reason, retryAt: null, data: { ...ad.data, candidates }, updatedAt: new Date() }).where(eq(spyAds.id, id))
   }
 
   async failed(id: string, error: string) {
     await this.db.update(spyAds).set({ status: 'erro', error: error.slice(0, 500), updatedAt: new Date() }).where(eq(spyAds.id, id))
   }
 
+  /** Tentar de novo pela tela: volta para a fila agora (também vale para quem espera a nova tentativa automática). */
   async retry(id: string) {
-    const [row] = await this.db.update(spyAds).set({ status: 'na_fila', error: null, updatedAt: new Date() })
-      .where(and(eq(spyAds.id, id), inArray(spyAds.status, ['sem_numero', 'erro']))).returning()
+    const [row] = await this.db.update(spyAds).set({ status: 'na_fila', error: null, retryAt: null, updatedAt: new Date() })
+      .where(and(eq(spyAds.id, id), or(inArray(spyAds.status, ['sem_numero', 'erro']), and(eq(spyAds.status, 'na_fila'), isNotNull(spyAds.retryAt))))).returning()
     return row
+  }
+
+  /** Buscador bloqueou: volta para a fila, mas só sai dela em `at` (nova tentativa automática). */
+  async retryLater(id: string, reason: string, at: Date) {
+    await this.db.update(spyAds).set({ status: 'na_fila', error: reason, retryAt: at, updatedAt: new Date() }).where(eq(spyAds.id, id))
   }
 
   async remove(id: string) {
