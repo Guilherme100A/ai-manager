@@ -24,6 +24,8 @@ const schema = z.object({
   // Espião de funil: fila de links processada neste processo (off desliga). Com a chave do Serper a busca de posts é confiável.
   SPY_RUNNER: z.preprocess(emptyAsUndefined, z.enum(['on', 'off']).default('on')),
   SPY_SERPER_KEY: z.preprocess(emptyAsUndefined, z.string().min(1).optional()),
+  // Chip (nome ou id) cujo proxy a Facebook usa: de IP de servidor a Facebook pede login para abrir posts.
+  SPY_PROXY_SESSION: z.preprocess(emptyAsUndefined, z.string().min(1).optional()),
 }).refine((c) => !c.WORKER_INTERNAL_URL || c.INTERNAL_TOKEN, { path: ['INTERNAL_TOKEN'], message: 'required with WORKER_INTERNAL_URL' })
 
 export type ApiConfig = z.output<typeof schema>

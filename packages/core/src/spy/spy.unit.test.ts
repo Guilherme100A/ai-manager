@@ -100,6 +100,20 @@ describe('SpyHttp', () => {
     expect(calls).toEqual(['GET https://www.facebook.com/ads/library/?id=1', 'POST https://www.facebook.com/__rd_verify_ABC?challenge=3', 'GET https://www.facebook.com/ads/library/?id=1'])
   })
 
+  it('facebookFetch (proxy) só para a Facebook; o buscador sai direto', async () => {
+    const direct: string[] = []
+    const proxied: string[] = []
+    const http = new SpyHttp({
+      fetch: async (url) => { direct.push(url); return new Response('') },
+      facebookFetch: async (url) => { proxied.push(url); return new Response('') },
+      minIntervalMs: 0, sleep: async () => undefined,
+    })
+    await http.facebook('https://www.facebook.com/permalink.php?story_fbid=1&id=2')
+    await http.search('site:facebook.com 2')
+    expect(proxied).toEqual(['https://www.facebook.com/permalink.php?story_fbid=1&id=2'])
+    expect(direct).toEqual(['https://html.duckduckgo.com/html/?q=site%3Afacebook.com%202'])
+  })
+
   it('conexão que cai no meio é repetida uma vez; a segunda queda propaga', async () => {
     let n = 0
     const flaky: FetchFn = async () => { n++; if (n === 1) throw new TypeError('terminated'); return new Response('ok') }

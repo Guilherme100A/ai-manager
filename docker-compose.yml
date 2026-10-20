@@ -105,6 +105,8 @@ services:
       # Espião de funil (fila de links de anúncios); a chave do Serper deixa a busca de posts confiável.
       SPY_RUNNER: ${SPY_RUNNER:-on}
       SPY_SERPER_KEY: ${SPY_SERPER_KEY:-}
+      # Chip cujo proxy a Facebook usa (de IP de servidor a Facebook pede login para abrir posts).
+      SPY_PROXY_SESSION: ${SPY_PROXY_SESSION:-}
     ports:
       - '127.0.0.1:${API_HOST_PORT:-3000}:3000'
     depends_on:
