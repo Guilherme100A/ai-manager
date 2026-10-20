@@ -65,14 +65,11 @@ export class SpyFinder {
       if (results.blocked) blocked = true
       for (const url of profilePostLinks(results.urls, token)) {
         if (candidates.length >= this.maxCandidates) break
-        // O link direto do vídeo nem sempre mostra o botão; o permalink (id do post/vídeo + id do perfil) mostra.
-        const target = permalinkFor(url, token) ?? url
-        if (candidates.includes(target)) continue
-        candidates.push(target)
-        const page = await this.http.facebook(target)
-        if (page.loginWall) loginWall = true
-        const phone = postButtonPhone(page.text)
-        if (phone) return { phone, foundVia: 'post', evidenceUrl: target, candidates }
+        if (candidates.includes(url)) continue
+        candidates.push(url)
+        const hit = await this.openPost(url, token)
+        if (hit.loginWall) loginWall = true
+        if (hit.phone) return { phone: hit.phone, foundVia: 'post', evidenceUrl: hit.url, candidates }
       }
       if (candidates.length >= this.maxCandidates) break
     }
@@ -97,19 +94,29 @@ export class SpyFinder {
   }
 
   async findForPost(url: string): Promise<FindResult> {
-    const owner = new URL(url).pathname.split('/').filter(Boolean)[0]
-    const urls = [...new Set([owner ? permalinkFor(url, owner) : undefined, url].filter((u): u is string => Boolean(u)))]
+    const owner = new URL(url).pathname.split('/').filter(Boolean)[0] ?? ''
+    const hit = await this.openPost(url, owner)
+    if (hit.phone) return { phone: hit.phone, foundVia: 'post', evidenceUrl: hit.url, candidates: [url] }
+    return {
+      reason: hit.loginWall ? 'a Facebook pediu login para abrir o post a partir deste servidor; configure um proxy residencial (SPY_PROXY_SESSION)' : 'o post não tem botão de WhatsApp visível sem login',
+      candidates: [url],
+    }
+  }
+
+  /**
+   * Abre o post pelo link direto e, sem número, pelo permalink (id do post/vídeo + id do perfil): dependendo do IP,
+   * um dos dois cai no login ou esconde o botão (pelo proxy o /posts/ abre e o permalink pede login; sem proxy, o
+   * /videos/ esconde o botão e o permalink mostra).
+   */
+  private async openPost(url: string, profile: string): Promise<{ phone?: string; url?: string; loginWall: boolean }> {
     let loginWall = false
-    for (const target of urls) {
+    for (const target of [...new Set([url, permalinkFor(url, profile)].filter((u): u is string => Boolean(u)))]) {
       const page = await this.http.facebook(target)
       if (page.loginWall) loginWall = true
       const phone = postButtonPhone(page.text)
-      if (phone) return { phone, foundVia: 'post', evidenceUrl: target, candidates: urls }
+      if (phone) return { phone, url: target, loginWall }
     }
-    return {
-      reason: loginWall ? 'a Facebook pediu login para abrir o post a partir deste servidor; configure um proxy residencial (SPY_PROXY_SESSION)' : 'o post não tem botão de WhatsApp visível sem login',
-      candidates: urls,
-    }
+    return { loginWall }
   }
 }
 

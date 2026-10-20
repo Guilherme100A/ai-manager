@@ -157,7 +157,11 @@ describe('SpyFinder', () => {
     ])
     const r = await new SpyFinder(fastHttp(fn, 'k')).findForAd(ad)
     expect(r).toMatchObject({ phone: '5584920022034', foundVia: 'post', evidenceUrl: 'https://www.facebook.com/permalink.php?story_fbid=1738211550515405&id=61577928417447' })
-    expect(calls.filter((c) => c.includes('facebook.com'))).toEqual(['GET https://www.facebook.com/permalink.php?story_fbid=1738211550515405&id=61577928417447'])
+    // link direto primeiro (sem botão aqui), depois o permalink
+    expect(calls.filter((c) => c.includes('facebook.com'))).toEqual([
+      'GET https://www.facebook.com/61577928417447/videos/1738211550515405/',
+      'GET https://www.facebook.com/permalink.php?story_fbid=1738211550515405&id=61577928417447',
+    ])
   })
 
   it('sem posts com botão: tenta a página Sobre; sem nada, explica o motivo', async () => {
@@ -174,6 +178,16 @@ describe('SpyFinder', () => {
     const r = await new SpyFinder(fastHttp(blocked.fn)).findForAd(ad)
     expect(r.phone).toBeUndefined()
     expect(r.reason).toMatch(/bloqueou/)
+  })
+
+  it('pelo proxy: o link direto do post traz o botão mesmo quando o permalink pede login', async () => {
+    const { fn, calls } = fakeFetch([
+      [/\/61582021154075\/posts\/122118423477067371/, html('"https://api.whatsapp.com/send?phone=557991063916&source=FB_Post"')],
+      [/permalink\.php/, html('', 302, { location: 'https://www.facebook.com/login/?next=x' })],
+    ])
+    const r = await new SpyFinder(fastHttp(fn)).findForPost('https://www.facebook.com/61582021154075/posts/122118423477067371/')
+    expect(r).toMatchObject({ phone: '557991063916', foundVia: 'post', evidenceUrl: 'https://www.facebook.com/61582021154075/posts/122118423477067371/' })
+    expect(calls).toHaveLength(1)
   })
 
   it('post que redireciona para o login (IP de servidor): motivo pede proxy residencial', async () => {

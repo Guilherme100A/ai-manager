@@ -67,7 +67,8 @@ describe('SpyStore + SpyRunner', () => {
     const byAd = Object.fromEntries(rows.filter((r) => r.adArchiveId).map((r) => [r.adArchiveId, r]))
     expect(byAd['111']).toMatchObject({ status: 'achado', phone: '5511999998888', foundVia: 'link', pageId: '10' })
     expect(byAd['333']).toMatchObject({ status: 'achado', phone: '5584920022034', foundVia: 'post' })
-    expect(byAd['333']!.data.candidates).toEqual(['https://www.facebook.com/permalink.php?story_fbid=777777777&id=6150002'])
+    expect(byAd['333']!.data.candidates).toEqual(['https://www.facebook.com/6150002/videos/777777777/'])
+    expect(byAd['333']!.evidenceUrl).toBe('https://www.facebook.com/permalink.php?story_fbid=777777777&id=6150002')
 
     const offers = await store.listOffers()
     expect(offers.map((o) => [o.phone, o.ads]).sort()).toEqual([['5511999998888', 2], ['5584920022034', 1]])
