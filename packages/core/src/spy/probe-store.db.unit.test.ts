@@ -145,3 +145,17 @@ describe('SpyProbeModel com OpenAI', () => {
     await expect(down.decide([], { turnosRestantes: 1 })).rejects.not.toBeInstanceOf(ProbeAiDisabledError)
   })
 })
+
+describe('ramificações', () => {
+  it('várias sondas na mesma oferta: uma por caminho e cada uma num chip; atraso da abertura', async () => {
+    const { session, offer, store } = await fixture()
+    const [chip2] = await db.insert(sessions).values({ name: 'chip2', phone: '+5531900000002', status: 'STABLE' }).returning()
+    const main = await store.create({ offerId: offer.id, sessionId: session.id, createdBy: 'a' })
+    expect(main.branch).toBe('principal')
+    const obj = await store.create({ offerId: offer.id, sessionId: chip2!.id, branch: 'objecao', startInMs: 5 * 60_000, createdBy: 'a' })
+    expect(obj).toMatchObject({ branch: 'objecao', replyDueAt: new Date(now + 5 * 60_000) })
+    await expect(store.create({ offerId: offer.id, sessionId: session.id, branch: 'sumiu', createdBy: 'a' })).rejects.toThrow(/já está sondando/)
+    const [chip3] = await db.insert(sessions).values({ name: 'chip3', phone: '+5531900000003', status: 'STABLE' }).returning()
+    await expect(store.create({ offerId: offer.id, sessionId: chip3!.id, branch: 'objecao', createdBy: 'a' })).rejects.toThrow(/"objecao" ativa/)
+  })
+})

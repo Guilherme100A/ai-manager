@@ -1,6 +1,6 @@
 // Sondas do Espião no banco: criação com as travas (chip, limite diário, consentimento), estado da conversa e histórico.
 import { and, asc, desc, eq, gt, gte, inArray, isNotNull, lte, or, sql } from 'drizzle-orm'
-import { auditLogs, contacts, messages, sessions, spyOffers, spyProbes, type Database, type SpyProbeSummary } from '@wsm/db'
+import { auditLogs, contacts, messages, sessions, spyOffers, spyProbes, type Database, type SpyBranch, type SpyProbeSummary } from '@wsm/db'
 import { SENDABLE_STATES } from '../session/states'
 import type { ProbeTurn } from './probe-model'
 
@@ -31,7 +31,8 @@ export class SpyProbeStore {
   constructor(private readonly db: Database, private readonly now: () => number = Date.now) {}
 
   /** Começa uma sonda: valida chip e limites, registra o contato (origem: anúncio) e deixa a abertura pendente. */
-  async create(input: { offerId: string; sessionId: string; createdBy: string; maxTurns?: number }): Promise<SpyProbeRow> {
+  /** `startInMs`: atrasa a abertura (várias sondas na mesma oferta não chegam todas juntas). */
+  async create(input: { offerId: string; sessionId: string; createdBy: string; branch?: SpyBranch; maxTurns?: number; startInMs?: number }): Promise<SpyProbeRow> {
     const [offer] = await this.db.select().from(spyOffers).where(eq(spyOffers.id, input.offerId))
     if (!offer) throw new SpyProbeError('OFFER_NOT_FOUND', 'Oferta não encontrada')
     const [session] = await this.db.select().from(sessions).where(eq(sessions.id, input.sessionId))
@@ -56,11 +57,13 @@ export class SpyProbeStore {
     let row: SpyProbeRow | undefined
     try {
       [row] = await this.db.insert(spyProbes).values({
-        offerId: offer.id, sessionId: session.id, phone, createdBy: input.createdBy, maxTurns: input.maxTurns ?? 12,
-        replyDueAt: new Date(this.now()), startedAt: new Date(this.now()), updatedAt: new Date(this.now()),
+        offerId: offer.id, sessionId: session.id, phone, createdBy: input.createdBy, maxTurns: input.maxTurns ?? 12, branch: input.branch ?? 'principal',
+        replyDueAt: new Date(this.now() + Math.max(0, input.startInMs ?? 0)), startedAt: new Date(this.now()), updatedAt: new Date(this.now()),
       }).returning()
     } catch (err) {
-      if (/spy_probes_active_phone_idx/.test(String((err as { cause?: unknown }).cause ?? err))) throw new SpyProbeError('PROBE_ACTIVE', 'Já existe uma sonda ativa para essa oferta')
+      const detail = String((err as { cause?: unknown }).cause ?? err)
+      if (/spy_probes_active_branch_idx/.test(detail)) throw new SpyProbeError('PROBE_ACTIVE', `Já existe uma sonda "${input.branch ?? 'principal'}" ativa nessa oferta`)
+      if (/spy_probes_active_session_idx/.test(detail)) throw new SpyProbeError('PROBE_ACTIVE', 'Esse chip já está sondando essa oferta; use outro chip para outra ramificação')
       throw err
     }
     await this.db.update(spyOffers).set({ status: 'sondando', updatedAt: new Date(this.now()) }).where(eq(spyOffers.id, offer.id))

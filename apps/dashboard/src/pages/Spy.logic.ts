@@ -59,3 +59,14 @@ export function probeStatusLabel(p: Pick<SpyProbe, 'status' | 'listenUntil' | 'r
   if (p.listenUntil && Date.parse(p.listenUntil) > now) return 'Concluída · ouvindo remarketing'
   return p.status === 'concluida' ? 'Concluída' : p.status === 'parada' ? 'Parada' : 'Erro'
 }
+
+/** Caminhos da sonda (mesma lista do servidor). */
+export const BRANCHES = [
+  { id: 'principal', label: 'Principal (até o checkout)' },
+  { id: 'objecao', label: 'Objeção ("tá caro")' },
+  { id: 'sumiu', label: 'Sumiu (remarketing)' },
+] as const
+
+export function branchLabel(id: string): string {
+  return id === 'objecao' ? 'Objeção' : id === 'sumiu' ? 'Sumiu' : 'Principal'
+}

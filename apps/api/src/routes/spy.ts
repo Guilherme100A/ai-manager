@@ -2,6 +2,7 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { SpyProbeError, SpyProbeStore, SpyStore, normalizePhone } from '@wsm/core'
+import { SPY_BRANCHES } from '@wsm/db'
 import { ApiError, type ErrorCode } from '../errors'
 import { setAudit } from '../middleware/audit'
 import type { AppDeps, AppEnv } from '../types'
@@ -54,7 +55,8 @@ export function spyRoutes(deps: Pick<AppDeps, 'db'>) {
     })
     .post('/api/spy/offers/:id/probes', validate('param', adParam), validate('json', startProbeSchema), async (c) => {
       try {
-        const probe = await probes.create({ offerId: c.req.valid('param').id, sessionId: c.req.valid('json').sessionId, createdBy: c.get('actor') })
+        const { sessionId, branch, startInMinutes } = c.req.valid('json')
+        const probe = await probes.create({ offerId: c.req.valid('param').id, sessionId, branch, startInMs: startInMinutes * 60_000, createdBy: c.get('actor') })
         setAudit(c, { action: 'spy.probe.start', targetType: 'spy_probe', targetId: probe.id })
         return c.json(probe, 201)
       } catch (err) {
@@ -71,7 +73,12 @@ export function spyRoutes(deps: Pick<AppDeps, 'db'>) {
     })
 }
 
-const startProbeSchema = z.object({ sessionId: z.uuid() }).strict()
+const startProbeSchema = z.object({
+  sessionId: z.uuid(),
+  branch: z.enum(SPY_BRANCHES).default('principal'),
+  /** Atraso da abertura (várias sondas na mesma oferta em horários diferentes). */
+  startInMinutes: z.number().int().min(0).max(180).default(0),
+}).strict()
 
 const PROBE_ERRORS: Record<SpyProbeError['code'], ErrorCode> = {
   OFFER_NOT_FOUND: 'NOT_FOUND',

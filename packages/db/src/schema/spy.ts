@@ -57,6 +57,9 @@ export const spyAds = pgTable('spy_ads', {
 ])
 
 export type SpyProbeStatus = 'ativa' | 'concluida' | 'parada' | 'erro'
+/** Caminho que a sonda segue: principal (até o checkout), objeção ("tá caro"), sumiu (some depois do preço). */
+export const SPY_BRANCHES = ['principal', 'objecao', 'sumiu'] as const
+export type SpyBranch = (typeof SPY_BRANCHES)[number]
 
 /** O que a IA da sonda anotou sobre o funil (preço, checkout, etapas, opções vistas). */
 export interface SpyProbeSummary {
@@ -97,6 +100,8 @@ export const spyProbes = pgTable('spy_probes', {
   endedAt: timestamp('ended_at', { withTimezone: true }),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
-  uniqueIndex('spy_probes_active_phone_idx').on(t.phone).where(sql`${t.status} = 'ativa'`),
+  // Várias sondas na mesma oferta, uma por ramificação e cada uma num chip (a conversa é por chip + número).
+  uniqueIndex('spy_probes_active_branch_idx').on(t.phone, t.branch).where(sql`${t.status} = 'ativa'`),
+  uniqueIndex('spy_probes_active_session_idx').on(t.phone, t.sessionId).where(sql`${t.status} = 'ativa'`),
   index('spy_probes_session_idx').on(t.sessionId, t.status),
 ])

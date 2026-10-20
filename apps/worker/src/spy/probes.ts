@@ -2,7 +2,7 @@
 // O estado fica no banco (spy_probes), então um restart do worker continua de onde parou. As mensagens da oferta
 // são lidas da tabela messages (inclui áudio/imagem, que não têm texto e não passam pelo gancho das conversas).
 import {
-  phoneToUserJid, ProbeAiDisabledError, SENDABLE_STATES, SendRejectedError,
+  BRANCH_STRATEGY, phoneToUserJid, ProbeAiDisabledError, SENDABLE_STATES, SendRejectedError,
   type MessageQueue, type ProbeModel, type SendPipeline, type SessionView, type SpyProbeRow, type SpyProbeStore,
 } from '@wsm/core'
 import type { SpyProbeSummary } from '@wsm/db'
@@ -107,7 +107,10 @@ export class SpyProbeRunner {
         return store.replied(probe.id, { turns: 1, sentAt })
       }
 
-      const decision = await this.opts.model.decide(history.map(({ de, texto }) => ({ de, texto })), { ...context, turnosRestantes: Math.max(0, probe.maxTurns - probe.turns) })
+      const estrategia = BRANCH_STRATEGY[probe.branch as keyof typeof BRANCH_STRATEGY]
+      const decision = await this.opts.model.decide(history.map(({ de, texto }) => ({ de, texto })), {
+        ...context, turnosRestantes: Math.max(0, probe.maxTurns - probe.turns), ...(estrategia ? { estrategia } : {}),
+      })
       const summary = mergeSummary(probe.summary, decision, history.filter((t) => t.de === 'oferta').map((t) => t.texto))
       if (decision.acao === 'encerrar') {
         await store.end(probe.id, 'concluida', decision.motivo ?? 'funil mapeado', { summary })

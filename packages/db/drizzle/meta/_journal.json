@@ -85,6 +85,13 @@
       "when": 1792463410055,
       "tag": "0011_spy_probes",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1792465102660,
+      "tag": "0012_spy_branches",
+      "breakpoints": true
     }
   ]
 }

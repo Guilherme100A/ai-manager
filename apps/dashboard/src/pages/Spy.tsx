@@ -3,7 +3,7 @@ import { Card, ErrorText, PageHeader } from '../components/ui'
 import { api } from '../lib/api'
 import { POLL, usePoll } from '../lib/hooks'
 import type { SpyAd, SpyEnqueueResult, SpyProbe } from '../lib/types'
-import { adLibraryUrl, formatPhone, parseLinks, PROBES_PER_DAY, probeStatusLabel, rowTitle, SENDABLE, STATUS_LABEL, summarize, VIA_LABEL } from './Spy.logic'
+import { adLibraryUrl, BRANCHES, branchLabel, formatPhone, parseLinks, PROBES_PER_DAY, probeStatusLabel, rowTitle, SENDABLE, STATUS_LABEL, summarize, VIA_LABEL } from './Spy.logic'
 
 export function Spy() {
   const ads = usePoll(() => api.spyAds(), POLL.list)
@@ -12,6 +12,7 @@ export function Spy() {
   const sessions = usePoll(() => api.sessions(), POLL.page)
   const sendable = sessions.data?.filter((s) => SENDABLE.includes(s.status)) ?? []
   const [chip, setChip] = useState<Record<string, string>>({})
+  const [branch, setBranch] = useState<Record<string, string>>({})
   const [openProbe, setOpenProbe] = useState<string>()
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
@@ -66,19 +67,25 @@ export function Spy() {
         <thead><tr><th>WhatsApp</th><th>Página</th><th>Anúncios</th><th>Sondar com</th></tr></thead>
         <tbody>
           {offers.data?.map((o) => {
-            const active = probes.data?.some((p) => p.offerId === o.id && p.status === 'ativa')
+            const active = probes.data?.filter((p) => p.offerId === o.id && p.status === 'ativa') ?? []
+            const free = BRANCHES.filter((b) => !active.some((p) => p.branch === b.id))
+            const pick = branch[o.id] && free.some((b) => b.id === branch[o.id]) ? branch[o.id]! : free[0]?.id
             return <tr key={o.id}>
               <td><a href={`https://wa.me/${o.phone}`} target="_blank" rel="noreferrer">{formatPhone(o.phone)}</a></td>
               <td>{o.pageName ?? '—'}</td>
               <td>{o.ads}</td>
               <td className="cell-actions">
-                {active ? <span className="tag">Sondando</span> : <>
+                {active.length > 0 && <span className="tag">{active.map((p) => branchLabel(p.branch)).join(' · ')}</span>}
+                {pick && <div className="row">
                   <select aria-label="Chip da sonda" value={chip[o.id] ?? ''} onChange={(e) => setChip((c) => ({ ...c, [o.id]: e.target.value }))}>
                     <option value="">Escolha o chip</option>
-                    {sendable.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.status})</option>)}
-                  </select>{' '}
-                  <button type="button" className="secondary btn-sm" disabled={busy || !chip[o.id]} onClick={() => mutate(() => api.spyStartProbe(o.id, chip[o.id]!))}>Sondar</button>
-                </>}
+                    {sendable.filter((s) => !active.some((p) => p.sessionId === s.id)).map((s) => <option key={s.id} value={s.id}>{s.name} ({s.status})</option>)}
+                  </select>
+                  <select aria-label="Caminho da sonda" value={pick} onChange={(e) => setBranch((b) => ({ ...b, [o.id]: e.target.value }))}>
+                    {free.map((b) => <option key={b.id} value={b.id}>{b.label}</option>)}
+                  </select>
+                  <button type="button" className="secondary btn-sm" disabled={busy || !chip[o.id]} onClick={() => mutate(() => api.spyStartProbe(o.id, chip[o.id]!, pick))}>Sondar</button>
+                </div>}
               </td>
             </tr>
           })}
@@ -144,7 +151,7 @@ function ProbeCard({ probe, busy, open, onToggle, onStop }: { probe: SpyProbe; b
     <header>
       <strong>{probe.pageName ?? formatPhone(probe.phone.replace(/^\+/, ''))}</strong>
       <span className="tag">{probeStatusLabel(probe, Date.now())}</span>
-      <span className="hint">{probe.sessionName ?? 'chip'} · {probe.turns}/{probe.maxTurns} respostas · desde {new Date(probe.startedAt).toLocaleString('pt-BR')}</span>
+      <span className="hint">{branchLabel(probe.branch)} · {probe.sessionName ?? 'chip'} · {probe.turns}/{probe.maxTurns} respostas · desde {new Date(probe.startedAt).toLocaleString('pt-BR')}</span>
     </header>
     <dl className="spy-summary">
       {s.etapa && <><dt>Etapa</dt><dd>{s.etapa}</dd></>}

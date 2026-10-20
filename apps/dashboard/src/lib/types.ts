@@ -267,6 +267,7 @@ export interface SpyProbe {
   offerId: string
   sessionId: string
   phone: string
+  branch: string
   status: SpyProbeStatus
   turns: number
   maxTurns: number

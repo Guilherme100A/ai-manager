@@ -103,7 +103,7 @@ export const api = {
   spyDelete: (id: string) => request<void>(`/api/spy/ads/${enc(id)}`, { method: 'DELETE' }),
   spyProbes: () => request<{ items: SpyProbe[] }>('/api/spy/probes').then((r) => r.items),
   spyProbeMessages: (id: string) => request<{ items: SpyProbeTurn[] }>(`/api/spy/probes/${enc(id)}/messages`).then((r) => r.items),
-  spyStartProbe: (offerId: string, sessionId: string) => request<SpyProbe>(`/api/spy/offers/${enc(offerId)}/probes`, { body: { sessionId } }),
+  spyStartProbe: (offerId: string, sessionId: string, branch = 'principal') => request<SpyProbe>(`/api/spy/offers/${enc(offerId)}/probes`, { body: { sessionId, branch } }),
   spyStopProbe: (id: string) => request<SpyProbe>(`/api/spy/probes/${enc(id)}/stop`, { method: 'POST' }),
   sessionLinks: () => request<{ items: SessionLink[] }>('/api/session-links').then((r) => r.items),
   sessionRouteRuns: () => request<{ items: SessionRouteRun[] }>('/api/session-links/runs').then((r) => r.items),

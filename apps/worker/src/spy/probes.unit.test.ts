@@ -124,3 +124,15 @@ describe('auxiliares', () => {
     expect(merged).toMatchObject({ checkout: ['a', 'b'], links: ['https://x.com/1', 'https://y.com/2'], humano: true, preco: 'R$ 10' })
   })
 })
+
+describe('estratégia da ramificação', () => {
+  it('objeção e sumiu mandam a estratégia para a IA; principal não', async () => {
+    for (const [branch, expected] of [['objecao', /achou caro/], ['sumiu', /encerre/], ['principal', undefined]] as const) {
+      const s = setup({ row: probe({ turns: 1, branch }), history: [{ de: 'eu', texto: 'oi' }], decision: decision({ acao: 'esperar' }) })
+      await s.runner.tick()
+      const ctx = (s.model.decide.mock.calls[0] as unknown as [unknown, { estrategia?: string }])[1]
+      if (expected) expect(ctx.estrategia).toMatch(expected)
+      else expect(ctx.estrategia).toBeUndefined()
+    }
+  })
+})
