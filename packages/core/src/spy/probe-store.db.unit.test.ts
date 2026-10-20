@@ -125,3 +125,23 @@ describe('SpyProbeModel', () => {
     await expect(noKey.decide([], { turnosRestantes: 5 })).rejects.toBeInstanceOf(ProbeAiDisabledError)
   })
 })
+
+describe('SpyProbeModel com OpenAI', () => {
+  const anthropicUnused = async () => { throw new Error('não deveria ler as configurações da Anthropic') }
+  it('usa a chave da OpenAI com saída JSON; sem saldo ou chave inválida para a sonda; 5xx tenta depois', async () => {
+    const calls: Array<{ url: string; body: { model: string; response_format: unknown } }> = []
+    const ok = new SpyProbeModel(anthropicUnused as never, undefined, { apiKey: 'sk', model: 'gpt-x', fetch: async (url, init) => {
+      calls.push({ url, body: JSON.parse(String(init!.body)) })
+      return Response.json({ choices: [{ message: { content: '{"acao":"responder","mensagens":["oi, quanto custa?"]}' } }] })
+    } })
+    expect(await ok.decide([{ de: 'oferta', texto: 'Olá!' }], { turnosRestantes: 3 })).toMatchObject({ acao: 'responder', mensagens: ['oi, quanto custa?'] })
+    expect(calls[0]).toMatchObject({ url: 'https://api.openai.com/v1/chat/completions', body: { model: 'gpt-x', response_format: { type: 'json_object' } } })
+
+    const quota = new SpyProbeModel(anthropicUnused as never, undefined, { apiKey: 'sk', model: 'm', fetch: async () => Response.json({ error: { code: 'insufficient_quota', message: 'sem saldo' } }, { status: 429 }) })
+    await expect(quota.decide([], { turnosRestantes: 1 })).rejects.toBeInstanceOf(ProbeAiDisabledError)
+    const bad = new SpyProbeModel(anthropicUnused as never, undefined, { apiKey: 'sk', model: 'm', fetch: async () => Response.json({ error: { message: 'invalid key' } }, { status: 401 }) })
+    await expect(bad.decide([], { turnosRestantes: 1 })).rejects.toBeInstanceOf(ProbeAiDisabledError)
+    const down = new SpyProbeModel(anthropicUnused as never, undefined, { apiKey: 'sk', model: 'm', fetch: async () => new Response('x', { status: 503 }) })
+    await expect(down.decide([], { turnosRestantes: 1 })).rejects.not.toBeInstanceOf(ProbeAiDisabledError)
+  })
+})

@@ -302,7 +302,10 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     })
     // Espião de funil: sondas (chip conversa com a oferta como lead, IA) — SPY_PROBES=off desliga.
     const spyProbes = env.SPY_PROBES?.trim().toLowerCase() === 'off' ? undefined : new SpyProbeRunner({
-      store: new SpyProbeStore(db), model: new SpyProbeModel(() => conversationSettings.resolve()),
+      store: new SpyProbeStore(db),
+      // SPY_OPENAI_KEY: a sonda usa a OpenAI (SPY_OPENAI_MODEL); sem ela, a chave Anthropic das configurações de IA.
+      model: new SpyProbeModel(() => conversationSettings.resolve(), undefined,
+        env.SPY_OPENAI_KEY?.trim() ? { apiKey: env.SPY_OPENAI_KEY.trim(), model: env.SPY_OPENAI_MODEL?.trim() || 'gpt-5.6-luna' } : undefined),
       manager, pipeline: routingPipeline, messages: queue, logger, paused: () => stallMonitor.underPressure(),
       allowed: async (phone) => canMessage(await conversationContacts.findByPhone(phone)).ok,
       offerContext: async (offerId) => {

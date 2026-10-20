@@ -54,13 +54,22 @@ const SYSTEM = [
   'Responda SOMENTE um JSON: {"acao":"responder|esperar|encerrar","mensagens":["..."],"etapa":"nome curto da etapa atual do funil","preco":"preço visto ou vazio","checkout":["links ou códigos de pagamento vistos"],"opcoes":["opções vistas na última mensagem"],"humano":false,"motivo":"por que decidiu isso"}. "mensagens" tem 1 ou 2 mensagens curtas (no máximo 200 caracteres cada) quando acao for "responder"; vazio nos outros casos.',
 ].join('\n')
 
+/** OpenAI para a sonda (SPY_OPENAI_KEY): usada no lugar da Anthropic das configurações quando definida. */
+export interface ProbeOpenAiOptions {
+  apiKey: string
+  model: string
+  fetch?: (input: string, init?: RequestInit) => Promise<Response>
+}
+
 export class SpyProbeModel implements ProbeModel {
   constructor(
     private readonly settings: () => Promise<ResolvedAiSettings>,
     private readonly clientFactory = (apiKey: string) => new Anthropic({ apiKey, maxRetries: 1 }),
+    private readonly openai?: ProbeOpenAiOptions,
   ) {}
 
   async decide(history: ProbeTurn[], context: ProbeContext): Promise<ProbeDecision> {
+    if (this.openai) return parseDecision(await this.openAiText(this.openai, JSON.stringify({ ...context, historico: history.slice(-30) })))
     const settings = await this.settings()
     // A chave salva vale para a sonda mesmo com a IA das conversas desligada (a sonda tem o próprio liga/desliga).
     if (!settings.config.apiKey) throw new ProbeAiDisabledError()
@@ -80,6 +89,23 @@ export class SpyProbeModel implements ProbeModel {
     }
     const text = response.content.filter((c) => c.type === 'text').map((c) => c.text).join('\n')
     return parseDecision(text)
+  }
+
+  /** Chat Completions com saída em JSON. Chave inválida, sem saldo ou modelo inexistente param a sonda. */
+  private async openAiText(openai: ProbeOpenAiOptions, user: string): Promise<string> {
+    const res = await (openai.fetch ?? fetch)('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${openai.apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: openai.model, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: user }] }),
+      signal: AbortSignal.timeout(60_000),
+    })
+    const body = await res.json().catch(() => ({})) as { choices?: Array<{ message?: { content?: string } }>; error?: { message?: string; code?: string } }
+    if (!res.ok) {
+      const message = `IA recusou (OpenAI HTTP ${res.status}): ${(body.error?.message ?? '').slice(0, 200)}`
+      if ([400, 401, 403, 404].includes(res.status) || body.error?.code === 'insufficient_quota') throw new ProbeAiDisabledError(message)
+      throw new Error(message)
+    }
+    return body.choices?.[0]?.message?.content ?? ''
   }
 }
 
