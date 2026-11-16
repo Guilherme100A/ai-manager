@@ -41,4 +41,8 @@ bash "$deploy_script" "$next"
 grep -q 'two' version.txt
 grep -q 'compose -f docker-compose.yml -f docker-compose.crm.yml build worker api dashboard' "$DEPLOY_TEST_LOG"
 grep -q 'up -d --no-deps --wait worker api dashboard' "$DEPLOY_TEST_LOG"
-echo 'PASS: local changes preserved; invalid SHA rejected; exact commit and CRM compose deployed'
+git checkout --quiet --detach "$first"
+SSH_ORIGINAL_COMMAND="~/deploy-ai-manager.sh $next" bash "$deploy_script"
+[[ "$(git rev-parse HEAD)" == "$next" ]]
+if SSH_ORIGINAL_COMMAND="echo $next" bash "$deploy_script" >"$test_root/ssh-invalid.log" 2>&1; then echo 'FAIL: arbitrary SSH command accepted'; exit 1; fi
+echo 'PASS: local changes preserved; invalid SHA/SSH command rejected; exact commit and CRM compose deployed with both SSH modes'

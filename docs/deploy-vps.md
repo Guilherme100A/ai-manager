@@ -9,6 +9,11 @@ O workflow de deploy roda tipagem, lint e testes antes de chamar
 `~/deploy-ai-manager.sh <SHA>`. Esse arquivo da VPS deve ser uma cópia de
 `scripts/deploy-vps.sh` e ter permissão de execução.
 
+Chaves SSH com comando fixo também são suportadas: o SHA é extraído de
+`SSH_ORIGINAL_COMMAND` somente quando o pedido corresponde exatamente a
+`~/deploy-ai-manager.sh <SHA completo>`. Nenhum comando recebido é avaliado como
+shell.
+
 A rotina valida o SHA, busca `origin/main`, recusa alterações locais não salvas,
 troca para o commit informado e reconstrói somente worker, API e dashboard. A
 configuração adicional do CRM permanece aplicada. O SHA só é registrado em
