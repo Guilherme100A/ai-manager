@@ -19,6 +19,9 @@ export const ERROR_STATUS = {
   NOT_FOUND: 404,
   INTERNAL_ERROR: 500,
   GROUP_INVITE_FAILED: 502,
+  // Integração CRM (POST /api/crm/sso): só login do painel; desligada sem CRM_SSO_SECRET.
+  FORBIDDEN: 403,
+  NOT_IMPLEMENTED: 501,
 } as const satisfies Record<string, ContentfulStatusCode>
 
 export type ErrorCode = keyof typeof ERROR_STATUS

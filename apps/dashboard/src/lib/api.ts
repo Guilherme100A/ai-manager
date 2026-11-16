@@ -17,6 +17,15 @@ import type {
   Session,
   SessionLink,
   SessionRouteRun,
+  SpyAd,
+  SpyEnqueueResult,
+  SpyOffer,
+  SpyProbe,
+  SpyProbeTurn,
+  SpyAutoProbeConfig,
+  SpySavedFlow,
+  SpyFlowDetail,
+  SpyFlowImportResult,
   SessionHealth,
   Webhook,
   WebhookChannel,
@@ -90,6 +99,41 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
 const enc = encodeURIComponent
 
 export const api = {
+  spyAds: () => request<{ items: SpyAd[] }>('/api/spy/ads').then((r) => r.items),
+  spyOffers: () => request<{ items: SpyOffer[] }>('/api/spy/offers').then((r) => r.items),
+  spyEnqueue: (links: string[]) => request<SpyEnqueueResult>('/api/spy/ads', { body: { links } }),
+  spyAutoProbe: () => request<SpyAutoProbeConfig>('/api/spy/auto-probe'),
+  spySetAutoProbe: (excludedSessionIds: string[]) => request<SpyAutoProbeConfig>('/api/spy/auto-probe', { method: 'PUT', body: { excludedSessionIds } }),
+  spyRetry: (id: string) => request<SpyAd>(`/api/spy/ads/${enc(id)}/retry`, { method: 'POST' }),
+  spySetPhone: (id: string, phone: string) => request<SpyAd>(`/api/spy/ads/${enc(id)}/phone`, { method: 'PUT', body: { phone } }),
+  spyDelete: (id: string) => request<void>(`/api/spy/ads/${enc(id)}`, { method: 'DELETE' }),
+  spyProbes: () => request<{ items: SpyProbe[] }>('/api/spy/probes').then((r) => r.items),
+  spyProbeMessages: (id: string) => request<{ items: SpyProbeTurn[] }>(`/api/spy/probes/${enc(id)}/messages`).then((r) => r.items),
+  spyStartProbe: (offerId: string, sessionId: string, branch = 'principal') => request<SpyProbe>(`/api/spy/offers/${enc(offerId)}/probes`, { body: { sessionId, branch } }),
+  spyStopProbe: (id: string) => request<SpyProbe>(`/api/spy/probes/${enc(id)}/stop`, { method: 'POST' }),
+  spyFlows: () => request<{ items: SpySavedFlow[] }>('/api/spy/flows').then((r) => r.items),
+  spyFlow: (id: string) => request<SpyFlowDetail>(`/api/spy/flows/${enc(id)}`),
+  spyEditFlow: (id: string, title: string, script: string) =>
+    request<{ id: string; title: string; script: string }>(`/api/spy/flows/${enc(id)}`, { method: 'PATCH', body: { title, script } }),
+  spyImportFlow: async (file: File): Promise<SpyFlowImportResult> => {
+    const token = getToken()
+    const body = new FormData()
+    body.append('file', file)
+    const res = await fetchImpl('/api/spy/flows/import', { method: 'POST', headers: token ? { authorization: `Bearer ${token}` } : undefined, body })
+    const data = await res.json() as SpyFlowImportResult & { error?: { code?: string; message?: string } }
+    if (!res.ok) throw new ApiRequestError(res.status, data.error?.code ?? `HTTP_${res.status}`, data.error?.message ?? `HTTP ${res.status}`)
+    return data
+  },
+  /** Baixa o pacote (ZIP) do fluxo da oferta. Resposta binária, por isso não passa pelo `request` (JSON). */
+  spyFlowZip: async (offerId: string): Promise<{ blob: Blob; filename: string }> => {
+    const token = getToken()
+    const res = await fetchImpl(`/api/spy/offers/${enc(offerId)}/flow.zip`, token ? { headers: { authorization: `Bearer ${token}` } } : undefined)
+    if (!res.ok) throw new ApiRequestError(res.status, `HTTP_${res.status}`, `HTTP ${res.status}`)
+    const match = /filename="?([^"]+)"?/.exec(res.headers.get('content-disposition') ?? '')
+    return { blob: await res.blob(), filename: match?.[1] ?? `funil-${offerId}.zip` }
+  },
+  /** Copia o funil pra IA do CRM (vira contexto das sugestões). */
+  spyCopyToCrm: (offerId: string) => request<{ ok: boolean; flowId: string; editUrl: string; mediaCount: number }>(`/api/spy/offers/${enc(offerId)}/copy-to-crm`, { method: 'POST' }),
   sessionLinks: () => request<{ items: SessionLink[] }>('/api/session-links').then((r) => r.items),
   sessionRouteRuns: () => request<{ items: SessionRouteRun[] }>('/api/session-links/runs').then((r) => r.items),
   createSessionLink: (input: Pick<SessionLink, 'sourceSessionId' | 'targetSessionId' | 'rules'>) =>
@@ -103,6 +147,8 @@ export const api = {
   me: () => request<{ user: AuthUser; expiresAt: string | null }>('/api/auth/me'),
   /** Revoga o token atual (204). */
   logout: () => request<void>('/api/auth/logout', { method: 'POST', keepTokenOn401: true }),
+  /** Integração CRM: token de SSO (120 s) e URL do CRM no mesmo origin. 501 = integração desligada. */
+  crmSso: () => request<{ token: string; url: string }>('/api/crm/sso', { method: 'POST' }),
 
   sessions: () => request<{ items: Session[] }>('/api/sessions').then((r) => r.items),
   session: (id: string) => request<Session>(`/api/sessions/${enc(id)}`),

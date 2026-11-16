@@ -1,6 +1,13 @@
 node_modules/
 dist/
 .env
+.env.*
+!.env.example
+*.bak
+*.bak-*
+test-results/
+playwright-report/
+test-results-unit.json
 *.log
 coverage/
 *.tsbuildinfo

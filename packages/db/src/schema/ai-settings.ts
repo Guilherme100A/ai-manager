@@ -19,6 +19,8 @@ export const aiSettings = pgTable(
     maxTokens: integer('max_tokens'),
     timeoutMs: integer('timeout_ms'),
     enabled: boolean('enabled'),
+    // Contexto do negócio/funil que guia as sugestões da IA (ex.: funil copiado do Espião). Texto livre; null = sem.
+    businessContext: text('business_context'),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

@@ -1,7 +1,11 @@
 // FakeTransport: transporte em memória para testes (AC-T04-01). Nunca abre rede.
 import { TransportEmitter } from './emitter'
 import {
+  MediaNotFoundError,
   TransportNotConnectedError,
+  type DownloadedMedia,
+  type PresenceKind,
+  type TransportContact,
   type ConnectOptions,
   type DisconnectKind,
   type GroupParticipantResult,
@@ -128,6 +132,29 @@ export class FakeTransport extends TransportEmitter implements WaTransport {
   async sendTyping(to: string, typing: boolean): Promise<void> {
     if (!this.connected) throw new TransportNotConnectedError()
     this.typing.push({ to, typing })
+  }
+
+  /** Mídia por id de mensagem (bytes devolvidos por downloadMedia). */
+  readonly media = new Map<string, Uint8Array>()
+  /** Presenças enviadas por sendPresence, em ordem. */
+  readonly presences: Array<{ to: string; kind: PresenceKind }> = []
+  /** Agenda devolvida por listContacts. */
+  contacts: TransportContact[] = []
+
+  async downloadMedia(messageId: string): Promise<DownloadedMedia> {
+    const bytes = this.media.get(messageId)
+    if (!bytes) throw new MediaNotFoundError(messageId)
+    return { data: Buffer.from(bytes), mime: 'application/octet-stream' }
+  }
+
+  async sendPresence(to: string, kind: PresenceKind): Promise<void> {
+    if (!this.connected) throw new TransportNotConnectedError()
+    this.presences.push({ to, kind })
+  }
+
+  async listContacts(): Promise<TransportContact[]> {
+    if (!this.connected) throw new TransportNotConnectedError()
+    return this.contacts.map((c) => ({ ...c }))
   }
 
   readonly savedContacts: Array<{ jid: string; name: string }> = []

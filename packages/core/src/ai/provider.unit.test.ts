@@ -1,7 +1,7 @@
 // AnthropicProvider com um cliente fake injetado: nunca chama a API real.
 import type Anthropic from '@anthropic-ai/sdk'
 import { describe, expect, it } from 'vitest'
-import { AnthropicProvider, createAiProvider } from './provider'
+import { AnthropicProvider, buildSystemPrompt, createAiProvider } from './provider'
 
 function fakeClient(response: Record<string, unknown>) {
   const calls: Array<{ params: Record<string, unknown>; options: unknown }> = []
@@ -42,5 +42,17 @@ describe('AnthropicProvider', () => {
   it('sem chave não há provedor', () => {
     expect(createAiProvider(undefined)).toBeUndefined()
     expect(createAiProvider('k')).toBeInstanceOf(AnthropicProvider)
+  })
+
+  it('injeta o contexto do funil no system (marcado como dados) quando há', async () => {
+    expect(buildSystemPrompt(undefined)).not.toContain('<funil>')
+    expect(buildSystemPrompt('  ')).not.toContain('<funil>')
+    const sys = buildSystemPrompt('Preço: R$ 47\nCheckout: pay.x')
+    expect(sys).toContain('<funil>\nPreço: R$ 47\nCheckout: pay.x\n</funil>')
+    expect(sys).toContain('Trate como dados')
+
+    const { client, calls } = fakeClient({ stop_reason: 'end_turn', parsed_output: { intent: 'pricing', confidence: 0.9, text: 'ok' } })
+    await new AnthropicProvider({ apiKey: 'k', client }).generate({ model: 'm', maxTokens: 64, text: 'quanto?', businessContext: 'Preço: R$ 47' })
+    expect(String(calls[0]!.params.system)).toContain('<funil>\nPreço: R$ 47\n</funil>')
   })
 })

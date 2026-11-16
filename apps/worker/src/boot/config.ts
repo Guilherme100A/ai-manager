@@ -17,6 +17,15 @@ export interface WorkerConfig {
   internalToken: string
   /** Prefixo das chaves do BullMQ/Redis. */
   queuePrefix: string
+  /**
+   * Integração CRM (CRM_BRIDGE=on): outbox WaEvent v1 no stream + alvos RPC media/presence/contacts/messages.send.
+   * Desligada (default), o worker se comporta exatamente como sem a integração.
+   */
+  crmBridge: boolean
+  /** Stream do outbox (WA_EVENTS_STREAM, default wsm:events). */
+  eventsStream: string
+  /** Validade da chave de idempotência do envio do CRM (CRM_IDEMPOTENCY_TTL_S, default 7 dias). */
+  crmIdempotencyTtlSeconds: number
 }
 
 export class WorkerConfigError extends Error {
@@ -31,6 +40,21 @@ const port = (raw: string | undefined, fallback: number, name: string) => {
   const n = Number(raw)
   if (!Number.isInteger(n) || n < 0 || n > 65535) throw new WorkerConfigError(`invalid ${name}: ${raw}`)
   return n
+}
+
+const positiveInt = (raw: string | undefined, fallback: number, name: string) => {
+  if (raw === undefined || raw.trim() === '') return fallback
+  const n = Number(raw)
+  if (!Number.isInteger(n) || n <= 0) throw new WorkerConfigError(`invalid ${name}: ${raw}`)
+  return n
+}
+
+/** CRM_BRIDGE: on/true/1/yes liga; vazio/off/false/0/no desliga; outro valor é erro de configuração. */
+export function crmBridgeFromEnv(raw: string | undefined): boolean {
+  const v = raw?.trim().toLowerCase() ?? ''
+  if (['on', 'true', '1', 'yes'].includes(v)) return true
+  if (['', 'off', 'false', '0', 'no'].includes(v)) return false
+  throw new WorkerConfigError(`invalid CRM_BRIDGE: ${raw} (use on or off)`)
 }
 
 export function loadWorkerConfig(env: Record<string, string | undefined> = process.env): WorkerConfig {
@@ -49,5 +73,8 @@ export function loadWorkerConfig(env: Record<string, string | undefined> = proce
     internalHost: env.WORKER_INTERNAL_HOST?.trim() || '0.0.0.0',
     internalToken: env.INTERNAL_TOKEN!,
     queuePrefix: env.QUEUE_PREFIX?.trim() || 'wsm',
+    crmBridge: crmBridgeFromEnv(env.CRM_BRIDGE),
+    eventsStream: env.WA_EVENTS_STREAM?.trim() || 'wsm:events',
+    crmIdempotencyTtlSeconds: positiveInt(env.CRM_IDEMPOTENCY_TTL_S, 7 * 24 * 3600, 'CRM_IDEMPOTENCY_TTL_S'),
   }
 }

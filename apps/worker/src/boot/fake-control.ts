@@ -137,7 +137,7 @@ export class FakeControl implements SendDelays {
     await this.require(sessionId).close(reason, statusCode)
   }
 
-  receive(sessionId: string, msg: { from: string; text?: string; fromMe?: boolean; type?: string }) {
+  receive(sessionId: string, msg: { id?: string; from: string; text?: string; fromMe?: boolean; type?: string }) {
     return this.require(sessionId).receive(msg)
   }
 

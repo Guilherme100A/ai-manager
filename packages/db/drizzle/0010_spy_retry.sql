@@ -1,0 +1,1 @@
+ALTER TABLE "spy_ads" ADD COLUMN "retry_at" timestamp with time zone;

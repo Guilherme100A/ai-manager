@@ -66,6 +66,36 @@ export const IconSpark = () => (
   </Svg>
 )
 
+export const IconSearch = () => (
+  <Svg>
+    <circle cx="11" cy="11" r="7" />
+    <path d="m20 20-3.5-3.5" />
+  </Svg>
+)
+
+export const IconBriefcase = () => (
+  <Svg>
+    <rect x="3" y="7" width="18" height="13" rx="2" />
+    <path d="M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2" />
+    <path d="M3 13h18" />
+  </Svg>
+)
+
+export const IconArrowLeft = () => (
+  <Svg>
+    <path d="M19 12H5M11 18l-6-6 6-6" />
+  </Svg>
+)
+
+export const IconRefresh = () => (
+  <Svg>
+    <path d="M20 11a8 8 0 0 0-14.9-3.9L4 9" />
+    <path d="M4 4v5h5" />
+    <path d="M4 13a8 8 0 0 0 14.9 3.9L20 15" />
+    <path d="M20 20v-5h-5" />
+  </Svg>
+)
+
 export const IconLogout = () => (
   <Svg>
     <path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3" />

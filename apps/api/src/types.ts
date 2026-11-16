@@ -5,6 +5,8 @@ import type { Logger } from 'pino'
 /** Cliente Redis mínimo usado pela API (compatível com ioredis). */
 export interface RedisLike {
   ping(): Promise<unknown>
+  get(key: string): Promise<string | null>
+  set(key: string, value: string): Promise<unknown>
 }
 
 export interface AppDeps {

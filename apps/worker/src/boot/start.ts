@@ -28,12 +28,17 @@ import {
   SessionLinkStore,
   SessionRouter,
   SendPipeline,
+  SpyMediaReader,
+  SpyProbeModel,
+  SpyProbeStore,
   toConnectionOptions,
   type Logger,
 } from '@wsm/core'
-import { createDb, runMigrations, sessions, messages, auditLogs, type Database } from '@wsm/db'
+import { createDb, runMigrations, sessions, messages, auditLogs, spyAds, spyOffers, type Database } from '@wsm/db'
 import { and, eq, gt, sql } from 'drizzle-orm'
 import { ConversationAutomation } from '../conversations/automation'
+import { SpyProbeRunner } from '../spy/probes'
+import { SpyMediaCapture } from '../spy/media'
 import { AutoReplyAutomation } from '../conversations/autoreply'
 import { RedisConversationStore } from '../conversations/store'
 import { attachAlerts } from '../alerts'
@@ -47,7 +52,12 @@ import { attachQueueToSessions } from '../queue'
 import { createTransportFactory, disappearingKey, ensureOwnContact, redisDisappearingStore, SessionManager, type TransportFactory } from '../sessions'
 import { loadWorkerConfig, type WorkerConfig } from './config'
 import { FakeControl } from './fake-control'
-import { startInternalServer, type InternalServer } from './internal-server'
+import { startInternalServer, type BridgeTargets, type InternalServer } from './internal-server'
+import { createCrmBridgeTargets } from '../crm/bridge'
+import { attachEventOutbox } from '../events/outbox'
+
+/** Mídias recebidas guardadas por sessão para o `media.download` do CRM. */
+const CRM_MEDIA_CACHE_SIZE = 500
 import { createBridgeTargets } from './bridge-targets'
 import { GroupAutomation } from '../groups/automation'
 import { groupHistoryEntry, redisGroupHistory } from '../groups/history'
@@ -141,8 +151,16 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
       await stickerRound
     })
     // ---- transporte ------------------------------------------------------------------------
+    // Espião ligado (SPY_PROBES != off) também precisa do cache de mídia: as sondas baixam o áudio/PDF da oferta.
+    const spyEnabled = env.SPY_PROBES?.trim().toLowerCase() !== 'off'
     const fake = config.transport === 'fake' ? new FakeControl({ redis, prefix: config.queuePrefix, bootId, logger }) : undefined
-    const baseFactory = opts.transportFactory ?? fake?.factory ?? createTransportFactory({ kind: config.transport, disappearing: (id) => redisDisappearingStore(redis, id, config.queuePrefix), stickers })
+    const baseFactory = opts.transportFactory ?? fake?.factory ?? createTransportFactory({
+      kind: config.transport,
+      disappearing: (id) => redisDisappearingStore(redis, id, config.queuePrefix),
+      stickers,
+      // Integração CRM / Espião: guarda as últimas mídias recebidas (media.download) e, no CRM, a agenda (contacts.list).
+      ...(config.crmBridge || spyEnabled ? { baileys: { mediaCacheSize: CRM_MEDIA_CACHE_SIZE, ...(config.crmBridge ? { trackContacts: true } : {}) } } : {}),
+    })
     // Últimas mensagens dos grupos (contexto da postagem automática): gravadas ao chegar, por sessão.
     const groupHistory = redisGroupHistory(redis, config.queuePrefix)
     // Travamentos do processo: registro com a atividade anterior e modo alívio (automações não essenciais pausadas).
@@ -286,12 +304,37 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
       audit: async (id, detail) => { await db.insert(auditLogs).values({ actor: 'session-conversations', action: 'conversation.turn', targetType: 'session', targetId: id, detail }) },
       logger,
     })
+    // Espião de funil: sondas (chip conversa com a oferta como lead, IA) — SPY_PROBES=off desliga.
+    const spyProbes = env.SPY_PROBES?.trim().toLowerCase() === 'off' ? undefined : new SpyProbeRunner({
+      store: new SpyProbeStore(db),
+      // SPY_OPENAI_KEY: a sonda usa a OpenAI (SPY_OPENAI_MODEL); sem ela, a chave Anthropic das configurações de IA.
+      model: new SpyProbeModel(() => conversationSettings.resolve(), undefined,
+        env.SPY_OPENAI_KEY?.trim() ? { apiKey: env.SPY_OPENAI_KEY.trim(), model: env.SPY_OPENAI_MODEL?.trim() || 'gpt-5.6-luna' } : undefined),
+      manager, pipeline: routingPipeline, messages: queue, logger, paused: () => stallMonitor.underPressure(),
+      allowed: async (phone) => canMessage(await conversationContacts.findByPhone(phone)).ok,
+      offerContext: async (offerId) => {
+        const [row] = await db.select({ pageName: spyOffers.pageName, data: spyAds.data }).from(spyOffers)
+          .leftJoin(spyAds, eq(spyAds.offerId, spyOffers.id)).where(eq(spyOffers.id, offerId)).limit(1)
+        return { ...(row?.pageName ? { pagina: row.pageName } : {}), ...(row?.data?.body ? { anuncio: row.data.body } : {}) }
+      },
+    })
+    // Espião: lê o áudio/PDF que a oferta manda (Whisper + bloco de documento da Anthropic) para a sonda ver o funil todo.
+    const spyMedia = spyProbes ? new SpyMediaCapture({
+      store: new SpyProbeStore(db),
+      reader: new SpyMediaReader(() => conversationSettings.resolve(),
+        env.SPY_OPENAI_KEY?.trim()
+          ? { apiKey: env.SPY_OPENAI_KEY.trim(), ...(env.SPY_WHISPER_MODEL?.trim() ? { model: env.SPY_WHISPER_MODEL.trim() } : {}) }
+          : undefined),
+      getTransport: (id) => (manager.isConnected(id) ? manager.getTransport(id) : undefined),
+      logger,
+    }) : undefined
     const ai = attachAi(manager, {
       db,
       logger,
       routeIncoming: (event) => sessionRouter.route(event),
+      ...(spyMedia ? { enrichMedia: (event) => spyMedia.capture(event) } : {}),
       // Resposta automática dos números de autoresposta não vira sugestão da IA assistiva.
-      consumeConversation: async (id, phone, text) => (await conversations.handlesInbound(id, phone, text)) || autoReplyTargets.isTarget(phone),
+      consumeConversation: async (id, phone, text) => (await conversations.handlesInbound(id, phone, text)) || autoReplyTargets.isTarget(phone) || Boolean(await spyProbes?.handlesInbound(id, phone)),
       // T19 — configuração dinâmica: tabela ai_settings (painel) com fallback no ambiente AI_*, relida a cada
       // AI_SETTINGS_REFRESH_MS (default 5 s) sem restart. Sem chave ou enabled=false → só o fallback determinístico.
       assistant: new AiAssistant({
@@ -311,6 +354,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     bridgeTargets.sessions.configureConversation = (id, config) => conversations.configure(id, config)
     bridgeTargets.sessions.tickConversation = async (id) => { await manager.get(id); return conversations.requestTick(id) }
     onStop('session-conversations', () => conversations.stop())
+    if (spyProbes) onStop('spy-probes', () => spyProbes.stop())
     // Números de autoresposta próprios: só os chips com proxy conversam com eles (mesmo limite diário do chip).
     const autoReplyTargets = new AutoReplyTargets(db)
     const autoReply = new AutoReplyAutomation({
@@ -377,11 +421,49 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
       },
     })
     onStop('observability', () => observability.close())
+    // ---- integração CRM (CRM_BRIDGE=on): outbox WaEvent v1 + alvos A3/A7/A8 -----------------------
+    let internalTargets: BridgeTargets = bridgeTargets
+    if (config.crmBridge) {
+      // ioredis tem sobrecargas com callback: os adaptadores expõem só a forma usada (args variádicos → Promise).
+      type Variadic = (...args: (string | number)[]) => Promise<unknown>
+      const call = (fn: unknown) => (...args: (string | number)[]) => (fn as Variadic).apply(redis, args)
+      const outbox = attachEventOutbox(manager, queue, { xadd: call(redis.xadd) }, { stream: config.eventsStream, logger })
+      onStop('events-outbox', async () => {
+        outbox.detach()
+        await Promise.race([outbox.flush(), new Promise((r) => setTimeout(r, 2000).unref())])
+      })
+      const crm = createCrmBridgeTargets({
+        db,
+        queue,
+        limits,
+        redis: { set: call(redis.set), get: (key) => redis.get(key), del: (key) => redis.del(key) },
+        prefix: config.queuePrefix,
+        idempotencyTtlSeconds: config.crmIdempotencyTtlSeconds,
+        getTransport: (id) => (manager.isConnected(id) ? manager.getTransport(id) : undefined),
+      })
+      internalTargets = {
+        ...bridgeTargets,
+        // Objeto próprio: a MessageQueue (bridgeTargets.messages) não ganha métodos novos.
+        messages: {
+          get: (id) => queue.get(id),
+          list: (filter) => queue.list(filter),
+          events: (id) => queue.events(id),
+          cancel: (id) => queue.cancel(id),
+          enqueue: (input) => queue.enqueue(input),
+          send: crm.messages.send,
+          sendGroup: crm.messages.sendGroup,
+        },
+        media: crm.media,
+        presence: crm.presence,
+        contacts: crm.contacts,
+      }
+      logger.info({ stream: config.eventsStream }, 'CRM bridge on: events outbox and CRM RPC targets mounted')
+    }
     const internal = await startInternalServer({
       port: config.internalPort,
       host: config.internalHost,
       token: config.internalToken,
-      targets: bridgeTargets,
+      targets: internalTargets,
       ...(fake ? { fake } : {}),
       logger,
     })
@@ -392,6 +474,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     await resumeQueues(db, queue, logger)
     await groupAutomation.start()
     conversations.start()
+    spyProbes?.start()
     autoReply.start()
 
     logger.info(

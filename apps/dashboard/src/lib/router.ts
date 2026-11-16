@@ -13,6 +13,10 @@ export type Route =
   | { name: 'autoreply' }
   | { name: 'ai' }
   | { name: 'session-links' }
+  /** Espião de funil: links de anúncios → WhatsApp da oferta. */
+  | { name: 'spy' }
+  /** CRM (integração): o CRM do mesmo origin num iframe, com SSO do painel. */
+  | { name: 'crm'; flowId?: string }
   | { name: 'not-found'; path: string }
 
 export function parseHash(hash: string): Route {
@@ -36,7 +40,10 @@ export function parseHash(hash: string): Route {
     case 'autoreply':
     case 'ai':
     case 'session-links':
+    case 'spy':
       return second ? { name: 'not-found', path } : { name: head }
+    case 'crm':
+      return second ? { name: 'crm', flowId: decodeURIComponent(second) } : { name: 'crm' }
     default:
       return { name: 'not-found', path }
   }
@@ -50,6 +57,8 @@ export function routeHref(route: Route): string {
       return '#/sessions/new'
     case 'session':
       return `#/sessions/${encodeURIComponent(route.id)}`
+    case 'crm':
+      return route.flowId ? `#/crm/${encodeURIComponent(route.flowId)}` : '#/crm'
     case 'not-found':
       return `#${route.path}`
     default:

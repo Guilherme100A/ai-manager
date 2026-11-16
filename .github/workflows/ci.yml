@@ -39,6 +39,7 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: bash scripts/test-deploy-vps.sh
       - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm test

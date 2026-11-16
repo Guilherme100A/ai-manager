@@ -23,11 +23,17 @@ export function fakeDb(opts: { up?: boolean; hang?: boolean } = {}) {
 }
 
 export function fakeRedis(opts: { up?: boolean; hang?: boolean } = {}): RedisLike {
+  const values = new Map<string, string>()
   return {
     ping: async () => {
       if (opts.hang) return new Promise(() => {})
       if (opts.up === false) throw new Error('redis down')
       return 'PONG'
+    },
+    get: async (key) => values.get(key) ?? null,
+    set: async (key, value) => {
+      values.set(key, value)
+      return 'OK'
     },
   }
 }

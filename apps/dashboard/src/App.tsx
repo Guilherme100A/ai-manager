@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { api } from './lib/api'
 import { Layout } from './components/Layout'
 import { useRoute, useToken } from './lib/hooks'
@@ -8,6 +8,8 @@ import { Report } from './pages/Report'
 import { AutoReply } from './pages/AutoReply'
 import { AiSettingsPage } from './pages/AiSettings'
 import { Contacts } from './pages/Contacts'
+import { Crm } from './pages/Crm'
+import { backRoute } from './pages/Crm.logic'
 import { Groups } from './pages/Groups'
 import { Home } from './pages/Home'
 import { Login } from './pages/Login'
@@ -15,6 +17,7 @@ import { NewSession } from './pages/NewSession'
 import { SessionDetail } from './pages/SessionDetail'
 import { Sessions } from './pages/Sessions'
 import { SessionLinks } from './pages/SessionLinks'
+import { Spy } from './pages/Spy'
 
 function Page({ route }: { route: Route }) {
   switch (route.name) {
@@ -24,6 +27,8 @@ function Page({ route }: { route: Route }) {
       return <Sessions />
     case 'session-links':
       return <SessionLinks />
+    case 'spy':
+      return <Spy />
     case 'new-session':
       return <NewSession />
     case 'session':
@@ -43,6 +48,9 @@ function Page({ route }: { route: Route }) {
       return <AutoReply />
     case 'ai':
       return <AiSettingsPage />
+    case 'crm':
+      // Renderizado fora do Layout (tela cheia), em App.
+      return null
     case 'login':
       return null
     case 'not-found':
@@ -58,6 +66,11 @@ function Page({ route }: { route: Route }) {
 export function App() {
   const route = useRoute()
   const token = useToken()
+  // Última página do painel antes de entrar no CRM: destino do "Voltar ao painel".
+  const lastPanelRoute = useRef<Route | null>(null)
+  useEffect(() => {
+    if (route.name !== 'crm' && route.name !== 'login') lastPanelRoute.current = route
+  }, [route])
 
   // Página Proxies removida (AC-T18-03): #/proxies vai para #/sessions.
   useEffect(() => {
@@ -76,6 +89,8 @@ export function App() {
   }, [token, route.name])
 
   if (!token || route.name === 'login') return <Login />
+  // CRM = outra parte do site: tela cheia, sem o menu lateral do painel (a barra do topo leva de volta).
+  if (route.name === 'crm') return <Crm back={backRoute(lastPanelRoute.current)} flowId={route.flowId} />
   return (
     <Layout route={route}>
       <Page route={route} />
