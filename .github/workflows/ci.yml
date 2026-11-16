@@ -40,6 +40,101 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: bash scripts/test-deploy-vps.sh
+      - run: node --test scripts/crm-release/release.test.mjs
       - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm test
+
+  crm-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: wsm
+          POSTGRES_PASSWORD: wsm
+          POSTGRES_DB: wsm
+        ports: ['5432:5432']
+        options: --health-cmd "pg_isready -U wsm -d wsm" --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      DATABASE_URL: postgres://wsm:wsm@127.0.0.1:5432/wsm
+      REDIS_URL: redis://127.0.0.1:6379/1
+      NODE_OPTIONS: --conditions=development
+      SHARED_OFFERS_COMPANY_ID: ''
+      AI_MODE: fake
+      WA_TRANSPORT: fake
+      WA_GATEWAY: fake
+      CRM_REPORT_DIR: ${{ runner.temp }}/crm-reports
+      CRM_EMBEDDED_DIST: ${{ runner.temp }}/crm-embedded
+      PANEL_SOURCE_DIR: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Reconstruct the approved sanitized CRM (no operator sources)
+        run: |
+          mkdir -p "$CRM_REPORT_DIR" "$RUNNER_TEMP/output/shared-offers"
+          node scripts/prepare-shared-offers-crm.mjs "$RUNNER_TEMP/crm-source"
+          test "$(git -C "$RUNNER_TEMP/crm-source" write-tree)" = 24cec7d30f200818e64cd9693bfe8ff38ed1d0c3
+      - name: Install and build test dependencies on the runner only
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter @wsm/dashboard build
+          pnpm --dir "$RUNNER_TEMP/crm-source" install --frozen-lockfile
+          pnpm --dir "$RUNNER_TEMP/crm-source" exec playwright install --with-deps chromium
+          pnpm --dir "$RUNNER_TEMP/crm-source" --filter @crm/web build
+          VITE_BASE_PATH=/crm/ VITE_API_BASE=/crm/api pnpm --dir "$RUNNER_TEMP/crm-source" --filter @crm/web exec vite build --outDir "$CRM_EMBEDDED_DIST"
+      - name: Real disposable PostgreSQL backup/restore/migrate/idempotence rehearsal
+        env:
+          CRM_CI_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: pnpm --dir "$RUNNER_TEMP/crm-source" exec tsx "$GITHUB_WORKSPACE/scripts/crm-release/migration-ci.mjs" "$RUNNER_TEMP/crm-source"
+      - name: Fake providers, shared administrators/offers, UI, panel SSO and read-only MCP
+        run: |
+          cp integrations/shared-offers/tests/operational-ci.test.ts "$RUNNER_TEMP/crm-source/tests/acceptance/T125/operational-ci.test.ts"
+          cd "$RUNNER_TEMP/crm-source"
+          pnpm exec vitest run --config tests/acceptance/vitest.config.ts tests/acceptance/T125/shared-offers.test.ts tests/acceptance/T125/revisor-shared-offers.test.ts tests/acceptance/T125/operational-ci.test.ts --reporter=json --outputFile="$CRM_REPORT_DIR/integration.json"
+          pnpm --filter @crm/core exec vitest run src/offers src/flows/engine src/flows/triggers src/payments/webhooks src/mcp src/mcp-oauth --maxWorkers=2 --reporter=json --outputFile="$CRM_REPORT_DIR/core.json"
+          pnpm --filter @crm/worker test
+          for package in @crm/api @crm/core @crm/web @crm/worker; do pnpm --filter "$package" typecheck; done
+          git diff --exit-code
+      - name: Build immutable Alpine/musl release (never copy runner node_modules)
+        run: |
+          printf '.git\n**/node_modules\n**/dist\noutput\n.env\ntests/acceptance/T125/operational-ci.test.ts\n' > "$RUNNER_TEMP/crm-source/.dockerignore"
+          docker build --platform linux/amd64 --build-arg SOURCE_TREE=24cec7d30f200818e64cd9693bfe8ff38ed1d0c3 -f integrations/shared-offers/Dockerfile -t "crm-shared-offers:$GITHUB_SHA" "$RUNNER_TEMP/crm-source"
+          docker run --rm --network none -w /crm/apps/api "crm-shared-offers:$GITHUB_SHA" node --conditions=development /crm/node_modules/tsx/dist/cli.mjs -e "import('@crm/core').then(()=>console.log('Alpine workspace/dependencies load'))"
+          docker volume create "ci_crm_${GITHUB_RUN_ID}_deps"
+          docker run --rm --network none -v "ci_crm_${GITHUB_RUN_ID}_deps:/crm/node_modules:ro" "crm-shared-offers:$GITHUB_SHA" node -e "require('fs').accessSync('/crm/node_modules/tsx/dist/cli.mjs')"
+      - name: Export image, CI SPA and checksummed release manifest
+        run: |
+          mkdir -p "$RUNNER_TEMP/crm-artifact" "$RUNNER_TEMP/ci-spa"
+          docker save "crm-shared-offers:$GITHUB_SHA" | gzip > "$RUNNER_TEMP/crm-artifact/images.tar.gz"
+          cid=$(docker create "crm-shared-offers:$GITHUB_SHA")
+          docker cp "$cid:/crm/apps/web/dist/." "$RUNNER_TEMP/ci-spa/"
+          docker rm "$cid"
+          tar -czf "$RUNNER_TEMP/crm-artifact/spa.tar.gz" -C "$RUNNER_TEMP/ci-spa" .
+          node scripts/crm-release/package-ci.mjs "$RUNNER_TEMP/crm-source" "$RUNNER_TEMP/crm-artifact" "$GITHUB_SHA"
+      - name: Verify real Compose merge and persistent next-deploy mounts
+        run: |
+          export CRM_SSO_SECRET=synthetic-ci-only
+          export CRM_CREDENTIALS_KEY=$(node -e "process.stdout.write(require('crypto').randomBytes(32).toString('base64'))")
+          node scripts/crm-release/config-ci.mjs "$GITHUB_WORKSPACE" "$RUNNER_TEMP/crm-artifact" "$RUNNER_TEMP/crm-compose-state"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crm-release-${{ github.sha }}
+          path: ${{ runner.temp }}/crm-artifact/
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: crm-verification-${{ github.sha }}
+          path: ${{ runner.temp }}/crm-reports/
+          if-no-files-found: warn
+          retention-days: 7

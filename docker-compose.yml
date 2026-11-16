@@ -48,6 +48,8 @@ services:
       retries: 20
 
   worker:
+    # Bounded recovery after unexpected process failure; --wait still rejects unhealthy deployments.
+    restart: 'on-failure:3'
     build:
       context: .
       dockerfile: apps/worker/Dockerfile
