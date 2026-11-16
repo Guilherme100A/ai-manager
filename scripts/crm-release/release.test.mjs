@@ -7,10 +7,15 @@ import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { deploy } from './deploy.mjs'
 import { invoke } from './compose.mjs'
-import { TREE, sha, hashFile, read, override, specFor, composeArgs, secrets, validateManifest } from './lib.mjs'
+import { TREE, sha, hashFile, read, override, specFor, composeArgs, secrets, validateManifest, availableMemoryBytes } from './lib.mjs'
 import { pgClientPlan, pg16Versions } from './pg-client-ci.mjs'
 const here = path.dirname(fileURLToPath(import.meta.url))
 const revision = 'a'.repeat(40), image = 'sha256:' + 'b'.repeat(64)
+test('Linux memory budget distinguishes reclaimable cache from a real shortage and falls back conservatively', () => {
+  assert.equal(availableMemoryBytes('MemFree: 100000 kB\nMemAvailable: 1400000 kB\n', 100000 * 1024), 1400000 * 1024)
+  assert.equal(availableMemoryBytes('MemAvailable: 100000 kB\n', 900000 * 1024), 100000 * 1024)
+  for (const text of [undefined, '', 'MemAvailable: -1 kB', 'MemAvailable: nope kB', 'MemAvailable: 1 kB\nMemAvailable: 2 kB', 'MemAvailable: 99999999999999999999 kB']) assert.equal(availableMemoryBytes(text, 123), 123)
+})
 test('explicit activation uses the same canonical company in API and worker without changing mounts', () => {
   const spec = specFor({ release: revision, image_id: image }, 'preserved_storage')
   const company = '11111111-1111-4111-8111-111111111111'

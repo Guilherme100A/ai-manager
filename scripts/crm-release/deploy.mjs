@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { pathToFileURL } from 'node:url'
-import { TREE, sha, hashFile, read, parseJSON, requireThat, command, atomic, dedicatedPaths, validateManifest, specFor, override, composeArgs, validateConfig, sourceDigest, secrets, tsxCommand } from './lib.mjs'
+import { TREE, sha, hashFile, read, parseJSON, requireThat, command, atomic, dedicatedPaths, validateManifest, specFor, override, composeArgs, validateConfig, sourceDigest, secrets, tsxCommand, availableMemoryBytes } from './lib.mjs'
 const json = (run, label, cmd, args) => parseJSON(run(label, cmd, args), label)
 export function deploy(options, run = command) {
   requireThat(options.lockHeld === true, 'Shared deployment lock required')
@@ -63,7 +63,9 @@ export function deploy(options, run = command) {
   checkJournal(beforeCount)
   fs.mkdirSync(state, { recursive: true, mode: 0o700 })
   const space = fs.statfsSync(state)
-  requireThat(space.bavail * space.bsize >= receipt.required_free_bytes && os.freemem() >= 256 * 1024 * 1024, 'Insufficient resources for reviewed backup budget')
+  let meminfo
+  if (process.platform === 'linux') { try { meminfo = fs.readFileSync('/proc/meminfo', 'utf8') } catch { /* Conservative fallback to actual free memory. */ } }
+  requireThat(space.bavail * space.bsize >= receipt.required_free_bytes && availableMemoryBytes(meminfo, os.freemem()) >= 256 * 1024 * 1024, 'Insufficient resources for reviewed backup budget')
   const dir = path.join(state, 'releases', m.release)
   fs.mkdirSync(path.dirname(dir), { recursive: true, mode: 0o700 })
   fs.mkdirSync(dir, { mode: 0o700 }) // Existing candidate is never overwritten; reconciliation is explicit.

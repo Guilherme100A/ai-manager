@@ -11,6 +11,13 @@ export function hashFile(file) {
 export const parseJSON = (text, label) => { try { return JSON.parse(text) } catch { throw new Error(`Invalid JSON: ${label}`) } }
 export const read = file => parseJSON(fs.readFileSync(file, 'utf8'), 'input file')
 export const requireThat = (ok, message) => { if (!ok) throw new Error(message) }
+export function availableMemoryBytes(meminfo, freeBytes) {
+  // Linux MemAvailable accounts for reclaimable cache. MemFree alone can be
+  // small even while the host has ample memory for the reviewed operation.
+  const rows = typeof meminfo === 'string' ? [...meminfo.matchAll(/^MemAvailable:\s+(\d+) kB\s*$/gm)] : []
+  const bytes = rows.length === 1 ? Number(rows[0][1]) * 1024 : NaN
+  return Number.isSafeInteger(bytes) && bytes >= 0 ? bytes : freeBytes
+}
 export const secrets = ['DATABASE_URL', 'REDIS_URL', 'CREDENTIALS_KEY', 'CRM_SSO_SECRET', 'INTERNAL_TOKEN']
 export function command(label, executable, args, io = {}) {
   const descriptors = []
