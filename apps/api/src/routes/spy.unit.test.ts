@@ -27,6 +27,16 @@ describe('/api/spy', () => {
     expect((await app.request('/api/spy/ads')).status).toBe(401)
   })
 
+  it('configura quais chips ficam fora da sonda automática', async () => {
+    const a = '00000000-0000-4000-8000-000000000001'
+    const b = '00000000-0000-4000-8000-000000000002'
+    expect(await (await app.request('/api/spy/auto-probe', { headers: auth })).json()).toEqual({ excludedSessionIds: [] })
+    const saved = await app.request('/api/spy/auto-probe', { method: 'PUT', headers: auth, body: JSON.stringify({ excludedSessionIds: [a, b, a] }) })
+    expect(saved.status).toBe(200)
+    expect(await saved.json()).toEqual({ excludedSessionIds: [a, b] })
+    expect(await (await app.request('/api/spy/auto-probe', { headers: auth })).json()).toEqual({ excludedSessionIds: [a, b] })
+  })
+
   it('enfileira links, aceita número manual, agrupa na oferta, tenta de novo e remove', async () => {
     const res = await app.request('/api/spy/ads', { method: 'POST', headers: auth, body: JSON.stringify({ links: ['https://www.facebook.com/ads/library/?id=123', 'https://exemplo.com', 'https://www.facebook.com/ads/library/?id=123'] }) })
     expect(res.status).toBe(201)

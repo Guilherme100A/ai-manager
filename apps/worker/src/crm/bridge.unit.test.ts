@@ -92,7 +92,7 @@ describe('bridgeHandlers com e sem os alvos do CRM', () => {
     const t = baseTargets()
     const withCrm = bridgeHandlers({ ...t, messages: { ...t.messages, ...crm.messages }, media: crm.media, presence: crm.presence, contacts: crm.contacts })
     expect(Object.keys(withCrm).sort()).toEqual(['contacts', 'health', 'media', 'messages', 'presence', 'sessions'])
-    expect(Object.keys(withCrm.media!)).toEqual(['download'])
+    expect(Object.keys(withCrm.media!)).toEqual(['download', 'recover'])
     expect(Object.keys(withCrm.presence!)).toEqual(['update'])
     expect(Object.keys(withCrm.contacts!).sort()).toEqual(['list', 'optOut', 'recordConsent'])
     expect(Object.keys(withCrm.messages!)).toEqual(expect.arrayContaining(['send', 'sendGroup']))
