@@ -4,6 +4,7 @@ import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContai
 import { ChatsPanel } from '../components/ChatsPanel'
 import { ConversationPanel } from '../components/ConversationPanel'
 import { SessionProxyPanel } from '../components/SessionProxyPanel'
+import { SessionQrPanel } from '../components/SessionQrPanel'
 import { ChartBox, ErrorText, PageHeader, StateIndicator } from '../components/ui'
 import { appendSample, bucketMessages, formatDateTime, latencySeries, parsePrometheusLatency, timeLabel } from '../lib/aggregate'
 import { api } from '../lib/api'
@@ -175,6 +176,7 @@ export function SessionDetail({ id }: { id: string }) {
       </section>
 
       {s ? <SessionProxyPanel session={s} onChanged={() => session.reload()} /> : null}
+      {s && (s.status === 'NEW' || s.status === 'DISCONNECTED') ? <SessionQrPanel key={`qr-${id}`} session={s} onChanged={session.reload} /> : null}
       <ChatsPanel key={`chats-${id}`} sessionId={id} />
       <ConversationPanel key={id} sessionId={id} />
 
