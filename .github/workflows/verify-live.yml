@@ -1,0 +1,27 @@
+name: Verify live CRM
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Prepare isolated browser on GitHub runner
+        run: |
+          mkdir -p "$RUNNER_TEMP/live-browser"
+          npm install --prefix "$RUNNER_TEMP/live-browser" --no-audit --no-fund playwright@1.63.0
+          "$RUNNER_TEMP/live-browser/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Verify published panel and CRM using three sessions of one account
+        env:
+          CRM_SMOKE_PANEL_TOKEN: ${{ secrets.CRM_SMOKE_PANEL_TOKEN }}
+          PLAYWRIGHT_MODULE: ${{ runner.temp }}/live-browser/node_modules/playwright/index.mjs
+        run: node scripts/crm-release/verify-live-browser.mjs
