@@ -171,7 +171,7 @@ export function spyRoutes(deps: Pick<AppDeps, 'db' | 'redis'>) {
       c.header('Content-Disposition', `attachment; filename="funil-${slug}.zip"`)
       return c.body(new Uint8Array(buf))
     })
-    // Copia o fluxo pra IA do CRM: salva o roteiro como contexto do negócio; as sugestões passam a seguir o funil.
+    // Importa roteiro e mídias como um fluxo editável no CRM pela integração interna.
     .post('/api/spy/offers/:id/copy-to-crm', validate('param', adParam), async (c) => {
       const flow = await buildSpyFlow(deps.db, c.req.valid('param').id)
       if (!flow) throw new ApiError('NOT_FOUND', 'Oferta não encontrada')

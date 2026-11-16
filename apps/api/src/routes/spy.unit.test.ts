@@ -1,7 +1,6 @@
 // Rotas do Espião com Postgres local: fila de links, número manual, tentar de novo e remover.
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import JSZip from 'jszip'
-import { AiSettingsService } from '@wsm/core'
 import { createDb, createTempDatabase, messages, sessions, spyMedia, spyOffers, spyProbes, type Database, type TempDatabase } from '@wsm/db'
 import { createApp } from '../app'
 import { captureLogger, fakeRedis } from '../test-utils'
@@ -10,6 +9,8 @@ let tmp: TempDatabase
 let db: Database
 let app: ReturnType<typeof createApp>
 const auth = { authorization: 'Bearer spy-test', 'content-type': 'application/json' }
+
+afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals() })
 
 beforeAll(async () => {
   tmp = await createTempDatabase({ migrate: true, prefix: 'wsm_spy_api' })
@@ -116,18 +117,34 @@ describe('/api/spy', () => {
     expect((await app.request('/api/spy/offers/00000000-0000-0000-0000-000000000000/flow.zip', { headers: { authorization: 'Bearer spy-test' } })).status).toBe(404)
   })
 
-  it('copia o fluxo pra IA do CRM (vira contexto do negócio)', async () => {
+  it('cria um fluxo editável no CRM pela integração interna sem chamada externa real', async () => {
     const [offer] = await db.insert(spyOffers).values({ phone: '558781794012', pageName: 'Delícias da Mih', status: 'completa' }).returning()
     const [chip] = await db.insert(sessions).values({ name: 'chipC', phone: '+5531900000010', status: 'STABLE' }).returning()
     await db.insert(spyProbes).values({ offerId: offer!.id, sessionId: chip!.id, phone: '+558781794012', branch: 'principal', status: 'concluida', createdBy: 'a', summary: { preco: 'R$ 37', checkout: ['https://pay.x/mih'] } }).returning()
 
+    vi.stubEnv('INTERNAL_TOKEN', 'internal-test-only')
+    const fetch = vi.fn(async () => Response.json({ flowId: 'crm-flow', editUrl: '/crm/flows/crm-flow/edit', mediaCount: 0 }, { status: 201 }))
+    vi.stubGlobal('fetch', fetch)
     const res = await app.request(`/api/spy/offers/${offer!.id}/copy-to-crm`, { method: 'POST', headers: auth })
     expect(res.status).toBe(200)
-    expect(await res.json()).toMatchObject({ ok: true })
-
-    const settings = await new AiSettingsService({ db, env: {} }).resolve()
-    expect(settings.config.businessContext).toContain('R$ 37')
+    expect(await res.json()).toMatchObject({ ok: true, flowId: 'crm-flow', editUrl: '/crm/flows/crm-flow/edit', mediaCount: 0 })
+    expect(fetch).toHaveBeenCalledTimes(1)
+    const [url, init] = fetch.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toMatch(/\/internal\/spy-flow-import$/)
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(String(init.body))).toMatchObject({ phone: '558781794012', title: 'Delícias da Mih', script: expect.stringContaining('R$ 37') })
 
     expect((await app.request('/api/spy/offers/00000000-0000-0000-0000-000000000000/copy-to-crm', { method: 'POST', headers: auth })).status).toBe(404)
+  })
+
+  it('recusa falha de importação do CRM sem anunciar sucesso ou repetir', async () => {
+    const [offer] = await db.insert(spyOffers).values({ phone: '558781794099', pageName: 'Oferta QA' }).returning()
+    vi.stubEnv('INTERNAL_TOKEN', 'internal-test-only')
+    const fetch = vi.fn(async () => Response.json({ error: { message: 'Importação QA recusada' } }, { status: 503 }))
+    vi.stubGlobal('fetch', fetch)
+    const res = await app.request(`/api/spy/offers/${offer!.id}/copy-to-crm`, { method: 'POST', headers: auth })
+    expect(res.status).toBe(500)
+    expect(await res.json()).not.toHaveProperty('ok', true)
+    expect(fetch).toHaveBeenCalledTimes(1)
   })
 })
