@@ -1,7 +1,11 @@
 # Release operacional de Ofertas compartilhadas
 
-O CRM aprovado mantém três administradores com logins próprios na mesma empresa,
-chips compartilhados e atribuição por oferta/responsável/conta XPag/pixel. Esta
+O uso solicitado é uma única conta de administrador, com o mesmo login e senha
+usados por três pessoas em sessões simultâneas. Os chips são compartilhados e a
+atribuição por oferta/conta XPag/pixel continua separada. As três sessões têm a
+mesma identidade de responsável; não se criam três contas nem se atribui autoria
+individual com base na sessão. As regressões com usuários distintos continuam
+como cobertura adicional. Esta
 mudança prepara instalação e recuperação; não altera ACL nem cria isolamento de
 visibilidade entre administradores. O UUID de produção continua sem confirmação.
 API e worker são instalados com `SHARED_OFFERS_COMPANY_ID` vazio.

@@ -28,7 +28,7 @@ it('real local read-only MCP initializes, lists flows, denies mutation and revok
     expect((await rpc('tools/list')).status).toBe(401)
   } finally { await t.c.delete('/api/mcp_credentials/' + made.body.mcp_credential.id) }
 })
-it('panel login -> SSO iframe -> Offers navigation works without reload; empty gate hides and denies Offers', async () => {
+it('one administrator account supports three simultaneous browser sessions, shared chips and Offers; empty gate denies access', async () => {
   const panelDir = process.env.PANEL_SOURCE_DIR!, { createTempDatabase, createDb } = await import(panelDir + '/packages/db/src/index.ts'), { createApp } = await import(panelDir + '/apps/api/src/app.ts')
   const tmp = await createTempDatabase({ migrate: true, prefix: 'crm_ci_panel' }), db = createDb(tmp.url)
   const username = 'ci-' + randomBytes(5).toString('hex'), password = 'CI-' + randomBytes(10).toString('hex')
@@ -61,7 +61,37 @@ it('panel login -> SSO iframe -> Offers navigation works without reload; empty g
       const context = await browser.newContext(), page = await context.newPage()
       await page.goto(base + '/#/login'); await page.getByTestId('login-username').fill(username); await page.getByTestId('login-password').fill(password); await page.getByTestId('login-submit').click(); await page.getByTestId('nav-crm').click()
       const frame = page.frameLocator('[data-testid="crm-frame"]'); await frame.getByTestId('nav-item-chats').waitFor()
-      if (enabled) { await frame.getByTestId('nav-item-offers').click(); await frame.getByRole('heading', { name: 'Ofertas compartilhadas' }).waitFor(); expect((await page.request.get(base + '/crm/api/offers')).status()).toBe(200) }
+      if (enabled) {
+        await frame.getByTestId('nav-item-offers').click(); await frame.getByRole('heading', { name: 'Ofertas compartilhadas' }).waitFor()
+        const contexts = [context]
+        // Same panel username/password in three independent browsers, not three users.
+        for (let i = 1; i < 3; i++) {
+          const other = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+          contexts.push(other)
+          const p = await other.newPage()
+          await p.goto(base + '/#/login'); await p.getByTestId('login-username').fill(username); await p.getByTestId('login-password').fill(password); await p.getByTestId('login-submit').click(); await p.getByTestId('nav-crm').click()
+          const f = p.frameLocator('[data-testid="crm-frame"]'); await f.getByTestId('nav-item-offers').click(); await f.getByRole('heading', { name: 'Ofertas compartilhadas' }).waitFor()
+          await p.screenshot({ path: join(process.env.CRM_REPORT_DIR!, `same-account-session-${i + 1}.png`), fullPage: true })
+        }
+        const profiles = await Promise.all(contexts.map(async c => { const r = await c.request.get(base + '/crm/api/auth/profile'); expect(r.status()).toBe(200); return r.json() }))
+        expect(new Set(profiles.map(p => p.user.id)).size).toBe(1)
+        const cookies = await Promise.all(contexts.map(async c => (await c.cookies()).find(x => x.name === 'crm_session')?.value))
+        expect(cookies.every(Boolean)).toBe(true); expect(new Set(cookies).size).toBe(3)
+        expect((await sys.q('select user_id from crm.company_members where company_id=$1', [company]))).toHaveLength(1)
+        const made = await context.request.post(base + '/crm/api/connections', { data: { name: 'Shared chip for one admin account' } }); expect(made.status()).toBe(201)
+        const connection = (await made.json()).connection
+        for (const c of contexts) {
+          const resources = await c.request.get(base + '/crm/api/offers/resources'); expect(resources.status()).toBe(200)
+          expect((await resources.json()).connections.map((x: any) => x.id)).toContain(connection.id)
+          expect((await c.request.get(base + '/crm/api/offers')).status()).toBe(200)
+          expect((await c.request.put(base + '/crm/api/offers/chips/' + connection.id, { data: { enabled: true } })).status()).toBe(200)
+        }
+        // Signing out one person must not revoke the other two sessions.
+        expect((await contexts[1]!.request.post(base + '/crm/api/auth/logout', { data: {} })).status()).toBe(200)
+        expect((await contexts[1]!.request.get(base + '/crm/api/offers')).status()).toBe(401)
+        for (const c of [contexts[0]!, contexts[2]!]) expect((await c.request.get(base + '/crm/api/offers')).status()).toBe(200)
+        await contexts[1]!.close(); await contexts[2]!.close()
+      }
       else { expect(await frame.getByTestId('nav-item-offers').count()).toBe(0); expect((await page.request.get(base + '/crm/api/offers')).status()).toBe(404) }
       await page.screenshot({ path: join(process.env.CRM_REPORT_DIR!, enabled ? 'sso-offers-enabled.png' : 'sso-gate-empty.png'), fullPage: true }); await context.close()
     }

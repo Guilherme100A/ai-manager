@@ -41,6 +41,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: bash scripts/test-deploy-vps.sh
       - run: node --test scripts/crm-release/release.test.mjs
+      - run: node --test scripts/crm-release/prepare-ci-tests.test.mjs
       - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm test
@@ -93,6 +94,7 @@ jobs:
           pnpm --dir "$RUNNER_TEMP/crm-source" install --frozen-lockfile
           pnpm --dir "$RUNNER_TEMP/crm-source" exec playwright install --with-deps chromium
           pnpm --dir "$RUNNER_TEMP/crm-source" --filter @crm/web build
+          cp -R "$RUNNER_TEMP/crm-source/apps/web/dist" "$RUNNER_TEMP/output/shared-offers/revisor-web-dist"
           VITE_BASE_PATH=/crm/ VITE_API_BASE=/crm/api pnpm --dir "$RUNNER_TEMP/crm-source" --filter @crm/web exec vite build --outDir "$CRM_EMBEDDED_DIST"
       - name: Real disposable PostgreSQL backup/restore/migrate/idempotence rehearsal
         env:
@@ -101,15 +103,17 @@ jobs:
       - name: Fake providers, shared administrators/offers, UI, panel SSO and read-only MCP
         run: |
           cp integrations/shared-offers/tests/operational-ci.test.ts "$RUNNER_TEMP/crm-source/tests/acceptance/T125/operational-ci.test.ts"
+          node scripts/crm-release/prepare-ci-tests.mjs prepare "$RUNNER_TEMP/crm-source"
           cd "$RUNNER_TEMP/crm-source"
-          pnpm exec vitest run --config tests/acceptance/vitest.config.ts tests/acceptance/T125/shared-offers.test.ts tests/acceptance/T125/revisor-shared-offers.test.ts tests/acceptance/T125/operational-ci.test.ts --reporter=json --outputFile="$CRM_REPORT_DIR/integration.json"
+          pnpm exec vitest run --config tests/acceptance/vitest.config.ts tests/acceptance/T125/shared-offers.test.ts tests/acceptance/T125/revisor-gated-ci.test.ts tests/acceptance/T125/operational-ci.test.ts --reporter=json --outputFile="$CRM_REPORT_DIR/integration.json"
+          node "$GITHUB_WORKSPACE/scripts/crm-release/prepare-ci-tests.mjs" verify "$CRM_REPORT_DIR/integration.json"
           pnpm --filter @crm/core exec vitest run src/offers src/flows/engine src/flows/triggers src/payments/webhooks src/mcp src/mcp-oauth --maxWorkers=2 --reporter=json --outputFile="$CRM_REPORT_DIR/core.json"
           pnpm --filter @crm/worker test
           for package in @crm/api @crm/core @crm/web @crm/worker; do pnpm --filter "$package" typecheck; done
           git diff --exit-code
       - name: Build immutable Alpine/musl release (never copy runner node_modules)
         run: |
-          printf '.git\n**/node_modules\n**/dist\noutput\n.env\ntests/acceptance/T125/operational-ci.test.ts\n' > "$RUNNER_TEMP/crm-source/.dockerignore"
+          printf '.git\n**/node_modules\n**/dist\noutput\n.env\ntests/acceptance/T125/operational-ci.test.ts\ntests/acceptance/T125/revisor-gated-ci.test.ts\n' > "$RUNNER_TEMP/crm-source/.dockerignore"
           docker build --platform linux/amd64 --build-arg SOURCE_TREE=24cec7d30f200818e64cd9693bfe8ff38ed1d0c3 -f integrations/shared-offers/Dockerfile -t "crm-shared-offers:$GITHUB_SHA" "$RUNNER_TEMP/crm-source"
           docker run --rm --network none -w /crm/apps/api "crm-shared-offers:$GITHUB_SHA" node --conditions=development /crm/node_modules/tsx/dist/cli.mjs -e "import('@crm/core').then(()=>console.log('Alpine workspace/dependencies load'))"
           docker volume create "ci_crm_${GITHUB_RUN_ID}_deps"
