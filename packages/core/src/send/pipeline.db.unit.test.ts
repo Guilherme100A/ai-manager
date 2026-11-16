@@ -160,6 +160,20 @@ describe('gates default', () => {
     await db.update(messages).set({ status: 'cancelled' }).where(eq(messages.sessionId, id))
     await expect(pipeline.send(req(id))).resolves.toBeDefined()
   })
+
+  it('mensagens do CRM (origin crm) não contam nos limites; a origem fica gravada na mensagem', async () => {
+    const { pipeline, transports } = setup()
+    await contact()
+    const id = await session('STABLE', 30 * DAY_MS)
+    transports.set(id, new FakeTransport())
+    await seedSent(id, DEFAULT_SEND_LIMITS.perMinute, new Date(now.getTime() - 10_000))
+    await db.update(messages).set({ origin: 'crm' }).where(eq(messages.sessionId, id))
+    await expect(pipeline.send(req(id))).resolves.toBeDefined()
+    await pipeline.send({ ...req(id), origin: 'crm' })
+    const rows = await db.select({ origin: messages.origin }).from(messages).where(eq(messages.sessionId, id))
+    expect(rows.filter((r) => r.origin === 'crm')).toHaveLength(DEFAULT_SEND_LIMITS.perMinute + 1)
+    expect(rows.filter((r) => r.origin === null)).toHaveLength(1)
+  })
 })
 
 describe('limites por sessão (AC-T09-05)', () => {

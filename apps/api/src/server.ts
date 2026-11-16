@@ -1,13 +1,14 @@
 // Entrypoint HTTP: lê env, cria dependências reais e sobe o servidor.
 // T16: logger de observabilidade (T15), métricas do processo e ponte com o worker (WORKER_INTERNAL_URL).
 import { serve } from '@hono/node-server'
-import { createMetrics } from '@wsm/core'
+import { createMetrics, sessionProxyFetch, SpyFinder, SpyHttp, SpyRunner, SpyStore } from '@wsm/core'
 import { createDb } from '@wsm/db'
 import { Redis } from 'ioredis'
 import { createApp } from './app'
 import { createWorkerBridge } from './bridge/client'
 import { loadConfig } from './config'
 import { createApiLogger } from './observability'
+import { startAutomaticSpyProbe } from './spy-auto'
 
 const config = loadConfig()
 const logger = createApiLogger({ level: config.LOG_LEVEL })
@@ -33,6 +34,17 @@ const app = createApp({
 const server = serve({ fetch: app.fetch, port: config.PORT, hostname: config.HOST }, (info) => {
   logger.info({ port: info.port, worker_bridge: Boolean(bridge) }, 'api listening')
 })
+
+// Espião de funil: um link por vez, devagar (Facebook e buscador sem login). Com SPY_PROXY_SESSION, Facebook
+// e DuckDuckGo (que barram IP de servidor) saem pelo proxy daquele chip; o Serper sai direto.
+const spyProxy = config.SPY_PROXY_SESSION ? sessionProxyFetch(db, config.SPY_PROXY_SESSION) : undefined
+const spy = config.SPY_RUNNER === 'on'
+  ? new SpyRunner({ store: new SpyStore(db), finder: new SpyFinder(new SpyHttp({
+    serperKey: config.SPY_SERPER_KEY,
+    ...(spyProxy ? { facebookFetch: spyProxy, searchFetch: spyProxy } : {}),
+  })), logger, onOfferFound: (offerId) => startAutomaticSpyProbe({ db, redis, logger, offerId }).then(() => undefined) })
+  : undefined
+spy?.start()
 
 let closing = false
 async function shutdown(signal: string) {

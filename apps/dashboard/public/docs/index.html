@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Documentação operacional do MCP do CRM para agentes de IA." />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>MCP do CRM — Documentação</title>
+    <script>
+      (() => {
+        const stored = localStorage.getItem('wsm.theme')
+        document.documentElement.dataset.theme = stored === 'light' || stored === 'dark'
+          ? stored
+          : matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+      })()
+    </script>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #fafafa;
+        --panel: #ffffff;
+        --panel-2: #f4f4f5;
+        --panel-3: #ececef;
+        --line: #e4e4e7;
+        --line-strong: #d4d4d8;
+        --text: #0b0b0f;
+        --muted: #5b5b66;
+        --accent: #4f46e5;
+        --accent-fg: #ffffff;
+        --accent-soft: rgb(79 70 229 / 0.1);
+        --warning: #9a5b00;
+        --warning-soft: rgb(154 91 0 / 0.08);
+        --danger: #b91c1c;
+        --danger-soft: rgb(185 28 28 / 0.08);
+        --code: #f4f4f5;
+        --code-text: #3730a3;
+        --shadow: 0 1px 2px rgb(16 16 24 / 0.04), 0 4px 16px -6px rgb(16 16 24 / 0.08);
+        --shadow-lg: 0 12px 40px -12px rgb(16 16 24 / 0.18);
+      }
+
+      :root[data-theme='dark'] {
+        color-scheme: dark;
+        --bg: #09090b;
+        --panel: #111114;
+        --panel-2: #18181c;
+        --panel-3: #212126;
+        --line: #232329;
+        --line-strong: #303038;
+        --text: #ededf0;
+        --muted: #a0a0ab;
+        --accent: #8b8dff;
+        --accent-fg: #0b0b14;
+        --accent-soft: rgb(139 141 255 / 0.12);
+        --warning: #fbbf24;
+        --warning-soft: rgb(251 191 36 / 0.09);
+        --danger: #f87171;
+        --danger-soft: rgb(248 113 113 / 0.1);
+        --code: #0d0d10;
+        --code-text: #c7d2fe;
+        --shadow: 0 1px 0 rgb(255 255 255 / 0.03) inset, 0 8px 24px -12px rgb(0 0 0 / 0.6);
+        --shadow-lg: 0 24px 60px -20px rgb(0 0 0 / 0.8);
+      }
+
+      * { box-sizing: border-box; }
+      html { scroll-behavior: smooth; }
+      body {
+        margin: 0;
+        min-width: 320px;
+        background: var(--bg);
+        color: var(--text);
+        font: 15px/1.65 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      a { color: var(--accent); text-decoration: none; }
+      a:hover { text-decoration: underline; }
+      code, pre { font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; }
+      code {
+        padding: 0.12rem 0.35rem;
+        border: 1px solid var(--line);
+        border-radius: 0.35rem;
+        background: var(--code);
+        color: var(--code-text);
+        font-size: 0.9em;
+      }
+
+      .layout { display: grid; grid-template-columns: 272px minmax(0, 1fr); min-height: 100vh; }
+      .sidebar {
+        position: sticky;
+        top: 0;
+        height: 100vh;
+        padding: 28px 20px;
+        border-right: 1px solid var(--line);
+        background: color-mix(in srgb, var(--panel) 94%, transparent);
+        backdrop-filter: blur(18px);
+        overflow-y: auto;
+      }
+
+      .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 26px; }
+      .brand-mark {
+        display: grid;
+        place-items: center;
+        width: 38px;
+        height: 38px;
+        border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line));
+        border-radius: 11px;
+        background: var(--accent-soft);
+        color: var(--accent);
+        font-weight: 800;
+      }
+      .brand strong { display: block; font-size: 14px; }
+      .brand span { display: block; color: var(--muted); font-size: 12px; }
+      .nav-title {
+        margin: 22px 10px 8px;
+        color: var(--muted);
+        opacity: 0.7;
+        font-size: 10px;
+        font-weight: 800;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+      nav a {
+        display: block;
+        padding: 7px 10px;
+        border-radius: 7px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      nav a:hover, nav a.active { background: var(--accent-soft); color: var(--text); text-decoration: none; }
+
+      main { width: min(100%, 1050px); padding: 72px 64px 100px; }
+      .eyebrow { color: var(--accent); font-size: 12px; font-weight: 800; letter-spacing: 0.13em; text-transform: uppercase; }
+      h1 { max-width: 800px; margin: 12px 0 16px; font-size: clamp(36px, 5vw, 56px); line-height: 1.05; letter-spacing: -0.04em; font-weight: 650; }
+      .lead { max-width: 760px; margin: 0; color: var(--muted); font-size: 18px; }
+      .status-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 28px; }
+      .pill { padding: 7px 11px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); color: var(--muted); font-size: 12px; }
+      .pill.ok { border-color: color-mix(in srgb, var(--accent) 28%, var(--line)); color: var(--accent); }
+
+      section { max-width: 880px; padding-top: 82px; scroll-margin-top: 20px; }
+      h2 { margin: 0 0 16px; font-size: 30px; letter-spacing: -0.025em; }
+      h3 { margin: 34px 0 10px; font-size: 19px; }
+      p { color: var(--muted); }
+      ul, ol { padding-left: 1.35rem; color: var(--muted); }
+      li + li { margin-top: 6px; }
+
+      .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 20px; }
+      .card { padding: 20px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); box-shadow: var(--shadow); }
+      .card h3 { margin: 0 0 6px; font-size: 16px; }
+      .card p { margin: 0; font-size: 13px; }
+      .card.danger { border-color: color-mix(in srgb, var(--danger) 28%, var(--line)); }
+
+      .callout { margin: 20px 0; padding: 16px 18px; border-left: 3px solid var(--accent); border-radius: 0 10px 10px 0; background: var(--accent-soft); color: var(--text); }
+      .callout.warning { border-left-color: var(--warning); background: var(--warning-soft); }
+
+      .code-wrap { position: relative; margin: 18px 0; }
+      pre { margin: 0; padding: 20px; border: 1px solid var(--line); border-radius: 12px; background: var(--code); color: var(--code-text); overflow-x: auto; line-height: 1.55; font-size: 13px; }
+      .copy {
+        position: absolute;
+        top: 9px;
+        right: 9px;
+        padding: 6px 9px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: var(--panel);
+        color: var(--muted);
+        cursor: pointer;
+      }
+      .copy:hover { color: var(--text); border-color: var(--line-strong); background: var(--panel-2); }
+
+      table { width: 100%; border-collapse: collapse; margin-top: 18px; border: 1px solid var(--line); background: var(--panel); }
+      th, td { padding: 11px 13px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+      th { color: var(--muted); font-size: 11px; letter-spacing: 0.07em; text-transform: uppercase; }
+      td { color: var(--muted); font-size: 13px; }
+
+      .tools { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 18px; }
+      .tool-group { padding: 17px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+      .tool-group h3 { margin: 0 0 10px; font-size: 15px; }
+      .tool-group p { margin: 0; color: #8fa69e; font-size: 12px; }
+      .tool-list { margin-top: 10px; color: var(--code-text); font-family: "Cascadia Code", Consolas, monospace; font-size: 11px; word-break: break-word; }
+      footer { max-width: 880px; margin-top: 90px; padding-top: 24px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+
+      @media (max-width: 820px) {
+        .layout { display: block; }
+        .sidebar { position: relative; width: 100%; height: auto; padding: 18px 20px; border-right: 0; border-bottom: 1px solid var(--line); }
+        .brand { margin: 0; }
+        .sidebar nav { display: none; }
+        main { padding: 48px 22px 70px; }
+        section { padding-top: 62px; }
+        .grid, .tools { grid-template-columns: 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="layout">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">M</div>
+          <div><strong>MCP do CRM</strong><span>Guia para agentes de IA</span></div>
+        </div>
+        <nav aria-label="Navegação da documentação">
+          <div class="nav-title">Começar</div>
+          <a href="#visao-geral">Visão geral</a>
+          <a href="#conexao">Conexão</a>
+          <a href="#inicio">Início obrigatório</a>
+          <div class="nav-title">Operação</div>
+          <a href="#seguranca">Regras de segurança</a>
+          <a href="#fluxos">Criar fluxos</a>
+          <a href="#ferramentas">Ferramentas</a>
+          <a href="#erros">Erros</a>
+          <div class="nav-title">Referência</div>
+          <a href="#json-rpc">JSON-RPC</a>
+          <a href="#prompt">Prompt para agentes</a>
+          <a href="#checklist">Checklist</a>
+        </nav>
+      </aside>
+
+      <main>
+        <header id="visao-geral">
+          <div class="eyebrow">Documentação operacional</div>
+          <h1>Use o CRM com IA, com controle.</h1>
+          <p class="lead">Conexão, ferramentas e procedimento seguro para uma IA consultar dados, operar conversas e construir fluxos pelo MCP.</p>
+          <div class="status-row">
+            <span class="pill ok">Servidor ativo</span>
+            <span class="pill">Streamable HTTP</span>
+            <span class="pill">Protocolo 2025-06-18</span>
+            <span class="pill">OAuth + token estático</span>
+          </div>
+        </header>
+
+        <section id="conexao">
+          <div class="eyebrow">01 · Conexão</div>
+          <h2>Endpoint e credenciais</h2>
+          <p>O endpoint genérico do servidor é:</p>
+          <div class="code-wrap"><button class="copy" type="button">Copiar</button><pre>https://crm.148.113.255.144.sslip.io/api/mcp</pre></div>
+          <div class="grid">
+            <article class="card">
+              <h3>Credencial read</h3>
+              <p>Para relatórios, leitura de conversas, métricas, contatos, conexões e inspeção de fluxos. Não expõe ferramentas de escrita.</p>
+            </article>
+            <article class="card">
+              <h3>Credencial write</h3>
+              <p>Permite alterações compatíveis com as permissões do usuário: criar fluxos, enviar mensagens, mover cards e outras operações.</p>
+            </article>
+          </div>
+          <h3>OAuth</h3>
+          <p>Para clientes interativos, crie uma credencial OAuth no CRM e use a URL individual:</p>
+          <div class="code-wrap"><button class="copy" type="button">Copiar</button><pre>https://crm.148.113.255.144.sslip.io/api/mcp/ID_DA_CREDENCIAL</pre></div>
+          <h3>Token estático</h3>
+          <p>Envie o token no cabeçalho de todas as chamadas:</p>
+          <div class="code-wrap"><button class="copy" type="button">Copiar</button><pre>Authorization: Bearer ${CRM_MCP_TOKEN}</pre></div>
+          <div class="callout warning"><strong>Segredo:</strong> nunca coloque o token em prompts, documentação, commits ou logs. O token estático só aparece uma vez, na criação.</div>
+        </section>
+
+        <section id="inicio">
+          <div class="eyebrow">02 · Inicialização</div>
+          <h2>O que a IA deve fazer primeiro</h2>
+          <ol>
+            <li>Executar <code>initialize</code>.</li>
+            <li>Executar <code>tools/list</code>.</li>
+            <li>Ler <code>description</code>, <code>inputSchema</code> e <code>annotations</code> antes de usar cada ferramenta.</li>
+            <li>Buscar IDs pelas ferramentas de listagem. Nunca inventar UUIDs.</li>
+            <li>Ler o estado atual antes de alterá-lo.</li>
+            <li>Após escrever, reler ou validar o recurso.</li>
+          </ol>
+          <div class="callout">A lista é dinâmica. Uma ferramenta ausente normalmente indica credencial somente leitura, permissão insuficiente ou usuário sem vínculo ativo com a empresa.</div>
+        </section>
+
+        <section id="seguranca">
+          <div class="eyebrow">03 · Segurança</div>
+          <h2>Limites para o agente</h2>
+          <div class="grid">
+            <article class="card"><h3>Leia antes de editar</h3><p>Use <code>get_flow</code> e as consultas equivalentes antes de qualquer alteração.</p></article>
+            <article class="card"><h3>Valide e simule</h3><p>Um fluxo deve passar por <code>validate_flow</code> e <code>simulate_flow</code> antes da ativação.</p></article>
+            <article class="card danger"><h3>Impacto real</h3><p><code>send_message</code> e <code>trigger_flow</code> alcançam clientes reais. Exigem pedido explícito.</p></article>
+            <article class="card danger"><h3>Destruição</h3><p>Ferramentas <code>delete_*</code> e remoções de nós, ações ou conexões exigem confirmação explícita.</p></article>
+          </div>
+          <ul>
+            <li>Use <code>client_message_id</code> ao enviar mensagens para impedir duplicação.</li>
+            <li>Valores <code>*_cents</code> estão em centavos: R$ 49,90 é <code>4990</code>.</li>
+            <li>Não prossiga se o resultado MCP tiver <code>isError: true</code>.</li>
+            <li>Nunca adivinhe tipos de bloco, ações, configurações ou handles.</li>
+          </ul>
+        </section>
+
+        <section id="fluxos">
+          <div class="eyebrow">04 · Fluxos</div>
+          <h2>Como construir um fluxo</h2>
+          <ol>
+            <li>Chame <code>get_flow_block_catalog</code> sem argumentos para descobrir os tipos de nó.</li>
+            <li>Consulte cada <code>node_type</code> que pretende usar e leia ações, exemplos, schemas e handles.</li>
+            <li>Crie o rascunho com <code>create_flow</code>.</li>
+            <li>Leia o resultado com <code>get_flow</code> para descobrir o nó inicial e a definição atual.</li>
+            <li>Monte incrementalmente com <code>add_flow_node</code>, <code>add_node_action</code> e <code>connect_nodes</code>, ou substitua o grafo inteiro com <code>save_flow_definition</code>.</li>
+            <li>Leia o fluxo novamente e confira nós, ações e arestas.</li>
+            <li>Execute <code>validate_flow</code> e corrija todos os erros.</li>
+            <li>Execute <code>simulate_flow</code> e percorra os caminhos relevantes.</li>
+            <li>Mostre um resumo ao usuário.</li>
+            <li>Só execute <code>activate_flow</code> após autorização explícita.</li>
+          </ol>
+          <h3>Regras do grafo</h3>
+          <ul>
+            <li><code>entry</code> aponta para o nó inicial.</li>
+            <li>Uma saída possui somente um destino.</li>
+            <li>Handles comuns incluem <code>source</code>, <code>timeout</code>, <code>other</code>, <code>failure</code>, <code>success</code>, <code>option:&lt;id&gt;</code> e <code>output:&lt;chave&gt;</code>.</li>
+            <li>O handle correto deve vir do catálogo ou de <code>get_flow</code>.</li>
+            <li><code>save_flow_definition</code> substitui todo o rascunho. Preserve todos os elementos existentes.</li>
+          </ul>
+        </section>
+
+        <section id="ferramentas">
+          <div class="eyebrow">05 · Catálogo</div>
+          <h2>Ferramentas por área</h2>
+          <p>Os nomes ajudam no planejamento. O schema vigente sempre deve ser lido em <code>tools/list</code>.</p>
+          <div class="tools">
+            <article class="tool-group"><h3>Base</h3><p>Contatos, chips, chats e fluxos.</p><div class="tool-list">list_contacts · get_contact · list_connections · list_flows · list_chats</div></article>
+            <article class="tool-group"><h3>Conversas</h3><p>Ler histórico, notas e timeline; enviar, atribuir, etiquetar e resolver.</p><div class="tool-list">list_conversations · get_conversation_counts · get_conversation · get_conversation_messages · get_conversation_notes · get_conversation_timeline · get_conversation_flow_runs · list_labels · send_message · add_conversation_note · update_conversation · set_conversation_status · assign_conversation · label_conversation</div></article>
+            <article class="tool-group"><h3>Fluxos</h3><p>Catálogo, grafo, validação, simulação, execução e funil.</p><div class="tool-list">get_flow_block_catalog · get_flow · validate_flow · simulate_flow · get_flow_deletion_impact · list_flow_runs · get_flow_run · get_flow_funnel · create_flow · update_flow · duplicate_flow · delete_flow · save_flow_definition · add_flow_node · update_flow_node · delete_flow_node · add_node_action · update_node_action · delete_node_action · connect_nodes · disconnect_nodes · activate_flow · pause_flow · archive_flow · unarchive_flow · trigger_flow · cancel_flow_run</div></article>
+            <article class="tool-group"><h3>Métricas, vendas e Kanban</h3><p>Dashboards, vendas, quadros e movimentações.</p><div class="tool-list">get_sales_metrics · get_attendance_metrics · list_sales · get_sale · record_sale · delete_sale · list_kanban_boards · get_kanban_funnel · list_kanban_cards · move_kanban_card · get_ad_metrics</div></article>
+            <article class="tool-group"><h3>Pixels e links</h3><p>Meta CAPI, eventos enviados e links rastreáveis.</p><div class="tool-list">list_pixels · get_pixel · create_pixel · update_pixel · delete_pixel · list_pixel_events · list_tracked_links · create_tracked_link · update_tracked_link · delete_tracked_link</div></article>
+            <article class="tool-group"><h3>Pagamentos e produtos</h3><p>Gateways, produtos e fontes de venda.</p><div class="tool-list">list_payment_integrations · get_payment_integration · create_payment_integration · update_payment_integration · test_payment_integration · delete_payment_integration · list_products · get_product · create_product · list_sale_sources · get_sale_source · list_sale_source_events</div></article>
+          </div>
+          <div class="callout warning"><strong>Espionar:</strong> o módulo de sondagem de anúncios ainda não está exposto no MCP. Colar um link de anúncio não cria uma sonda por essas ferramentas.</div>
+        </section>
+
+        <section id="erros">
+          <div class="eyebrow">06 · Recuperação</div>
+          <h2>Como interpretar erros</h2>
+          <table>
+            <thead><tr><th>Resposta</th><th>Significado</th><th>Ação</th></tr></thead>
+            <tbody>
+              <tr><td><code>401</code></td><td>Token ausente, inválido, expirado ou revogado.</td><td>Parar e obter uma credencial válida.</td></tr>
+              <tr><td><code>403</code></td><td>Sem escrita ou sem permissão funcional.</td><td>Não contornar; solicitar o acesso correto.</td></tr>
+              <tr><td><code>404</code></td><td>Recurso inexistente ou de outra empresa.</td><td>Refazer a busca e conferir o ID.</td></tr>
+              <tr><td><code>409</code></td><td>Conflito de estado ou dependência em uso.</td><td>Ler o impacto e apresentar opções.</td></tr>
+              <tr><td><code>422</code></td><td>Argumentos inválidos.</td><td>Corrigir conforme o schema e os campos do erro.</td></tr>
+              <tr><td><code>isError: true</code></td><td>A API recusou a operação.</td><td>Não assumir sucesso nem continuar o encadeamento.</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="json-rpc">
+          <div class="eyebrow">07 · Diagnóstico</div>
+          <h2>Exemplo JSON-RPC</h2>
+          <div class="code-wrap"><button class="copy" type="button">Copiar</button><pre>curl -sS 'https://crm.148.113.255.144.sslip.io/api/mcp' \
+  -H "Authorization: Bearer $CRM_MCP_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2025-06-18' \
+  --data '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+      "protocolVersion": "2025-06-18",
+      "capabilities": {},
+      "clientInfo": { "name": "agente", "version": "1.0" }
+    }
+  }'</pre></div>
+          <p>Chamada de ferramenta:</p>
+          <div class="code-wrap"><button class="copy" type="button">Copiar</button><pre>{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/call",
+  "params": {
+    "name": "list_connections",
+    "arguments": {}
+  }
+}</pre></div>
+        </section>
+
+        <section id="prompt">
+          <div class="eyebrow">08 · Agente</div>
+          <h2>Prompt pronto</h2>
+          <div class="code-wrap"><button class="copy" type="button">Copiar</button><pre>Você opera o CRM exclusivamente pelas ferramentas MCP disponíveis.
+
+No começo da sessão, liste as ferramentas e leia os schemas. Nunca invente IDs,
+tipos de bloco, ações, configurações ou handles. Antes de editar um fluxo, leia-o
+com get_flow. Antes de criar ou alterar blocos, consulte get_flow_block_catalog.
+
+Faça leituras diretamente. Antes de escrever, informe resumidamente o que será
+alterado. Não envie mensagens reais, não dispare nem ative fluxos e não execute
+ações destrutivas sem autorização explícita. Para fluxos: crie em rascunho,
+valide, simule, apresente o resultado e só então peça autorização para ativar.
+
+Após cada escrita, releia o recurso ou use a validação correspondente. Se uma
+ferramenta retornar isError, explique o erro e pare o encadeamento dependente.
+Não exponha tokens, segredos ou dados sensíveis em respostas ou logs.</pre></div>
+        </section>
+
+        <section id="sonda">
+          <div class="eyebrow">Sonda · Ofertas e arquivos capturados</div>
+          <h2>Consultar e baixar funis da Sonda</h2>
+          <p>Use <code>list_spy_offers</code> para escolher uma oferta pelo ID e
+          <code>get_spy_flow</code> ou <code>get_spy_offer</code> para ler o roteiro,
+          resumo, conversas e catálogo de mídias. O ID da oferta é diferente do ID de um fluxo CRM.</p>
+          <ul>
+            <li><code>list_spy_probes</code>: sondas, chips e status.</li>
+            <li><code>get_spy_probe_messages</code>: conversa de uma sonda pelo ID dela.</li>
+            <li><code>list_spy_media</code>: arquivos disponíveis de uma oferta.</li>
+            <li><code>download_spy_media</code>: bytes de PDF, áudio, imagem ou vídeo pelo ID da mídia.</li>
+            <li><code>export_spy_offer_zip</code>: pacote com resumo, roteiro, conversas e mídias capturadas.</li>
+            <li><code>import_spy_offer_to_crm</code>: cria uma nova cópia em rascunho editável com as mídias; exige escrita e flows.edit. Cada chamada cria uma cópia.</li>
+          </ul>
+          <p>Downloads retornam JSON com <code>data</code> em base64, <code>total_bytes</code>,
+          <code>sha256</code>, <code>next_offset</code> e <code>expires_at</code>.
+          Comece com offset=0; repita com o next_offset devolvido até ele ser null.
+          Decodifique cada parte e concatene os bytes em ordem. Confira o SHA-256 do arquivo final.
+          O padrão é 256 KiB; length aceita até 1 MiB. A cópia permanece estável por cinco minutos;
+          se expirar, reinicie em offset=0. O pacote inclui apenas arquivos efetivamente capturados.</p>
+          <p>Consultas e downloads exigem flows.view. A ponte só atende à empresa proprietária da Sonda;
+          instalações com várias empresas precisam definir CRM_SPY_COMPANY_ID.</p>
+        </section>
+
+        <section id="checklist">
+          <div class="eyebrow">09 · Saúde</div>
+          <h2>Checklist do servidor</h2>
+          <ul>
+            <li>Endpoint sem token responde <code>401</code> com <code>WWW-Authenticate</code>.</li>
+            <li>Os documentos OAuth em <code>/.well-known/</code> respondem JSON.</li>
+            <li><code>initialize</code> devolve <code>leonas-crm</code>.</li>
+            <li><code>tools/list</code> mostra somente o permitido para a credencial.</li>
+            <li>Uma leitura simples, como <code>list_connections</code>, retorna conteúdo válido.</li>
+            <li>O uso atualiza <code>last_used_at</code>.</li>
+            <li>Token revogado responde <code>401</code> imediatamente.</li>
+          </ul>
+        </section>
+
+        <footer>Documentação do MCP do CRM · O servidor e seus schemas são a fonte final de verdade.</footer>
+      </main>
+    </div>
+
+    <script>
+      const links = [...document.querySelectorAll('nav a')]
+      const sections = links.map((link) => document.querySelector(link.getAttribute('href'))).filter(Boolean)
+      const observer = new IntersectionObserver((entries) => {
+        const visible = entries.filter((entry) => entry.isIntersecting).sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0]
+        if (!visible) return
+        links.forEach((link) => link.classList.toggle('active', link.getAttribute('href') === `#${visible.target.id}`))
+      }, { rootMargin: '-15% 0px -65% 0px', threshold: [0, 0.25, 0.6] })
+      sections.forEach((section) => observer.observe(section))
+
+      document.querySelectorAll('.copy').forEach((button) => {
+        button.addEventListener('click', async () => {
+          const text = button.nextElementSibling.textContent
+          await navigator.clipboard.writeText(text)
+          const previous = button.textContent
+          button.textContent = 'Copiado'
+          setTimeout(() => { button.textContent = previous }, 1200)
+        })
+      })
+    </script>
+  </body>
+</html>

@@ -123,6 +123,8 @@ export const messages = pgTable(
     direction: messageDirectionEnum('direction').notNull().default('outbound'),
     phone: text('phone').notNull(),
     content: jsonb('content').notNull(),
+    /** Quem originou o envio: `crm` (ponte do CRM, fora dos limites do chip e do antiban); null = o próprio ai-manager. */
+    origin: text('origin'),
     status: messageStatusEnum('status').notNull().default('queued'),
     transportMessageId: text('transport_message_id'),
     attempts: integer('attempts').notNull().default(0),

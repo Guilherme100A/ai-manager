@@ -44,6 +44,7 @@ export * from './safety'
 // T13 — IA assistiva (AiAssistant, AnthropicProvider, SuggestionService, aiConfigFromEnv)
 export * from './ai'
 export * from './session-router'
+export * from './spy'
 export * from './conversations'
 
 // Relatório diário por chip (quedas, bloqueios, envios, grupos)

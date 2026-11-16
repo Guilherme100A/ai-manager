@@ -96,3 +96,30 @@ describe('ContactsService', () => {
     expect(row).toBeUndefined()
   })
 })
+
+describe('ContactsService.recordConsent (integração CRM, A7)', () => {
+  it('cria com consentimento e audita; atualiza a origem; não reverte opt-out, exceto manual', async () => {
+    const phone = '+5511910009001'
+    const created = await service.recordConsent({ phone, source: 'inbound', actor: 'crm:u1', name: 'Ana' })
+    expect(created).toMatchObject({ phone, consent: true, consentSource: 'inbound', optOut: false, name: 'Ana' })
+    expect(created.consentAt).toBeInstanceOf(Date)
+    const audit = await db.select().from(auditLogs).where(eq(auditLogs.targetId, created.id))
+    expect(audit.find((a) => a.action === 'contact.consent')).toMatchObject({ actor: 'crm:u1', detail: { phone, source: 'inbound', via: 'crm' } })
+
+    // nome existente é mantido; origem nova
+    expect(await service.recordConsent({ phone, source: 'import', name: 'Outro' })).toMatchObject({ consentSource: 'import', name: 'Ana' })
+
+    await service.recordOptOut(phone, { keyword: 'crm', source: 'crm', actor: 'crm:u1' })
+    expect((await db.select().from(auditLogs).where(eq(auditLogs.action, 'contact.opt_out'))).at(-1)).toMatchObject({ detail: { source: 'crm' } })
+    expect(await service.recordConsent({ phone, source: 'webhook' })).toMatchObject({ optOut: true, consent: true })
+    expect(canMessage(await service.findByPhone(phone))).toEqual({ ok: false, reason: 'opt_out' })
+    expect(await service.recordConsent({ phone, source: 'manual', actor: 'crm:u1' })).toMatchObject({ optOut: false, consentSource: 'manual' })
+    expect(canMessage(await service.findByPhone(phone))).toEqual({ ok: true })
+  })
+
+  it('valida telefone e origem', async () => {
+    await expect(service.recordConsent({ phone: '11999', source: 'manual' })).rejects.toMatchObject({ code: 'invalid_phone' })
+    await expect(service.recordConsent({ phone: '+5511910009002', source: 'x' as never })).rejects.toBeInstanceOf(ContactError)
+    expect(await service.findByPhone('+5511910009002')).toBeUndefined()
+  })
+})

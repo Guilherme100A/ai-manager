@@ -222,3 +222,105 @@ export interface AutoReplyTarget {
   replies24h: number
   lastSentAt: string | null
 }
+
+/** Espião de funil: um link colado (anúncio, busca da Biblioteca, post ou wa.me) e o número achado. */
+export type SpyAdStatus = 'na_fila' | 'lendo' | 'achado' | 'sem_numero' | 'erro' | 'expandido'
+export type SpyFoundVia = 'link' | 'texto' | 'post' | 'pagina' | 'manual'
+
+export interface SpyAd {
+  id: string
+  inputUrl: string
+  parentId: string | null
+  adArchiveId: string | null
+  pageId: string | null
+  pageName: string | null
+  status: SpyAdStatus
+  phone: string | null
+  foundVia: SpyFoundVia | null
+  evidenceUrl: string | null
+  error: string | null
+  data: { body?: string; title?: string; ctaType?: string; profileUri?: string; candidates?: string[] }
+  offerId: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface SpyOffer {
+  id: string
+  phone: string
+  pageId: string | null
+  pageName: string | null
+  status: string
+  ads: number
+  createdAt: string
+}
+
+export interface SpyEnqueueResult {
+  created: SpyAd[]
+  skipped: Array<{ link: string; reason: string }>
+}
+
+export interface SpyAutoProbeConfig {
+  excludedSessionIds: string[]
+}
+
+export type SpyProbeStatus = 'ativa' | 'concluida' | 'parada' | 'erro'
+
+export interface SpyProbe {
+  id: string
+  offerId: string
+  sessionId: string
+  phone: string
+  branch: string
+  status: SpyProbeStatus
+  turns: number
+  maxTurns: number
+  replyDueAt: string | null
+  lastInboundAt: string | null
+  lastOutboundAt: string | null
+  listenUntil: string | null
+  summary: { etapa?: string; preco?: string; checkout?: string[]; opcoes?: string[]; notas?: string; humano?: boolean; links?: string[] }
+  endedReason: string | null
+  startedAt: string
+  endedAt: string | null
+  sessionName: string | null
+  pageName: string | null
+  offerTitle: string | null
+}
+
+export interface SpyProbeTurn {
+  de: 'eu' | 'oferta'
+  texto: string
+  at: string
+}
+
+export interface SpySavedFlow {
+  id: string
+  phone: string
+  pageName: string | null
+  status: string
+  title: string
+  source: 'captured' | 'imported'
+  mediaCount: number
+  branchCount: number
+  updatedAt: string
+}
+
+export interface SpyFlowDetail {
+  id: string
+  phone: string
+  title: string
+  source: 'captured' | 'imported'
+  status: string
+  script: string
+  summary: string
+  conversations: Array<{ fileName: string; content: string }>
+  media: Array<{ id: string; branch: string | null; kind: string; mime: string; fileName: string | null; size: number }>
+}
+
+export interface SpyFlowImportResult {
+  id: string
+  title: string
+  mediaAdded: number
+  conversations: number
+}

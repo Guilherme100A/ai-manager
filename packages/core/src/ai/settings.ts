@@ -91,6 +91,8 @@ export function resolveAiSettings(
     maxTokens: pick('maxTokens', row?.maxTokens, base.maxTokens),
     timeoutMs: pick('timeoutMs', row?.timeoutMs, base.timeoutMs),
     apiKey,
+    // Contexto do funil: banco tem prioridade sobre o ambiente; não entra em `sources` (não é campo do painel de IA).
+    ...((row?.businessContext ?? base.businessContext) ? { businessContext: (row?.businessContext ?? base.businessContext) ?? undefined } : {}),
   }
   const enabled = pick('enabled', row?.enabled, aiEnabledFromEnv(env))
   return { provider, enabled, config, sources, updatedAt: row?.updatedAt ?? null }
@@ -245,7 +247,18 @@ export class AiSettingsService {
       .onConflictDoUpdate({ target: aiSettings.id, set })
     return { view: await this.get(), fields, apiKey }
   }
+
+  /** Define (ou limpa com null) o contexto do negócio/funil que guia as sugestões da IA. */
+  async setBusinessContext(text: string | null): Promise<{ chars: number }> {
+    const value = text?.trim() ? text.trim().slice(0, MAX_BUSINESS_CONTEXT) : null
+    const set = { businessContext: value, updatedAt: new Date() }
+    await this.db.insert(aiSettings).values({ id: AI_SETTINGS_ID, ...set }).onConflictDoUpdate({ target: aiSettings.id, set })
+    return { chars: value?.length ?? 0 }
+  }
 }
+
+/** Teto do contexto do negócio guardado: evita estourar o prompt das sugestões. */
+export const MAX_BUSINESS_CONTEXT = 12_000
 
 /** Fábrica do provedor a partir da chave (default: SDK oficial da Anthropic). */
 export type AiProviderFactory = (apiKey: string) => AiProvider | undefined

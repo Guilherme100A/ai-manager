@@ -113,12 +113,12 @@ export function createGuardedDeliver(opts: GuardedDeliverOptions): DeliverFn {
       }
     },
   })
-  return (transport, to, content) => {
+  return (transport, to, content, meta) => {
     const sessionId = defaultSessionIdOf(transport)
     const ctx: GuardCtx = { marked: false, ...(sessionId ? { sessionId } : {}) }
     return als.run(ctx, async () => {
       try {
-        return await inner(transport, to, content)
+        return await inner(transport, to, content, meta)
       } finally {
         // Falha ao apagar não pode virar falha de envio (a mensagem seria reenviada): a marca órfã só faz a
         // reconciliação ser mais conservadora (failed em vez de retrying).

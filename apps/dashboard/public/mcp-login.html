@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="robots" content="noindex,nofollow"><meta name="referrer" content="no-referrer">
+  <title>Entrar · AI Manager</title>
+  <style>
+    :root{color-scheme:dark;font:15px system-ui,sans-serif;background:#09090b;color:#ededf0}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px}.card{width:100%;max-width:400px;padding:28px;background:#111114;border:1px solid #27272d;border-radius:14px}h1{font-size:23px;margin:0 0 10px}p{color:#a0a0ab;line-height:1.5}label{display:block;margin-top:18px;margin-bottom:6px}input,button{width:100%;font:inherit;border-radius:8px;padding:12px}input{background:#18181c;color:inherit;border:1px solid #34343b}button{margin-top:22px;background:#8b8dff;color:#0b0b14;border:0;font-weight:600;cursor:pointer}button:disabled{opacity:.55;cursor:wait}.error{color:#fda4af}small{color:#a0a0ab}
+  </style>
+</head>
+<body><main class="card">
+  <h1>AI Manager</h1>
+  <p>Entre com o mesmo usuário e senha do painel para continuar.</p>
+  <form id="login-form">
+    <label for="username">Usuário</label><input id="username" autocomplete="username" required>
+    <label for="password">Senha</label><input id="password" type="password" autocomplete="current-password" required>
+    <p id="error" class="error" role="alert" hidden></p>
+    <button id="submit" type="submit">Entrar e continuar</button>
+  </form>
+  <p id="status" role="status" hidden>Conectando sua sessão…</p>
+  <small>A autorização de acesso será mostrada na próxima etapa.</small>
+</main>
+<script>
+(() => {
+  const form=document.getElementById('login-form'),error=document.getElementById('error'),status=document.getElementById('status'),submit=document.getElementById('submit');
+  const raw=new URLSearchParams(location.search).get('redirect')||'/welcome';
+  const target=/^\/(?!\/)[^\\\u0000-\u001f]*$/.test(raw)?raw:'/welcome';
+  const crmTarget=target.startsWith('/crm/')?target:'/crm'+target;
+  async function request(path,body,headers={}){
+    const res=await fetch(path,{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json',...headers},body:JSON.stringify(body)});
+    if(!res.ok){const e=new Error(res.status===401?'Usuário ou senha inválidos.':'Não foi possível conectar. Tente novamente.');e.status=res.status;throw e;}
+    return res.json();
+  }
+  async function enter(token){
+    form.hidden=true;status.hidden=false;
+    const sso=await request('/api/crm/sso',{}, {authorization:'Bearer '+token});
+    await request('/crm/api/auth/sso',{token:sso.token},{'x-requested-with':'crm'});
+    location.replace(crmTarget);
+  }
+  function showError(e){form.hidden=false;status.hidden=true;error.textContent=e.message;error.hidden=false;submit.disabled=false;}
+  form.addEventListener('submit',async event=>{
+    event.preventDefault();submit.disabled=true;error.hidden=true;
+    try{
+      const auth=await request('/api/auth/login',{username:document.getElementById('username').value.trim(),password:document.getElementById('password').value});
+      document.getElementById('password').value='';
+      try{sessionStorage.setItem('wsm.token',auth.token);}catch{}
+      await enter(auth.token);
+    }catch(e){showError(e);}
+  });
+  let token;try{token=sessionStorage.getItem('wsm.token');}catch{}
+  if(token)enter(token).catch(e=>{if(e.status===401){try{sessionStorage.removeItem('wsm.token');}catch{}}showError(e);});
+})();
+</script></body></html>

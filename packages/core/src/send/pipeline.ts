@@ -3,7 +3,7 @@
 // O primeiro gate que falha interrompe a cadeia com o código da SPEC 3.4.
 import type { Database } from '@wsm/db'
 import { canMessage, ContactsService, type Contact } from '../contacts'
-import type { EnqueueMessageInput, MessageView } from '../queue/store'
+import type { EnqueueMessageInput, MessageOrigin, MessageView } from '../queue/store'
 import { SessionLimitsService, type SessionLimitsView } from '../safety/limits'
 import { SENDABLE_STATES } from '../session/states'
 import { SessionStore, type SessionRow } from '../session/store'
@@ -50,6 +50,8 @@ export interface SendRequest {
   /** Quem pediu o envio (autenticado). Sem actor, o gate auth rejeita. */
   actor?: string
   contactId?: string | null
+  /** `crm`: gravado na mensagem; a entrega pula o antiban e os limites não contam este envio. */
+  origin?: MessageOrigin
 }
 
 /** Estado compartilhado entre os gates de um envio. */
@@ -196,6 +198,7 @@ export class SendPipeline {
         const input: EnqueueMessageInput = { sessionId: req.sessionId, phone: req.phone, content: req.content }
         const contactId = req.contactId ?? ctx.contact?.id
         if (contactId) input.contactId = contactId
+        if (req.origin) input.origin = req.origin
         ctx.message = await this.opts.queue.enqueue(input)
       },
     }
