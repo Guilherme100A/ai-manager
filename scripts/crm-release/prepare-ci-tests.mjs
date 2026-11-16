@@ -13,6 +13,7 @@ const changes = [
   ['let sys: System, t: Tenant', 'const __ciOriginalOffersGate = process.env.SHARED_OFFERS_COMPANY_ID\nlet sys: System, t: Tenant'],
   ['  t = await tenant(sys)\n', '  t = await tenant(sys)\n  process.env.SHARED_OFFERS_COMPANY_ID = t.companyId\n'],
   ["expect((await foreign.c.put('/api/offers/' + a.id, a)).status).toBe(422)", "expect((await foreign.c.put('/api/offers/' + a.id, a)).status).toBe(404)"],
+  ["      expect(await p.getByRole('button',{name:/UI shared offer/}).count()).toBe(1);await ctx.close()", "      await p.getByRole('button',{name:/UI shared offer/}).waitFor()\n      expect(await p.getByRole('button',{name:/UI shared offer/}).count()).toBe(1);await ctx.close()"],
   ['afterAll(async () => {\n', 'afterAll(async () => {\n  try {\n'],
   ['  await gateway.stop()\n}, 120000)', "  await gateway.stop()\n  } finally {\n    if (__ciOriginalOffersGate === undefined) delete process.env.SHARED_OFFERS_COMPANY_ID\n    else process.env.SHARED_OFFERS_COMPANY_ID = __ciOriginalOffersGate\n  }\n}, 120000)"],
 ]

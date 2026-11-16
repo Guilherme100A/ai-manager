@@ -173,6 +173,23 @@ Nenhum UUID real é incluído. Ativação é decisão separada e requer confirma
 empresa, gates iguais e autorização. B01-B04 exigem resultados reais do CI e
 revisão; B05 exige preflight/autorizações e verificação publicada novos.
 
+Após instalar e verificar com gate vazio, a ativação autorizada registra
+`company_id` canônico no estado externo e regenera o override pelo mesmo helper.
+O wrapper confere a igualdade desse arquivo e preserva o gate nos dois serviços
+no próximo deploy. A alteração deve ocorrer sob o mesmo flock e marcador de
+manutenção, com cópia do estado/override anterior e conferência da empresa no
+banco; reiniciar somente CRM API/worker e confirmar os dois valores antes de
+liberar manutenção. O instalador não ativa por conta própria, nem aceita atualizar
+uma release já ativada sem conciliar explicitamente seu estado.
+
+O workflow manual `Verify live CRM` roda Playwright no GitHub contra a VPS após
+publicação e ativação. Usa `CRM_SMOKE_PANEL_TOKEN`, sessão administrativa temporária
+assinada para essa verificação, fornecida como secret criptografado e removida pelo
+operador ao terminar. Nenhuma senha ou chave de assinatura é copiada ao GitHub.
+O teste abre três sessões CRM da mesma conta, lê Ofertas/chips e verifica logout
+isolado. Bloqueia escritas de negócio, encerra suas sessões e revoga o token do
+painel. Não publica capturas nem dados de clientes nos logs.
+
 ## Simulação leve, sem infraestrutura
 
 ```bash

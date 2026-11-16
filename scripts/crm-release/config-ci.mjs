@@ -12,4 +12,15 @@ atomic(path.join(state, 'active.json'), spec)
 const candidate = JSON.parse(invoke(repo, state, ['config', '--format', 'json']))
 validateConfig(base, candidate, spec)
 if (candidate.services.worker.restart !== 'on-failure:3' || spec.source_tree !== TREE) throw Error('Principal worker recovery policy/tree mismatch')
-fs.writeFileSync(path.join(process.env.CRM_REPORT_DIR, 'compose-model.json'), JSON.stringify({ actual_compose_merge: true, persistent_override: true, gate_empty: true, isolated_musl_dependencies: true, shared_storage_preserved: true, future_web_build_copies_ci_spa_only: true, principal_restart_bounded: true }, null, 2))
+// The installer still requires an empty gate. Explicit later activation must
+// survive the persistent compose wrapper without changing image or mounts.
+const activated = { ...spec, company_id: '11111111-1111-4111-8111-111111111111' }
+fs.writeFileSync(path.join(dir, 'override.yml'), override(activated)); atomic(path.join(state, 'active.json'), activated)
+const enabled = JSON.parse(invoke(repo, state, ['config', '--format', 'json']))
+for (const name of ['crm-api', 'crm-worker']) {
+  if (enabled.services[name].environment.SHARED_OFFERS_COMPANY_ID !== activated.company_id) throw Error('Activation did not persist for both services')
+  enabled.services[name].environment.SHARED_OFFERS_COMPANY_ID = ''
+}
+validateConfig(base, enabled, spec)
+fs.writeFileSync(path.join(dir, 'override.yml'), override(spec)); atomic(path.join(state, 'active.json'), spec)
+fs.writeFileSync(path.join(process.env.CRM_REPORT_DIR, 'compose-model.json'), JSON.stringify({ actual_compose_merge: true, persistent_override: true, gate_empty: true, explicit_company_activation_persists: true, isolated_musl_dependencies: true, shared_storage_preserved: true, future_web_build_copies_ci_spa_only: true, principal_restart_bounded: true }, null, 2))

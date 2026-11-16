@@ -80,8 +80,10 @@ export function specFor(m, storage) {
 }
 export function override(spec) {
   const q = JSON.stringify
+  const company = spec.company_id === undefined ? '' : spec.company_id
+  requireThat(typeof company === 'string' && (company === '' || /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(company)), 'Invalid activation company UUID')
   const commandLine = app => q(['node', '--conditions=development', '/crm/node_modules/tsx/dist/cli.mjs', `/crm/apps/${app}/src/${app === 'api' ? 'server' : 'main'}.ts`])
-  const runtime = app => `    image: ${q(spec.image_id)}\n    pull_policy: never\n    read_only: true\n    tmpfs: [/tmp]\n    environment:\n      SHARED_OFFERS_COMPANY_ID: ''\n    volumes: !override\n      - crm-release-deps:/crm/node_modules:ro\n      - crm-storage:/data/storage\n    command: ${commandLine(app)}\n`
+  const runtime = app => `    image: ${q(spec.image_id)}\n    pull_policy: never\n    read_only: true\n    tmpfs: [/tmp]\n    environment:\n      SHARED_OFFERS_COMPANY_ID: ${company ? q(company) : "''"}\n    volumes: !override\n      - crm-release-deps:/crm/node_modules:ro\n      - crm-storage:/data/storage\n    command: ${commandLine(app)}\n`
   return `# Generated from an audited CI artifact; no credentials or company UUID. Compose >=2.24.4.\nservices:\n  crm-api:\n${runtime('api')}    healthcheck:\n      test: ${q(['CMD', 'node', '-e', "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"])}\n  crm-worker:\n${runtime('worker')}  crm-web:\n    volumes: !override\n      - crm-release-spa:/usr/share/nginx/html:ro\n  crm-web-build:\n    image: ${q(spec.image_id)}\n    pull_policy: never\n    working_dir: /crm\n    read_only: true\n    volumes: !override\n      - crm-release-spa:/out\n    command: ['cp', '-a', '/crm/apps/web/dist/.', '/out/']\nvolumes:\n  crm-release-deps:\n    external: true\n    name: ${q(spec.deps)}\n  crm-release-spa:\n    external: true\n    name: ${q(spec.spa)}\n  crm-storage:\n    external: true\n    name: ${q(spec.storage)}\n`
 }
 export function composeArgs(repo, stateDir, explicitOverride) {

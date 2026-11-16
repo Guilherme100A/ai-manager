@@ -78,16 +78,17 @@ it('one administrator account supports three simultaneous browser sessions, shar
         const cookies = await Promise.all(contexts.map(async c => (await c.cookies()).find(x => x.name === 'crm_session')?.value))
         expect(cookies.every(Boolean)).toBe(true); expect(new Set(cookies).size).toBe(3)
         expect((await sys.q('select user_id from crm.company_members where company_id=$1', [company]))).toHaveLength(1)
-        const made = await context.request.post(base + '/crm/api/connections', { data: { name: 'Shared chip for one admin account' } }); expect(made.status()).toBe(201)
+        const writeHeaders = { 'x-requested-with': 'crm' }
+        const made = await context.request.post(base + '/crm/api/connections', { headers: writeHeaders, data: { name: 'Shared chip for one admin account' } }); expect(made.status(), await made.text()).toBe(201)
         const connection = (await made.json()).connection
         for (const c of contexts) {
           const resources = await c.request.get(base + '/crm/api/offers/resources'); expect(resources.status()).toBe(200)
           expect((await resources.json()).connections.map((x: any) => x.id)).toContain(connection.id)
           expect((await c.request.get(base + '/crm/api/offers')).status()).toBe(200)
-          expect((await c.request.put(base + '/crm/api/offers/chips/' + connection.id, { data: { enabled: true } })).status()).toBe(200)
+          expect((await c.request.put(base + '/crm/api/offers/chips/' + connection.id, { headers: writeHeaders, data: { enabled: true } })).status()).toBe(200)
         }
         // Signing out one person must not revoke the other two sessions.
-        expect((await contexts[1]!.request.post(base + '/crm/api/auth/logout', { data: {} })).status()).toBe(200)
+        expect((await contexts[1]!.request.post(base + '/crm/api/auth/logout', { headers: writeHeaders, data: {} })).status()).toBe(200)
         expect((await contexts[1]!.request.get(base + '/crm/api/offers')).status()).toBe(401)
         for (const c of [contexts[0]!, contexts[2]!]) expect((await c.request.get(base + '/crm/api/offers')).status()).toBe(200)
         await contexts[1]!.close(); await contexts[2]!.close()

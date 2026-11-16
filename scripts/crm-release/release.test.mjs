@@ -11,6 +11,28 @@ import { TREE, sha, hashFile, read, override, specFor, composeArgs, secrets, val
 import { pgClientPlan, pg16Versions } from './pg-client-ci.mjs'
 const here = path.dirname(fileURLToPath(import.meta.url))
 const revision = 'a'.repeat(40), image = 'sha256:' + 'b'.repeat(64)
+test('explicit activation uses the same canonical company in API and worker without changing mounts', () => {
+  const spec = specFor({ release: revision, image_id: image }, 'preserved_storage')
+  const company = '11111111-1111-4111-8111-111111111111'
+  const disabled = override(spec), enabled = override({ ...spec, company_id: company })
+  assert.equal(enabled.split(company).length - 1, 2)
+  assert.equal(enabled.replaceAll(JSON.stringify(company), "''"), disabled)
+})
+test('activation refuses malformed, ambiguous and non-string company targets', () => {
+  const spec = specFor({ release: revision, image_id: image }, 'preserved_storage')
+  for (const company_id of [null, true, [], 'ai-manager', ' 11111111-1111-4111-8111-111111111111', '11111111-1111-4111-8111-111111111111,22222222-2222-4222-8222-222222222222']) assert.throws(() => override({ ...spec, company_id }), /Invalid activation company/)
+})
+test('activated company persists through the next compose call and unauthorized override drift is refused', t => {
+  const f = fixture(t), spec = { ...f.spec, company_id: '11111111-1111-4111-8111-111111111111' }
+  const dir = path.join(f.state, 'releases', revision)
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(f.state, 'active.json'), JSON.stringify(spec))
+  const file = path.join(dir, 'override.yml')
+  fs.writeFileSync(file, override(spec))
+  assert.equal(composeArgs(f.repo, f.state).at(-1), file)
+  fs.writeFileSync(file, override(f.spec))
+  assert.throws(() => composeArgs(f.repo, f.state), /Persistent override drift/)
+})
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'crm-mock-only-'))
   t.after(() => { const resolved = path.resolve(root); assert.ok(resolved.startsWith(path.resolve(os.tmpdir()) + path.sep + 'crm-mock-only-')); fs.rmSync(resolved, { recursive: true }) })
