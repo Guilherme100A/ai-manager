@@ -34,6 +34,8 @@ x-crm-env: &crm-env
   INTERNAL_TOKEN: ${INTERNAL_TOKEN:-dev-internal-token}
   WA_EVENTS_STREAM: wsm:events
   CRM_QUEUE_PREFIX: crm
+  # Server-side company opt-in. Empty/invalid UUID disables offers in API and worker.
+  SHARED_OFFERS_COMPANY_ID: ${SHARED_OFFERS_COMPANY_ID:-}
   CRM_SSO_SECRET: ${CRM_SSO_SECRET:?defina CRM_SSO_SECRET}
   API_PUBLIC_URL: ${CRM_API_PUBLIC_URL:-http://localhost:8080/crm}
   WEB_PUBLIC_URL: ${CRM_WEB_PUBLIC_URL:-http://localhost:8080/crm}
