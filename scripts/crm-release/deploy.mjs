@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { pathToFileURL } from 'node:url'
-import { TREE, sha, hashFile, read, parseJSON, requireThat, command, atomic, dedicatedPaths, validateManifest, specFor, override, composeArgs, validateConfig, sourceDigest, secrets } from './lib.mjs'
+import { TREE, sha, hashFile, read, parseJSON, requireThat, command, atomic, dedicatedPaths, validateManifest, specFor, override, composeArgs, validateConfig, sourceDigest, secrets, tsxCommand } from './lib.mjs'
 const json = (run, label, cmd, args) => parseJSON(run(label, cmd, args), label)
 export function deploy(options, run = command) {
   requireThat(options.lockHeld === true, 'Shared deployment lock required')
@@ -116,7 +116,7 @@ export function deploy(options, run = command) {
     principal(); checkJournal(beforeCount)
     atomic(maintenance, { release: m.release, stage: 'migration-attempted', automatic_database_restore: false })
     migrationAttempted = true // Unknown commit state on any migration failure: never restart old binaries.
-    next('migrate-only-crm', ['run', '--rm', '--no-deps', 'crm-api', 'node', '--conditions=development', '/crm/node_modules/tsx/dist/cli.mjs', '/crm/packages/db/src/migrate.ts', '--set', 'crm'])
+    next('migrate-only-crm', ['run', '--rm', '--no-deps', 'crm-api', ...tsxCommand('/crm/packages/db/src/migrate.ts'), '--set', 'crm'])
     checkJournal(43)
     const schema = parseJSON(dc('verify-offer-schema', psql("BEGIN READ ONLY; SELECT json_build_object('column',EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='crm' AND table_name='flow_runs' AND column_name='offer_scoped'),'trigger',EXISTS(SELECT 1 FROM pg_trigger WHERE tgname='validate_offer_run_scope'),'indexes',(SELECT count(*) FROM pg_indexes WHERE schemaname='crm' AND indexname IN ('flow_runs_active_contact_uq','flow_runs_active_chat_uq'))); COMMIT;")), 'schema')
     requireThat(schema.column === true && schema.trigger === true && schema.indexes === 2, 'CRM schema verification failed')

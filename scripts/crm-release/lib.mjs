@@ -78,11 +78,14 @@ export function specFor(m, storage) {
   requireThat(/^[a-zA-Z0-9][a-zA-Z0-9_.-]+$/.test(storage), 'Invalid preserved storage volume')
   return { format: 1, release: m.release, source_tree: TREE, image_id: m.image_id, deps: `crm_so_${m.release}_deps`, spa: `crm_so_${m.release}_spa`, storage }
 }
+// tsx launches another Node process: conditions must be CLI arguments to tsx,
+// not arguments to its parent Node process (whose execArgv is not inherited).
+export const tsxCommand = entry => ['node', '/crm/node_modules/tsx/dist/cli.mjs', '--conditions=development', entry]
 export function override(spec) {
   const q = JSON.stringify
   const company = spec.company_id === undefined ? '' : spec.company_id
   requireThat(typeof company === 'string' && (company === '' || /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(company)), 'Invalid activation company UUID')
-  const commandLine = app => q(['node', '--conditions=development', '/crm/node_modules/tsx/dist/cli.mjs', `/crm/apps/${app}/src/${app === 'api' ? 'server' : 'main'}.ts`])
+  const commandLine = app => q(tsxCommand(`/crm/apps/${app}/src/${app === 'api' ? 'server' : 'main'}.ts`))
   const runtime = app => `    image: ${q(spec.image_id)}\n    pull_policy: never\n    read_only: true\n    tmpfs: [/tmp]\n    environment:\n      SHARED_OFFERS_COMPANY_ID: ${company ? q(company) : "''"}\n    volumes: !override\n      - crm-release-deps:/crm/node_modules:ro\n      - crm-storage:/data/storage\n    command: ${commandLine(app)}\n`
   return `# Generated from an audited CI artifact; no credentials or company UUID. Compose >=2.24.4.\nservices:\n  crm-api:\n${runtime('api')}    healthcheck:\n      test: ${q(['CMD', 'node', '-e', "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"])}\n  crm-worker:\n${runtime('worker')}  crm-web:\n    volumes: !override\n      - crm-release-spa:/usr/share/nginx/html:ro\n  crm-web-build:\n    image: ${q(spec.image_id)}\n    pull_policy: never\n    working_dir: /crm\n    read_only: true\n    volumes: !override\n      - crm-release-spa:/out\n    command: ['cp', '-a', '/crm/apps/web/dist/.', '/out/']\nvolumes:\n  crm-release-deps:\n    external: true\n    name: ${q(spec.deps)}\n  crm-release-spa:\n    external: true\n    name: ${q(spec.spa)}\n  crm-storage:\n    external: true\n    name: ${q(spec.storage)}\n`
 }
@@ -112,7 +115,7 @@ export function validateConfig(before, after, spec) {
     requireThat(a.volumes?.length === 2 && !a.volumes.some(v => v.type === 'bind' || v.target === '/crm'), 'Mutable source mount forbidden')
     const deps = a.volumes.find(v => v.target === '/crm/node_modules'), storage = a.volumes.find(v => v.target === '/data/storage')
     requireThat(deps?.read_only === true && after.volumes[deps.source]?.name === spec.deps && after.volumes[storage?.source]?.name === spec.storage, 'Dependency/storage mismatch')
-    requireThat(a.command?.join(' ') === ['node', '--conditions=development', '/crm/node_modules/tsx/dist/cli.mjs', `/crm/apps/${name === 'crm-api' ? 'api/src/server' : 'worker/src/main'}.ts`].join(' '), 'Unexpected startup/install command')
+    requireThat(a.command?.join(' ') === tsxCommand(`/crm/apps/${name === 'crm-api' ? 'api/src/server' : 'worker/src/main'}.ts`).join(' '), 'Unexpected startup/install command')
   }
   for (const name of ['crm-web', 'crm-web-build']) {
     const s = services[name], target = name === 'crm-web' ? '/usr/share/nginx/html' : '/out'

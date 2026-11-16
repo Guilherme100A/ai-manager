@@ -10,4 +10,4 @@ ARG SOURCE_TREE
 LABEL crm.source-tree=$SOURCE_TREE
 WORKDIR /crm
 COPY --from=build /crm /crm
-CMD ["node", "--conditions=development", "/crm/node_modules/tsx/dist/cli.mjs", "/crm/apps/api/src/server.ts"]
+CMD ["node", "/crm/node_modules/tsx/dist/cli.mjs", "--conditions=development", "/crm/apps/api/src/server.ts"]
