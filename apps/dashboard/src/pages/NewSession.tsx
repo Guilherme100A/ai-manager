@@ -33,22 +33,33 @@ export function NewSession() {
   useEffect(() => {
     if (!session || !mode || connected) return
     let alive = true
-    const timer = setInterval(async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const poll = async () => {
       try {
         const s = await api.session(session.id)
         if (!alive) return
         setState(s.status)
         if (mode === 'qr' && s.status === 'NEW') {
           const info = await api.getQr(session.id)
-          if (alive && info.qr) setQr(info.qr)
+          if (alive) setQr(info.qr)
+        } else {
+          setQr(null)
         }
+        if (alive) setError(s.status === 'DISCONNECTED' ? new Error('A conexão foi encerrada. Confira o proxy e gere o código novamente.') : undefined)
       } catch (err) {
-        if (alive) setError(err)
+        if (alive) {
+          setQr(null)
+          setCode(undefined)
+          setError(err)
+        }
+      } finally {
+        if (alive) timer = setTimeout(poll, POLL.fast)
       }
-    }, POLL.fast)
+    }
+    void poll()
     return () => {
       alive = false
-      clearInterval(timer)
+      clearTimeout(timer)
     }
   }, [session, mode, connected])
 
@@ -78,19 +89,19 @@ export function NewSession() {
     }
     setBusy(true)
     setError(undefined)
+    setMode(undefined)
+    setQr(null)
+    setCode(undefined)
     try {
       const s = await ensureSession(parsed.proxy)
-      setMode(m)
       if (m === 'qr') {
-        setCode(undefined)
-        await api.startQr(s.id)
-        const info = await api.getQr(s.id)
-        if (info.qr) setQr(info.qr)
+        const started = await api.startQr(s.id)
+        setState(started.status)
       } else {
-        setQr(null)
         const r = await api.pairingCode(s.id, phone.trim() || undefined)
         setCode(r.code)
       }
+      setMode(m)
     } catch (err) {
       setError(err)
     } finally {

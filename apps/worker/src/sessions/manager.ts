@@ -233,7 +233,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
   async startQr(id: string): Promise<SessionView> {
     const row = await this.prepareAuth(id)
     const rt = this.runtimes.get(id)
-    if (rt && !rt.pairingPhone) return toSessionView(row)
+    if (rt && !rt.pairingPhone && !row.requiresRestart) return toSessionView(row)
     if (rt) await this.dispose(rt, 'local')
     await this.openRuntime(id)
     return this.get(id)
@@ -560,6 +560,8 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     const { sessionId } = rt
     const wasConnected = rt.connected
     rt.connected = false
+    // O código pertence ao socket que fechou; não o exiba durante o backoff.
+    rt.qr = undefined
     rt.attempt++ // a queda já foi tratada: o vigia da tentativa anterior não age mais
     await this.stopMonitoring(rt, reason, statusCode)
     const detail: Record<string, unknown> = { reason }

@@ -90,6 +90,37 @@ async function connectedSession(m = manager) {
 }
 
 describe('autenticação (AC-T05-02/03)', () => {
+  it('gerar QR após trocar o proxy encerra o socket antigo e aplica o proxy atual', async () => {
+    const s = await manager.create({ name: 'qr-proxy', phone: null })
+    await manager.startQr(s.id)
+    const old = fakes.last(s.id)!
+    old.emitQr('old-socket-qr')
+    expect((await manager.getQr(s.id)).qr).toBeTruthy()
+    const proxiesService = new ProxyService(db)
+    const proxy = await proxiesService.create({ url: 'http://user:secret@127.0.0.1:10001' })
+    await proxiesService.assign(proxy.id, s.id)
+    await manager.startQr(s.id)
+    expect(old.closed).toBe(true)
+    expect(fakes.created.get(s.id)).toHaveLength(2)
+    expect(fakes.last(s.id)!.lastConnect?.proxyUrl).toContain('127.0.0.1:10001')
+    expect((await manager.get(s.id)).requiresRestart).toBe(false)
+    expect(await manager.getQr(s.id)).toEqual({ qr: null, generatedAt: null })
+  })
+
+  it('invalida o QR ao cair e aguardar reconexão', async () => {
+    let release: (() => void) | undefined
+    const m = newManager({ sleep: () => new Promise<void>((r) => { release = r }) })
+    const s = await m.create({ name: 'qr-close', phone: null })
+    await m.startQr(s.id)
+    fakes.last(s.id)!.emitQr('valid-until-close')
+    expect((await m.getQr(s.id)).qr).toBeTruthy()
+    fakes.last(s.id)!.close('transient', 428)
+    await until(() => !!release)
+    expect(await m.getQr(s.id)).toEqual({ qr: null, generatedAt: null })
+    release!()
+    await m.whenIdle()
+  })
+
   it('POST qr conecta via connectSession com saveCreds; QR vira data URL', async () => {
     const s = await manager.create({ name: 's', phone: '+5511999990001' })
     expect(s.status).toBe('NEW')
