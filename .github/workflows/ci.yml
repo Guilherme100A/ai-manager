@@ -69,11 +69,13 @@ jobs:
       AI_MODE: fake
       WA_TRANSPORT: fake
       WA_GATEWAY: fake
-      CRM_REPORT_DIR: ${{ runner.temp }}/crm-reports
-      CRM_EMBEDDED_DIST: ${{ runner.temp }}/crm-embedded
       PANEL_SOURCE_DIR: ${{ github.workspace }}
     steps:
       - uses: actions/checkout@v4
+      - name: Initialize CRM temporary paths
+        shell: bash
+        run: |
+          printf 'CRM_REPORT_DIR=%s/crm-reports\nCRM_EMBEDDED_DIST=%s/crm-embedded\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
