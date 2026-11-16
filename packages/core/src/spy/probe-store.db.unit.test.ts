@@ -67,7 +67,7 @@ describe('SpyProbeStore', () => {
     await expect(store.create({ offerId: offer.id, sessionId: session.id, createdBy: 'a' })).rejects.toMatchObject({ code: 'DAILY_LIMIT' })
   })
 
-  it('histórico com as duas pontas (áudio vira [áudio]), mensagem mais recente e janela do remarketing', async () => {
+  it('histórico com as duas pontas, mensagem mais recente e encerramento da escuta', async () => {
     const { session, offer, store } = await fixture()
     const probe = await store.create({ offerId: offer.id, sessionId: session.id, createdBy: 'a' })
     const at = (s: number) => new Date(now + s * 1000)
@@ -88,9 +88,9 @@ describe('SpyProbeStore', () => {
 
     expect(await store.listening(session.id, probe.phone)).toBeTruthy()
     await store.end(probe.id, 'concluida', 'checkout capturado')
-    expect((await store.get(probe.id))!.listenUntil).toEqual(new Date(now + 7 * 86_400_000))
+    expect((await store.get(probe.id))!.listenUntil).toBeNull()
     expect((await db.select().from(spyOffers))[0]!.status).toBe('completa')
-    expect(await store.listening(session.id, probe.phone)).toBeTruthy() // ainda grava o remarketing
+    expect(await store.listening(session.id, probe.phone)).toBeUndefined()
     now += 8 * 86_400_000
     expect(await store.listening(session.id, probe.phone)).toBeUndefined()
   })

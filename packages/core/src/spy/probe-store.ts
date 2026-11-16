@@ -80,7 +80,7 @@ export class SpyProbeStore {
   get(id: string) { return this.db.select().from(spyProbes).where(eq(spyProbes.id, id)).then((r) => r[0]) }
   active() { return this.db.select().from(spyProbes).where(eq(spyProbes.status, 'ativa')) }
 
-  /** Sonda que ainda escuta esse número nesse chip: ativa, ou encerrada dentro da janela do remarketing. */
+  /** Somente sondas ativas continuam escutando esse número nesse chip. */
   async listening(sessionId: string, phone: string): Promise<SpyProbeRow | undefined> {
     const [row] = await this.db.select().from(spyProbes).where(and(eq(spyProbes.sessionId, sessionId), eq(spyProbes.phone, phone),
       eq(spyProbes.status, 'ativa'))).orderBy(desc(spyProbes.startedAt)).limit(1)
@@ -148,7 +148,7 @@ export class SpyProbeStore {
     }).where(eq(spyProbes.id, id))
   }
 
-  /** Encerra (ou para) a sonda; segue ouvindo o remarketing por SPY_LISTEN_DAYS, menos quando parada à mão ou por opt-out. */
+  /** Encerra (ou para) a sonda e encerra também a escuta de novas mensagens. */
   async end(id: string, status: 'concluida' | 'parada' | 'erro', reason: string, opts: { listen?: boolean; summary?: SpyProbeSummary } = {}) {
     const [row] = await this.db.update(spyProbes).set({
       status, endedReason: reason.slice(0, 500), replyDueAt: null, endedAt: new Date(this.now()), updatedAt: new Date(this.now()),
