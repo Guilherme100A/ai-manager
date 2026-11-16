@@ -71,11 +71,11 @@ describe('SpyProbeRunner', () => {
     expect(s.store.replied).toHaveBeenCalledWith('p1', expect.objectContaining({ turns: 2, summary: expect.objectContaining({ preco: 'R$ 47', links: ['https://pay.kiwify.com/abc'] }) }))
   })
 
-  it('IA encerra (checkout capturado): conclui e continua ouvindo (sem mandar nada)', async () => {
+  it('IA encerra (checkout capturado): conclui e encerra a escuta sem mandar nada', async () => {
     const s = setup({ row: probe({ turns: 3 }), history: [{ de: 'eu', texto: 'oi' }], decision: decision({ acao: 'encerrar', checkout: ['https://pay.x/1'], motivo: 'checkout capturado' }) })
     await s.runner.tick()
     expect(s.sent).toHaveLength(0)
-    expect(s.store.end).toHaveBeenCalledWith('p1', 'concluida', 'checkout capturado', { summary: expect.objectContaining({ checkout: ['https://pay.x/1'] }) })
+    expect(s.store.end).toHaveBeenCalledWith('p1', 'concluida', 'checkout capturado', { summary: expect.objectContaining({ checkout: ['https://pay.x/1'] }), listen: false })
   })
 
   it('opt-out para a sonda sem ouvir mais; IA sem chave vira erro; limite do chip adia', async () => {
@@ -97,14 +97,17 @@ describe('SpyProbeRunner', () => {
     expect(offline.sent).toHaveLength(0)
   })
 
-  it('limite de turnos encerra; oferta muda 24 h encerra; mensagens do número da sonda são dela', async () => {
+  it('limite de turnos ou silêncio acima de 2 h encerra a escuta', async () => {
     const last = setup({ row: probe({ turns: 11 }), history: [{ de: 'eu', texto: 'oi' }], decision: decision({ mensagens: ['ok'] }) })
     await last.runner.tick()
-    expect(last.store.end).toHaveBeenCalledWith('p1', 'concluida', 'limite de 12 respostas', expect.anything())
+    expect(last.store.end).toHaveBeenCalledWith('p1', 'concluida', 'limite de 12 respostas', expect.objectContaining({ listen: false }))
 
-    const silent = setup({ row: probe({ turns: 2, replyDueAt: null, lastOutboundAt: new Date(T0 - 25 * 3_600_000) }) })
+    const recent = setup({ row: probe({ turns: 2, replyDueAt: null, lastOutboundAt: new Date(T0 - 2 * 3_600_000) }) })
+    await recent.runner.tick()
+    expect(recent.store.end).not.toHaveBeenCalled()
+    const silent = setup({ row: probe({ turns: 2, replyDueAt: null, lastOutboundAt: new Date(T0 - 2 * 3_600_000 - 1) }) })
     await silent.runner.tick()
-    expect(silent.store.end).toHaveBeenCalledWith('p1', 'concluida', 'a oferta parou de responder por 24 h')
+    expect(silent.store.end).toHaveBeenCalledWith('p1', 'concluida', 'a oferta nao respondeu por 2 horas', { listen: false })
 
     const s = setup()
     expect(await s.runner.handlesInbound('s1', '+5584920022034')).toBe(true)
