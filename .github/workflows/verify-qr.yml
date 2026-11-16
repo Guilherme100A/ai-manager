@@ -1,0 +1,38 @@
+name: Verify live QR
+
+on:
+  workflow_dispatch:
+    inputs:
+      session_id:
+        description: Authorized existing session awaiting pairing
+        required: true
+        type: string
+      connection_id:
+        description: Authorized CRM connection awaiting pairing (optional)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Prepare browser only on GitHub runner
+        run: |
+          mkdir -p "$RUNNER_TEMP/qr-browser"
+          npm install --prefix "$RUNNER_TEMP/qr-browser" --no-audit --no-fund playwright@1.63.0
+          "$RUNNER_TEMP/qr-browser/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Verify published QR and panel without sending messages
+        env:
+          QR_SMOKE_PANEL_TOKEN: ${{ secrets.QR_SMOKE_PANEL_TOKEN }}
+          QR_SESSION_ID: ${{ inputs.session_id }}
+          QR_CONNECTION_ID: ${{ inputs.connection_id }}
+          PLAYWRIGHT_MODULE: ${{ runner.temp }}/qr-browser/node_modules/playwright/index.mjs
+        run: node scripts/verify-live-qr.mjs

@@ -8,6 +8,52 @@ on:
   workflow_call:
 
 jobs:
+  qr-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: wsm
+          POSTGRES_PASSWORD: wsm
+          POSTGRES_DB: wsm
+        ports: ['5432:5432']
+        options: --health-cmd "pg_isready -U wsm -d wsm" --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      DATABASE_URL: postgres://wsm:wsm@127.0.0.1:5432/wsm
+      REDIS_URL: redis://127.0.0.1:6379
+      NODE_OPTIONS: --conditions=development
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @wsm/dashboard exec playwright install --with-deps chromium
+      - run: pnpm --filter @wsm/dashboard build
+      - name: Mobile, desktop, reconnect, failures and authentication (fake WhatsApp)
+        run: >-
+          pnpm exec vitest run --config tests/acceptance/vitest.config.ts
+          tests/acceptance/T18/qr-recovery.test.ts
+          tests/acceptance/T12/sessions.test.ts
+          tests/acceptance/T18/new-session.test.ts
+          tests/acceptance/T12/auth.test.ts
+          --reporter=json --outputFile=qr-ui-results.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qr-ui-verification-${{ github.sha }}
+          path: qr-ui-results.json
+          if-no-files-found: warn
+          retention-days: 7
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
