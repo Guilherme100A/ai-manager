@@ -67,7 +67,7 @@ export function deploy(options, run = command) {
     const applied = parseJSON(dc('journal-' + count, psql('BEGIN READ ONLY; SELECT coalesce(json_agg(t),\'[]\') FROM (SELECT hash,created_at FROM crm.__drizzle_migrations ORDER BY created_at) t; COMMIT;')), 'CRM journal')
     requireThat(Array.isArray(applied) && applied.length === count && applied.every((x, i) => x.hash === m.migrations[i].hash && Number(x.created_at) === m.migrations[i].when), 'CRM migration history drift')
   }
-  const beforeCount = fs.existsSync(path.join(state, 'active.json')) ? 43 : 39
+  const beforeCount = installed ? (installed.source_tree === TREE ? 44 : 43) : 39
   checkJournal(beforeCount)
   fs.mkdirSync(state, { recursive: true, mode: 0o700 })
   const space = fs.statfsSync(state)
@@ -127,9 +127,11 @@ export function deploy(options, run = command) {
     atomic(maintenance, { release: m.release, stage: 'migration-attempted', automatic_database_restore: false })
     migrationAttempted = true // Unknown commit state on any migration failure: never restart old binaries.
     next('migrate-only-crm', ['run', '--rm', '--no-deps', 'crm-api', ...tsxCommand('/crm/packages/db/src/migrate.ts'), '--set', 'crm'])
-    checkJournal(43)
+    checkJournal(44)
     const schema = parseJSON(dc('verify-offer-schema', psql("BEGIN READ ONLY; SELECT json_build_object('column',EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='crm' AND table_name='flow_runs' AND column_name='offer_scoped'),'trigger',EXISTS(SELECT 1 FROM pg_trigger WHERE tgname='validate_offer_run_scope'),'indexes',(SELECT count(*) FROM pg_indexes WHERE schemaname='crm' AND indexname IN ('flow_runs_active_contact_uq','flow_runs_active_chat_uq'))); COMMIT;")), 'schema')
     requireThat(schema.column === true && schema.trigger === true && schema.indexes === 2, 'CRM schema verification failed')
+    const areas = parseJSON(dc('verify-business-area-schema', psql("BEGIN READ ONLY; SELECT json_build_object('areas',to_regclass('crm.business_areas') IS NOT NULL,'resources',to_regclass('crm.business_area_resources') IS NOT NULL,'offer_column',EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='crm' AND table_name='offers' AND column_name='business_area_id')); COMMIT;")), 'business area schema')
+    requireThat(areas.areas === true && areas.resources === true && areas.offer_column === true, 'Business area schema verification failed')
     principal()
     atomic(path.join(state, 'active.json'), spec)
     let ready = false
