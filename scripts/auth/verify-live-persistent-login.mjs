@@ -1,7 +1,13 @@
 // Runs only on the authorized CI browser, with short-lived test credentials revoked in finally.
 import assert from 'node:assert/strict'
 import { pathToFileURL } from 'node:url'
-const base = 'http://148.113.255.144:8080'
+import { LOGIN_VERIFICATION_ORIGIN, secureClient, revokeTemporarySessions } from './live-login-transport.mjs'
+const base = LOGIN_VERIFICATION_ORIGIN
+const request = secureClient(base)
+assert.notEqual(process.env.NODE_TLS_REJECT_UNAUTHORIZED, '0', 'TLS verification must stay enabled')
+assert.equal(process.env.GITHUB_ACTIONS, 'true', 'Live browser must run on the authorized CI runner')
+assert.match(process.env.GITHUB_RUN_ID ?? '', /^\d+$/, 'Unique CI run required for cleanup attribution')
+const marker = 'AIManager-PersistentLogin-Smoke/' + process.env.GITHUB_RUN_ID
 const key = 'wsm.remembered-session'
 let sessions
 try { sessions = JSON.parse(process.env.LOGIN_SMOKE_SESSIONS ?? '') } catch { throw new Error('Temporary login sessions missing; credentials withheld') }
@@ -13,17 +19,18 @@ const contexts = [], crmCookies = new Set(), users = [], errors = [], blocked = 
 let stage = 'initialize', failed = false
 const allowed = new Set(['/api/auth/login', '/api/auth/logout', '/api/crm/sso', '/crm/api/auth/sso', '/crm/api/auth/logout'])
 async function context(state) {
-  const c = await browser.newContext(state ? { storageState: state } : {})
+  const c = await browser.newContext({ ...(state ? { storageState: state } : {}), ignoreHTTPSErrors: false, userAgent: marker })
   contexts.push(c)
   await c.route('**/*', async route => {
     const request = route.request()
+    if (new URL(request.url()).protocol === 'http:') { blocked.push('insecure-http'); await route.abort(); return }
     if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method()) && !allowed.has(new URL(request.url()).pathname)) { blocked.push('unexpected-write'); await route.abort(); return }
     await route.continue()
   })
   return c
 }
 async function collectCookie(c) { const value = (await c.cookies()).find(cookie => cookie.name === 'crm_session')?.value; if (value) crmCookies.add(value) }
-async function status(token) { return (await fetch(base + '/api/auth/me', { headers: { authorization: 'Bearer ' + token } })).status }
+async function status(token) { return (await request('/api/auth/me', { headers: { authorization: 'Bearer ' + token } })).status }
 try {
   const active = []
   for (let i = 0; i < 3; i++) {
@@ -93,13 +100,11 @@ try {
   failed = true
   console.error('Persistent login browser verification failed at ' + stage + '; credentials and business data withheld')
 } finally {
-  for (const cookie of crmCookies) {
-    try { await fetch(base + '/crm/api/auth/logout', { method: 'POST', headers: { cookie: 'crm_session=' + cookie, 'x-requested-with': 'crm', 'content-type': 'application/json' }, body: '{}' }) } catch { /* operator also checks cleanup */ }
-  }
-  for (const s of sessions) {
-    try { await fetch(base + '/api/auth/logout', { method: 'POST', headers: { authorization: 'Bearer ' + s.token } }) } catch { /* operator checks revocation */ }
-  }
+  for (const c of contexts) { try { await collectCookie(c) } catch { /* closed context */ } }
+  const cleanup = await revokeTemporarySessions(request, sessions, crmCookies)
   for (const c of contexts) await c.close().catch(() => {})
   await browser.close()
+  console.log(JSON.stringify({ cleanup: true, ...cleanup }))
+  if (!cleanup.panelTokens401 || !cleanup.crmCookiesRevoked) failed = true
 }
 if (failed) process.exitCode = 1

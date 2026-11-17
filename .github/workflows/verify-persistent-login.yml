@@ -21,4 +21,5 @@ jobs:
         env:
           LOGIN_SMOKE_SESSIONS: ${{ secrets.LOGIN_SMOKE_SESSIONS }}
           PLAYWRIGHT_MODULE: ${{ runner.temp }}/login-browser/node_modules/playwright/index.mjs
+          NODE_TLS_REJECT_UNAUTHORIZED: '1'
         run: node scripts/auth/verify-live-persistent-login.mjs

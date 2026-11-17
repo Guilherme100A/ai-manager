@@ -41,6 +41,15 @@ deps, SPA ou driver externo para esta mudanca. Publicacao do painel deve usar
 o bootstrap/wrapper externo existente e aplicar a migration publica antes da API.
 Nao editar fontes/patches congelados do MCPchip.
 
+Origem de verificacao publicada: https://crm.148.113.255.144.sslip.io, conferida
+sem credenciais para painel, mcp-login, API do painel, SSO e CRM. O smoke recusa
+HTTP, redirecionamento de fetch, origem diferente e validacao TLS desabilitada.
+O navegador usa certificado validado, sem ignoreHTTPSErrors. Cookies de cada
+sessao tecnica sao atribuidos ao user-agent unico do run GitHub para limpeza.
+O operador deve confirmar 401 dos tres tokens temporarios, revogacao das sessoes
+CRM daquele run e remocao do secret LOGIN_SMOKE_SESSIONS, mesmo apos falha/cancel.
+O finally do navegador faz a mesma checagem, mas nao substitui a verificacao externa.
+
 Testes previstos: opcao marcada/desmarcada, prazo no servidor, credencial
 invalida, sessao expirada, registro ausente, tres sessoes de uma conta e logout
 isolado. Teste de integracao inicia e encerra processos Node reais sobre banco

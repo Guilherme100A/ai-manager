@@ -91,6 +91,7 @@ jobs:
       - run: node --test scripts/crm-release/release.test.mjs
       - run: node --test scripts/crm-release/prepare-ci-tests.test.mjs
       - run: node --test scripts/crm-release/tsx-conditions.test.mjs
+      - run: node --test scripts/auth/live-login-transport.test.mjs
       - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm test
