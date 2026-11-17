@@ -86,6 +86,46 @@ function fixture(t) {
   const options = { repo, state, artifact, receiptFile, manifestSha: hashFile(path.join(artifact, 'release.json')), lockHeld: true }
   return { root, repo, state, artifact, legacy, m, receipt, saveReceipt, options, calls, faults, responses, before, after, run, spec }
 }
+
+function installedFixture(t) {
+  const f = fixture(t), company = '11111111-1111-4111-8111-111111111111'
+  const old = { ...specFor({ release: 'd'.repeat(40), image_id: 'sha256:' + 'e'.repeat(64) }, f.spec.storage), source_tree: '24cec7d30f200818e64cd9693bfe8ff38ed1d0c3', company_id: company }
+  const dir = path.join(f.state, 'releases', old.release)
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(f.state, 'active.json'), JSON.stringify(old))
+  fs.writeFileSync(path.join(dir, 'override.yml'), override(old))
+  for (const model of [f.before, f.after]) for (const name of ['crm-api', 'crm-worker']) model.services[name].environment.SHARED_OFFERS_COMPANY_ID = company
+  for (const name of ['crm-api', 'crm-worker']) f.responses.set('installed-image-' + name, () => JSON.stringify(old.image_id))
+  return { ...f, company, old }
+}
+test('upgrading an activated historical release preserves company, storage and prior state backup', t => {
+  const f = installedFixture(t)
+  deploy(f.options, f.run)
+  assert.deepEqual(read(path.join(f.state, 'active.json')), { ...f.spec, company_id: f.company })
+  assert.deepEqual(read(path.join(f.state, 'releases', revision, 'backup', 'previous-active.json')), f.old)
+  assert.equal(read(path.join(f.state, 'releases', revision, 'result.json')).gate_empty, false)
+  assert.equal(read(path.join(f.state, 'releases', revision, 'result.json')).activation_preserved, true)
+  assert.equal(f.calls.filter(c => c.label === 'journal-43').length, 3)
+  assert.equal(fs.existsSync(path.join(f.state, 'maintenance.json')), false)
+})
+for (const mismatch of ['api-running', 'worker-config', 'candidate', 'persisted-tree', 'persisted-uuid', 'api-image', 'worker-image']) test('upgrade refuses activation/state drift before stopping CRM: ' + mismatch, t => {
+  const f = installedFixture(t)
+  if (mismatch === 'api-running') f.responses.set('env-crm-api', () => JSON.stringify(Object.entries(f.before.services['crm-api'].environment).map(([k,v]) => k + '=' + (k === 'SHARED_OFFERS_COMPANY_ID' ? '' : v))))
+  if (mismatch === 'worker-config') f.before.services['crm-worker'] = { environment: { ...f.before.services['crm-worker'].environment, SHARED_OFFERS_COMPANY_ID: '' } }
+  if (mismatch === 'candidate') f.after.services['crm-api'].environment.SHARED_OFFERS_COMPANY_ID = ''
+  if (mismatch === 'persisted-tree') fs.writeFileSync(path.join(f.state, 'active.json'), JSON.stringify({ ...f.old, source_tree: 'f'.repeat(40) }))
+  if (mismatch === 'persisted-uuid') fs.writeFileSync(path.join(f.state, 'active.json'), JSON.stringify({ ...f.old, company_id: 'invalid' }))
+  if (mismatch === 'api-image') f.responses.set('installed-image-crm-api', () => JSON.stringify(image))
+  if (mismatch === 'worker-image') f.responses.set('installed-image-crm-worker', () => JSON.stringify(image))
+  assert.throws(() => deploy(f.options, f.run))
+  assert.ok(!f.calls.some(c => c.label === 'stop-only-crm'))
+})
+test('upgrade checks the preserved company in the actual new containers after cutover', t => {
+  const f = installedFixture(t)
+  f.responses.set('verify-env-crm-api', () => JSON.stringify(['SHARED_OFFERS_COMPANY_ID=']))
+  assert.throws(() => deploy(f.options, f.run), /Gate changed during cutover/)
+  assert.equal(fs.existsSync(path.join(f.state, 'maintenance.json')), true)
+})
 test('successful deployment executes backups, CRM-only migration/cutover and persists next deploy', t => {
   const f = fixture(t); deploy(f.options, f.run)
   const labels = f.calls.map(c => c.label), index = x => labels.indexOf(x)

@@ -12,6 +12,7 @@ import {
   createDb,
   createTempDatabase,
   healthEvents,
+  messages,
   proxies,
   sessionCredentials,
   sessions,
@@ -88,6 +89,67 @@ async function connectedSession(m = manager) {
   await m.whenIdle()
   return s.id
 }
+
+describe('safe MCP pairing preparation', () => {
+  it('disposes the previous unpaired socket, invalidates QR and preserves device profile', async () => {
+    const s = await manager.create({ name: 'pair-safe', phone: null })
+    await manager.startQr(s.id)
+    const previous = fakes.last(s.id)!
+    previous.emitQr('old-code')
+    const [before] = await db.select().from(sessions).where(eq(sessions.id, s.id))
+    expect((await manager.getQr(s.id)).qr).toBeTruthy()
+    await manager.preparePairing(s.id, { proxy: { protocol: 'http', host: '127.0.0.1', port: 10001, username: 'operator', password: 'private-proxy-password' } })
+    expect(previous.closed).toBe(true)
+    expect(await manager.getQr(s.id)).toEqual({ qr: null, generatedAt: null })
+    expect(fakes.created.get(s.id)).toHaveLength(1)
+    const [after] = await db.select().from(sessions).where(eq(sessions.id, s.id))
+    expect(after!.browser).toEqual(before!.browser)
+    expect(after!.proxyId).toBeTruthy()
+    expect(JSON.stringify(await db.select().from(proxies))).not.toContain('private-proxy-password')
+    await manager.startQr(s.id)
+    expect(fakes.last(s.id)!.lastConnect?.proxyUrl).toContain('127.0.0.1:10001')
+    expect((await manager.get(s.id)).requiresRestart).toBe(false)
+  })
+
+  it.each(['queued', 'processing', 'retrying'] as const)('refuses an outbound %s message without disposing the socket or changing proxy', async pendingStatus => {
+    const s = await manager.create({ name: 'pending', phone: null })
+    await manager.startQr(s.id)
+    const previous = fakes.last(s.id)!
+    await db.insert(messages).values({ sessionId: s.id, phone: '+5511999990002', content: { text: 'test fixture only' }, status: pendingStatus })
+    await expect(manager.preparePairing(s.id, { proxy: { protocol: 'http', host: '127.0.0.1', port: 10001 } })).rejects.toMatchObject({ code: 'VALIDATION_ERROR' })
+    expect(previous.closed).toBe(false)
+    expect((await manager.get(s.id)).proxyId).toBeNull()
+    expect(await db.select().from(messages)).toHaveLength(1)
+  })
+
+  it('never interrupts an already connected session', async () => {
+    const id = await connectedSession()
+    const transport = fakes.last(id)!
+    const count = await credsCount(id)
+    await expect(manager.preparePairing(id, { proxy: null })).rejects.toBeInstanceOf(InvalidTransitionError)
+    expect(transport.closed).toBe(false)
+    expect(await credsCount(id)).toBe(count)
+    expect(manager.isConnected(id)).toBe(true)
+  })
+
+  it('checks the live transport even if persisted status lags behind', async () => {
+    const id = await connectedSession()
+    await db.update(sessions).set({ status: 'NEW' }).where(eq(sessions.id, id))
+    await expect(manager.preparePairing(id)).rejects.toMatchObject({ code: 'VALIDATION_ERROR' })
+    expect(fakes.last(id)!.closed).toBe(false)
+  })
+
+  it('omitting proxy preserves it; explicit null removes it without touching other sessions', async () => {
+    const proxy = { protocol: 'http' as const, host: '127.0.0.1', port: 10001 }
+    const s = await manager.create({ name: 'existing-proxy', phone: null, proxy })
+    const other = await manager.create({ name: 'untouched', phone: null })
+    await manager.preparePairing(s.id)
+    expect((await manager.get(s.id)).proxyId).toBe(s.proxyId)
+    await manager.preparePairing(s.id, { proxy: null })
+    expect((await manager.get(s.id)).proxyId).toBeNull()
+    expect(await manager.get(other.id)).toEqual(other)
+  })
+})
 
 describe('autenticação (AC-T05-02/03)', () => {
   it('gerar QR após trocar o proxy encerra o socket antigo e aplica o proxy atual', async () => {

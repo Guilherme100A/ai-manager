@@ -2,7 +2,10 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-export const TREE = '24cec7d30f200818e64cd9693bfe8ff38ed1d0c3'
+export const TREE = '6844b56c32af325ff203014afa0a2bcdc5ea9688'
+// Historical immutable release accepted only as the currently installed source.
+// New artifacts must match TREE exactly; never accept arbitrary historical trees.
+export const INSTALLED_TREES = new Set([TREE, '24cec7d30f200818e64cd9693bfe8ff38ed1d0c3'])
 export const sha = b => createHash('sha256').update(b).digest('hex')
 export function hashFile(file) {
   const hash = createHash('sha256'), buffer = Buffer.alloc(1024 * 1024), fd = fs.openSync(file, 'r')
@@ -102,7 +105,7 @@ export function composeArgs(repo, stateDir, explicitOverride) {
   const active = path.join(stateDir, 'active.json')
   if (!file && fs.existsSync(active)) {
     const spec = read(active)
-    requireThat(spec.source_tree === TREE && /^[a-f0-9]{40}$/.test(spec.release), 'Invalid persisted release')
+    requireThat(INSTALLED_TREES.has(spec.source_tree) && /^[a-f0-9]{40}$/.test(spec.release), 'Invalid persisted release')
     requireThat(specFor({ release: spec.release, image_id: spec.image_id }, spec.storage).deps === spec.deps, 'Invalid deps state')
     requireThat(spec.spa === `crm_so_${spec.release}_spa` && /^sha256:[a-f0-9]{64}$/.test(spec.image_id), 'Invalid SPA/image state')
     file = path.join(stateDir, 'releases', spec.release, 'override.yml')
@@ -116,9 +119,10 @@ export function validateConfig(before, after, spec) {
   requireThat(services && before?.services, 'Missing resolved Compose model')
   for (const name of ['crm-api', 'crm-worker']) {
     const b = before.services[name], a = services[name]
-    requireThat(a && b && a.image === spec.image_id && a.environment?.SHARED_OFFERS_COMPANY_ID === '', 'Image/gate mismatch')
+    const company = spec.company_id ?? ''
+    requireThat(a && b && a.image === spec.image_id && a.environment?.SHARED_OFFERS_COMPANY_ID === company, 'Image/gate mismatch')
     for (const key of [...secrets, 'WA_GATEWAY', 'WA_RPC_PROFILE', 'WA_RPC_URL', 'WA_EVENTS_STREAM', 'CRM_QUEUE_PREFIX']) requireThat(typeof a.environment[key] === 'string' && a.environment[key].length > 0 && a.environment[key] === b.environment[key], 'Runtime secret/RPC drift')
-    requireThat(!b.environment.SHARED_OFFERS_COMPANY_ID && a.environment.WA_GATEWAY === 'rpc' && a.environment.WA_RPC_PROFILE === 'ai-manager', 'Company gate/RPC must remain unchanged and disabled')
+    requireThat((b.environment.SHARED_OFFERS_COMPANY_ID ?? '') === company && a.environment.WA_GATEWAY === 'rpc' && a.environment.WA_RPC_PROFILE === 'ai-manager', 'Company gate/RPC must remain unchanged')
     requireThat(a.volumes?.length === 2 && !a.volumes.some(v => v.type === 'bind' || v.target === '/crm'), 'Mutable source mount forbidden')
     const deps = a.volumes.find(v => v.target === '/crm/node_modules'), storage = a.volumes.find(v => v.target === '/data/storage')
     requireThat(deps?.read_only === true && after.volumes[deps.source]?.name === spec.deps && after.volumes[storage?.source]?.name === spec.storage, 'Dependency/storage mismatch')

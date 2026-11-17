@@ -38,6 +38,7 @@ export function createBridgeTargets(opts: CreateBridgeTargetsOptions): BridgeTar
   const sessions: BridgeTargets['sessions'] = {
     runGroupInvite: (input) => invites.run(input),
     create: (input) => manager.create(input),
+    preparePairing: (id, input) => manager.preparePairing(id, input),
     list: () => manager.list(),
     get: (id) => manager.get(id),
     startQr: (id) => manager.startQr(id),

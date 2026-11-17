@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/Guilherme100A/crm-copy.git",
   "base_sha": "acf78e2da49865afa06fe6a4cee77bcf0e888152",
-  "expected_tree": "24cec7d30f200818e64cd9693bfe8ff38ed1d0c3",
+  "expected_tree": "6844b56c32af325ff203014afa0a2bcdc5ea9688",
   "sanitization": {
     "excluded_files": [
       "scripts/elevenlabs-account-diagnose.ts",
@@ -28,7 +28,7 @@
     ],
     "reason": "Exclude unrelated operator scripts/private deployment context and audit-only harnesses; replace operational hosts in documentation and URL fixtures with reserved example.test hosts. Original local source preserved.",
     "baseline_tree": "539e4a6dac07e50188e418d0e1a3d669e5f6d687",
-    "final_tree": "24cec7d30f200818e64cd9693bfe8ff38ed1d0c3"
+    "final_tree": "6844b56c32af325ff203014afa0a2bcdc5ea9688"
   },
   "test_only_changes": [
     {
@@ -206,6 +206,46 @@
         "packages/db/drizzle/crm/meta/_journal.json",
         "packages/db/src/schema/crm/flows.ts",
         "tests/acceptance/T125/shared-offers.test.ts"
+      ]
+    },
+    {
+      "file": "03-shared-offers-mcp.patch",
+      "description": "Shared Offers MCP tools through the authenticated API; company gate, permissions, read/write separation, isolated tests and operator guide. No migrations or business activations.",
+      "sha256": "ec46fbec1518e43c0c78615b238d80d881a6fcae38d0b116e2096fd23ba8dc07",
+      "bytes": 29553,
+      "files": [
+        "apps/api/src/routes/offers/index.ts",
+        "docs/mcp-shared-offers.md",
+        "packages/core/src/mcp/server.ts",
+        "packages/core/src/mcp/tools/index.ts",
+        "packages/core/src/mcp/tools/offers.ts",
+        "packages/core/src/mcp/tools/offers.unit.test.ts",
+        "packages/core/src/offers/service.ts",
+        "tests/acceptance/T125/mcp-offers.test.ts"
+      ]
+    },
+    {
+      "file": "04-mcp-chip-pairing.patch",
+      "description": "Frozen Dev chip MCP component plus integrated tool registration: explicit panel chip import, safe QR pairing, encrypted proxy, permissions and tests. No migrations or operational chip changes.",
+      "sha256": "e0e9dd18df15908126cda7e224c6905b6b3af9ef8dd52bf7692a3d7bbcbe5223",
+      "bytes": 52889,
+      "files": [
+        "apps/api/src/routes/connections/index.ts",
+        "apps/api/src/routes/mcp/mcp-chip-pairing.db.unit.test.ts",
+        "docs/mcp-chip-pairing.md",
+        "packages/core/src/connections/index.ts",
+        "packages/core/src/connections/pairing.ts",
+        "packages/core/src/mcp/tools/connections.ts",
+        "packages/core/src/mcp/tools/connections.unit.test.ts",
+        "packages/core/src/mcp/tools/index.ts",
+        "packages/core/src/mcp/tools/shared.ts",
+        "packages/wa-gateway-rpc/src/gateway.ts",
+        "packages/wa-gateway-rpc/src/gateway.unit.test.ts",
+        "packages/wa-gateway-rpc/src/profiles.ts",
+        "packages/wa-gateway-rpc/src/profiles/ai-manager/profile.ts",
+        "packages/wa-gateway-rpc/src/profiles/ai-manager/testing/simulator.ts",
+        "packages/wa-port/src/gateway.ts",
+        "packages/wa-port/src/testing/fake-gateway.ts"
       ]
     }
   ],

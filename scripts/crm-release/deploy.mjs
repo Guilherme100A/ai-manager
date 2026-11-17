@@ -36,6 +36,12 @@ export function deploy(options, run = command) {
   }
   principal()
   const before = parseJSON(dc('base-config', ['config', '--format', 'json']), 'base-config')
+  const activeFile = path.join(state, 'active.json')
+  const installed = fs.existsSync(activeFile) ? read(activeFile) : null
+  const company = installed?.company_id ?? ''
+  // Validate the persisted UUID and compare it against both API/worker models and
+  // containers. An upgrade can preserve activation, never introduce a new one.
+  if (installed) override(installed)
   const ids = Object.fromEntries(['crm-api', 'crm-worker', 'postgres', 'redis'].map(name => [name, dc('id-' + name, ['ps', '-q', name])]))
   requireThat(Object.values(ids).every(Boolean), 'Required running services missing')
   for (const name of ['crm-api', 'crm-worker']) {
@@ -43,7 +49,8 @@ export function deploy(options, run = command) {
     requireThat(serviceState.Status === 'running' && (name !== 'crm-api' || serviceState.Health?.Status === 'healthy'), 'Legacy CRM not ready for controlled maintenance')
     const env = json(run, 'env-' + name, 'docker', ['inspect', '--format', '{{json .Config.Env}}', ids[name]])
     const actual = Object.fromEntries(env.map(x => { const i = x.indexOf('='); return [x.slice(0, i), x.slice(i + 1)] }))
-    requireThat(!actual.SHARED_OFFERS_COMPANY_ID && !before.services[name].environment.SHARED_OFFERS_COMPANY_ID, 'Company gate must be empty in running and configured services')
+    requireThat((actual.SHARED_OFFERS_COMPANY_ID ?? '') === company && (before.services[name].environment.SHARED_OFFERS_COMPANY_ID ?? '') === company, 'Company gate drift in running or configured services')
+    if (installed) requireThat(json(run, 'installed-image-' + name, 'docker', ['inspect', '--format', '{{json .Image}}', ids[name]]) === installed.image_id, 'Installed CRM image drift')
     for (const key of secrets) requireThat(actual[key] && actual[key] === before.services[name].environment[key], 'Running/configured credential drift')
   }
   const mounts = json(run, 'storage-mount', 'docker', ['inspect', '--format', '{{json .Mounts}}', ids['crm-api']])
@@ -52,6 +59,7 @@ export function deploy(options, run = command) {
   const workerMounts = json(run, 'worker-storage-mount', 'docker', ['inspect', '--format', '{{json .Mounts}}', ids['crm-worker']])
   requireThat(workerMounts.filter(x => x.Destination === '/data/storage' && x.Type === 'volume' && x.Name === storage[0].Name).length === 1, 'API/worker storage mismatch')
   const spec = specFor(m, storage[0].Name)
+  if (installed?.company_id !== undefined) spec.company_id = company
   const pg = before.services.postgres.environment
   requireThat(/^[a-zA-Z0-9_]+$/.test(pg.POSTGRES_USER) && /^[a-zA-Z0-9_]+$/.test(pg.POSTGRES_DB), 'Invalid database identity')
   const psql = sql => ['exec', '-T', 'postgres', 'psql', '-XqAt', '-v', 'ON_ERROR_STOP=1', '-U', pg.POSTGRES_USER, '-d', pg.POSTGRES_DB, '-c', sql]
@@ -135,7 +143,7 @@ export function deploy(options, run = command) {
       const s = json(run, 'verify-state-' + name, 'docker', ['inspect', '--format', '{{json .State}}', id])
       requireThat(s.Status === 'running' && (name !== 'crm-api' || s.Health?.Status === 'healthy'), 'CRM service not ready')
       const e = json(run, 'verify-env-' + name, 'docker', ['inspect', '--format', '{{json .Config.Env}}', id])
-      requireThat(!e.some(x => x.startsWith('SHARED_OFFERS_COMPANY_ID=') && x !== 'SHARED_OFFERS_COMPANY_ID='), 'Gate changed during cutover')
+      requireThat(e.includes('SHARED_OFFERS_COMPANY_ID=' + company), 'Gate changed during cutover')
       const actualMounts = json(run, 'verify-mounts-' + name, 'docker', ['inspect', '--format', '{{json .Mounts}}', id])
       if (name !== 'crm-web') {
         for (const key of secrets) requireThat(e.includes(key + '=' + before.services[name].environment[key]), 'Credential changed during cutover')
@@ -145,7 +153,7 @@ export function deploy(options, run = command) {
     }
     next('verify-spa-http', ['exec', '-T', 'crm-web', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1/index.html'])
     principal()
-    atomic(path.join(dir, 'result.json'), { installed: true, release: m.release, gate_empty: true, worker_health: 'running-only-not-proven-healthy', browser_and_mcp_verification_required: true })
+    atomic(path.join(dir, 'result.json'), { installed: true, release: m.release, gate_empty: company === '', activation_preserved: Boolean(installed), worker_health: 'running-only-not-proven-healthy', browser_and_mcp_verification_required: true })
     // No critical file writes after releasing the persistent maintenance gate.
     fs.unlinkSync(maintenance)
     return spec
@@ -178,6 +186,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
     const [repo, state, artifact, manifestSha, receiptFile, remote] = process.argv.slice(2)
     process.umask(0o077)
     deploy({ repo, state, artifact, manifestSha, receiptFile, remote, lockHeld: process.env.CRM_RELEASE_LOCK_HELD === '1' })
-    console.log('CRM installed with empty gate. Separate browser/MCP verification and company confirmation required.')
+    console.log('CRM installed; existing activation preserved. Separate browser/MCP verification required.')
   } catch (e) { console.error(e.message); process.exitCode = 1 }
 }

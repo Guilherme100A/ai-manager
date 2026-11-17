@@ -42,6 +42,49 @@ function targets(over: Partial<BridgeTargets['sessions']> = {}): BridgeTargets {
 const rpc = (app: ReturnType<typeof createInternalApp>, target: string, method: string, args: unknown[] = [], headers: Record<string, string> = auth) =>
   app.request('/internal/rpc', { method: 'POST', headers, body: JSON.stringify({ target, method, args }) })
 
+describe('MCP pairing bridge', () => {
+  function safeTargets() {
+    return targets({
+      preparePairing: vi.fn(async () => ({ id: 'chip-a', status: 'NEW' })),
+      getConversation: vi.fn(async () => ({ config: { enabled: true, mode: 'rotating', intervalMinutes: 10 } })),
+      configureConversation: vi.fn(async () => ({})),
+      getGroupAutomation: vi.fn(async () => ({ config: { enabled: true, query: 'saved query', maxEntriesPerDay: 2 } })),
+      configureGroupAutomation: vi.fn(async () => ({})),
+    })
+  }
+  it('disables only the target chip automations, preserving their other settings, without starting QR or sending', async () => {
+    const t = safeTargets(), app = createInternalApp({ token: TOKEN, targets: t })
+    const proxy = { protocol: 'socks5', host: 'proxy.test', port: 1080, username: 'u', password: 'private' }
+    expect(await (await rpc(app, 'sessions', 'preparePairing', ['chip-a', { proxy }])).json()).toEqual({ result: { id: 'chip-a', status: 'NEW' } })
+    expect(t.sessions.preparePairing).toHaveBeenCalledExactlyOnceWith('chip-a', { proxy })
+    expect(t.sessions.configureConversation).toHaveBeenCalledExactlyOnceWith('chip-a', { enabled: false, mode: 'rotating', intervalMinutes: 10 })
+    expect(t.sessions.configureGroupAutomation).toHaveBeenCalledExactlyOnceWith('chip-a', { enabled: false, query: 'saved query', maxEntriesPerDay: 2 })
+    expect(t.sessions.startQr).not.toHaveBeenCalled()
+    expect(t.messages.enqueue).not.toHaveBeenCalled()
+  })
+  it('requires internal authentication before any preparation', async () => {
+    const t = safeTargets(), app = createInternalApp({ token: TOKEN, targets: t })
+    expect((await rpc(app, 'sessions', 'preparePairing', ['chip-a', {}], {})).status).toBe(401)
+    expect(t.sessions.preparePairing).not.toHaveBeenCalled()
+  })
+  it('refuses an older worker or unsupported options before changing anything', async () => {
+    const t = safeTargets()
+    const app = createInternalApp({ token: TOKEN, targets: t })
+    expect(await (await rpc(app, 'sessions', 'preparePairing', ['chip-a', { enableAutomation: true }])).json()).toMatchObject({ error: { code: 'VALIDATION_ERROR' } })
+    t.sessions.configureGroupAutomation = undefined
+    expect(await (await rpc(app, 'sessions', 'preparePairing', ['chip-a', {}])).json()).toMatchObject({ error: { code: 'VALIDATION_ERROR' } })
+    expect(t.sessions.preparePairing).not.toHaveBeenCalled()
+  })
+  it('propagates a pending queue failure without changing automation settings', async () => {
+    const t = safeTargets()
+    t.sessions.preparePairing = vi.fn(async () => { throw new SessionError('VALIDATION_ERROR', 'Pending outbound queue') })
+    const app = createInternalApp({ token: TOKEN, targets: t })
+    expect(await (await rpc(app, 'sessions', 'preparePairing', ['chip-a', {}])).json()).toMatchObject({ error: { code: 'VALIDATION_ERROR' } })
+    expect(t.sessions.configureConversation).not.toHaveBeenCalled()
+    expect(t.sessions.configureGroupAutomation).not.toHaveBeenCalled()
+  })
+})
+
 describe('servidor interno — ponte RPC', () => {
   it('exige o token interno', async () => {
     const app = createInternalApp({ token: TOKEN, targets: targets() })

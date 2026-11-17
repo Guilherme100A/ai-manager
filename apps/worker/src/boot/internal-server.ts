@@ -6,7 +6,7 @@ import { timingSafeEqual } from 'node:crypto'
 import type { AddressInfo } from 'node:net'
 import { serve, type ServerType } from '@hono/node-server'
 import { Hono, type Context } from 'hono'
-import { TransportNotConnectedError, type ConversationConfig, type GroupAutomationConfig, type GroupInviteInput, type EnqueueMessageInput, type GroupSummary, type ListMessagesFilter, type WaTransport } from '@wsm/core'
+import { SessionError, TransportNotConnectedError, type CreateSessionInput, type ConversationConfig, type GroupAutomationConfig, type GroupInviteInput, type EnqueueMessageInput, type GroupSummary, type ListMessagesFilter, type WaTransport } from '@wsm/core'
 import type { CrmBridgeTargets } from '../crm/bridge'
 import { requireObject, requireString } from '../crm/bridge'
 import type { FakeControl } from './fake-control'
@@ -24,6 +24,7 @@ export interface BridgeTargets {
     create(input: never): Promise<unknown>
     list(): Promise<unknown>
     get(id: string): Promise<unknown>
+    preparePairing?(id: string, input: { proxy?: CreateSessionInput['proxy'] }): Promise<unknown>
     startQr(id: string): Promise<unknown>
     getQr(id: string): Promise<unknown>
     requestPairingCode(id: string, phone?: string): Promise<unknown>
@@ -140,6 +141,20 @@ export function bridgeHandlers(t: BridgeTargets): Record<string, Record<string, 
       create: ([input]) => s.create(input as never),
       list: () => s.list(),
       get: ([id]) => s.get(str(id)),
+      preparePairing: async ([id, raw]) => {
+        if (!s.preparePairing || !s.getConversation || !s.configureConversation || !s.getGroupAutomation || !s.configureGroupAutomation) {
+          throw new SessionError('VALIDATION_ERROR', 'Preparação segura de pareamento indisponível neste worker.')
+        }
+        const input = requireObject(raw ?? {}, 'input')
+        if (Object.keys(input).some(k => k !== 'proxy')) throw new SessionError('VALIDATION_ERROR', 'Opções de pareamento inválidas.')
+        const sessionId = str(id)
+        const result = await s.preparePairing(sessionId, input as { proxy?: CreateSessionInput['proxy'] })
+        const conversation = await s.getConversation(sessionId) as { config: ConversationConfig }
+        const groups = await s.getGroupAutomation(sessionId) as { config: GroupAutomationConfig }
+        await s.configureConversation(sessionId, { ...conversation.config, enabled: false })
+        await s.configureGroupAutomation(sessionId, { ...groups.config, enabled: false })
+        return result
+      },
       startQr: ([id]) => s.startQr(str(id)),
       getQr: ([id]) => s.getQr(str(id)),
       requestPairingCode: ([id, phone]) => s.requestPairingCode(str(id), phone === undefined || phone === null ? undefined : str(phone)),
