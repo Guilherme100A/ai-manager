@@ -44,7 +44,7 @@ index 2d2a820..91b85f4 100644
      return c.json({ ...page, features: { import_ai_manager: extension() } }, 200)
 diff --git a/apps/api/src/routes/mcp/mcp-chip-pairing.db.unit.test.ts b/apps/api/src/routes/mcp/mcp-chip-pairing.db.unit.test.ts
 new file mode 100644
-index 0000000..5709c48
+index 0000000..6269f55
 --- /dev/null
 +++ b/apps/api/src/routes/mcp/mcp-chip-pairing.db.unit.test.ts
 @@ -0,0 +1,194 @@
@@ -70,7 +70,7 @@ index 0000000..5709c48
 +  redis = redisConnection({ url: process.env.REDIS_URL ?? 'redis://127.0.0.1:6379/1' })
 +  app = createApp({ db, redis, waGateway: gateway, waProfile: 'ai-manager', mailer: new MemoryMailer(), trustProxy: true, logger: createLogger({ level: 'silent' }), credentialsCipher: createCipher({ key: generateCredentialsKey() }), mcpEnv: { API_PUBLIC_URL: 'https://api.example.test' } })
 +}, 120000)
-+afterAll(async () => { await gateway.stop(); redis?.disconnect(); await db?.$client.end(); await temp?.drop() })
++afterAll(async () => { gateway.reset(); redis?.disconnect(); await db?.$client.end(); await temp?.drop() })
 +async function tenant(): Promise<Session> {
 +  const email = `chip-${rnd()}@example.test`, ip = { 'x-forwarded-for': `10.91.${Math.floor(Math.random() * 250)}.${Math.floor(Math.random() * 250)}` }
 +  const reg = await app.request('/api/auth/register', { method: 'POST', headers: { ...H, ...ip }, body: JSON.stringify({ name: 'Chip owner', email, password: '12345678', password_confirmation: '12345678' }) })
