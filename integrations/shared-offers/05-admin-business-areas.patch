@@ -116,10 +116,10 @@ index c211b30f16f2904786da0a3fd39817a5f7d6e424..3b8831c50e52205f0e4aa6e5795a64ca
    audit: AuditService
 diff --git a/apps/api/src/middleware/business-area.ts b/apps/api/src/middleware/business-area.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..7f48e323b3dc2bca8a69c052a70bdcd66cdc3c63
+index 0000000000000000000000000000000000000000..4a1e46edbd2475fb0b6285015e2af5d798c424a9
 --- /dev/null
 +++ b/apps/api/src/middleware/business-area.ts
-@@ -0,0 +1,88 @@
+@@ -0,0 +1,103 @@
 +import type { MiddlewareHandler } from 'hono'
 +import { BusinessAreasService, BusinessAreaError, isSharedOffersCompany, type AreaResourceKind } from '@crm/core'
 +import { sql } from 'drizzle-orm'
@@ -136,7 +136,7 @@ index 0000000000000000000000000000000000000000..7f48e323b3dc2bca8a69c052a70bdcd6
 +  [/^\/api\/meta\/tracked-links(?:\/([^/]+))?/, 'link', 'link'],
 +  [/^\/api\/meta\/ad-accounts(?:\/([^/]+))?/, 'account', 'ad_account'],
 +]
-+const staticNames = new Set(['names'])
++const staticNames = new Set(['names', 'import', 'import-json'])
 +const scopedPath = (path: string) => groups.find(([re]) => re.test(path))
 +class RollbackResponse extends Error {}
 +
@@ -154,13 +154,20 @@ index 0000000000000000000000000000000000000000..7f48e323b3dc2bca8a69c052a70bdcd6
 +      if (requested && !administrator) throw new ApiError('NOT_FOUND','Área não encontrada')
 +      const resolved = requested ? await svc.get(company, requested) : null
 +      if (!requested && !await svc.enabled(company)) return next()
-+      if (!administrator && (/^\/api\/(business-areas|offers|flows|flow-folders|flow-runs|products|payment-integrations|meta|sales|dashboard|exports)(\/|$)/.test(c.req.path)
-+        || /^\/api\/chats\/[^/]+\/offers?$/.test(c.req.path))) throw new ApiError('NOT_FOUND','Recurso não encontrado')
++      if (!administrator && (/^\/api\/(business-areas|offers|flows|flow-folders|flow-runs|products|payment-integrations|meta|sales|dashboard|exports|jobs|events|notifications)(\/|$)/.test(c.req.path)
++        || /^\/api\/chats\/[^/]+\/(offers?|flow-runs)$/.test(c.req.path))) throw new ApiError('NOT_FOUND','Recurso não encontrado')
 +      const area = resolved?.id ?? null
 +      c.set('businessArea', area)
 +      setAudit(c, { detail: { business_area_id: area } })
 +      const group = scopedPath(c.req.path)
 +      const apply = async () => {
++        const run = /^\/api\/flow-runs\/([^/]+)(?:\/|$)/.exec(c.req.path)
++        if (run) {
++          if (!/^[a-f\d]{8}(-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(run[1]!)) throw new ApiError('NOT_FOUND','Execução não encontrada')
++          const [row] = (await deps.db.execute(sql`select flow_id from crm.flow_runs where company_id=${company} and id=${run[1]}`)).rows as {flow_id:string}[]
++          if (!row) throw new ApiError('NOT_FOUND','Execução não encontrada')
++          await svc.assertResource(company,area,'flow',row.flow_id)
++        }
 +        if (group) {
 +          const [pattern, kind, key] = group, id = pattern.exec(c.req.path)?.[1]
 +          if (id && !staticNames.has(id)) await svc.assertResource(company, area, kind, id)
@@ -179,10 +186,12 @@ index 0000000000000000000000000000000000000000..7f48e323b3dc2bca8a69c052a70bdcd6
 +            body.items = await svc.filter(company, area, kind, body.items as { id: string }[])
 +            c.res = new Response(JSON.stringify(body), c.res)
 +          }
-+          if (c.req.method === 'POST' && (!id || (kind === 'flow' && c.req.path.endsWith('/duplicate'))) && area) {
-+            const created = body[key] as { id?: string } | undefined
-+            if (created?.id) await deps.db.execute(sql`insert into crm.business_area_resources(company_id,area_id,kind,resource_id)
-+              values(${company},${area},${kind},${created.id})`)
++          if (c.req.method === 'POST' && (!id || (kind === 'flow' && (['import','import-json'].includes(id) || c.req.path.endsWith('/duplicate'))))) {
++            const created = [body[key],...(kind==='flow' && id==='import' && Array.isArray(body.items) ? body.items.map(item=>(item as {flow:unknown}).flow) : [])]
++              .filter((item):item is {id:string} => !!item && typeof item==='object' && 'id' in item && typeof item.id==='string')
++            for (const item of created) if (area) await deps.db.execute(sql`insert into crm.business_area_resources(company_id,area_id,kind,resource_id)
++              values(${company},${area},${kind},${item.id})`)
++            if (kind==='flow') for (const item of created) await svc.assertFlowReferences(company,area,item.id)
 +          }
 +          return
 +        }
@@ -190,9 +199,15 @@ index 0000000000000000000000000000000000000000..7f48e323b3dc2bca8a69c052a70bdcd6
 +        if (area && /^\/api\/meta\/profiles\/[^/]+/.test(c.req.path) && c.req.method !== 'GET')
 +          throw new ApiError('CONFLICT', 'Gerencie credenciais Meta no cadastro geral; esta operação afeta todas as áreas')
 +        await next()
++        if (/^\/api\/chats\/[^/]+\/flow-runs$/.test(c.req.path) && c.req.method==='GET' && c.res.status===200) {
++          const body=await c.res.clone().json() as {items:{id:string;flow_id:string}[]}
++          const filtered=await svc.filter(company,area,'flow',body.items.map(run=>({id:run.flow_id,run})))
++          c.res=new Response(JSON.stringify({...body,items:filtered.map(x=>x.run)}),c.res)
++        }
 +      }
 +      // Hold assignment lock through the API mutation so destinations cannot change area mid-edit.
-+      const lifecycle = /\/flows\/[^/]+\/(activate|pause|archive|unarchive)$/.test(c.req.path)
++      // These handlers enqueue work after their own DB commit. Never delay that commit until after enqueueing.
++      const lifecycle = /\/flows\/[^/]+\/(activate|pause|archive|unarchive|trigger)$/.test(c.req.path)
 +      if ((group || c.req.path.startsWith('/api/offers')) && !lifecycle && !['GET', 'HEAD'].includes(c.req.method)) {
 +        try {
 +          await deps.areaTransaction(async tx => {
@@ -756,10 +771,10 @@ index 4572b622e01a380f71bb6ffde19635ae06d7fcd0..063f148988af0464f7ca8e62c894d057
    /** T32: empresas em que o usuário `support` tem concessão ativa (sem vínculo), para o perfil e a troca de empresa. */
 diff --git a/packages/core/src/business-areas/service.ts b/packages/core/src/business-areas/service.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..efe0a2534eb91f5bd75ebd1619ac398282a654d6
+index 0000000000000000000000000000000000000000..9bc696bfe242dd683a25d4566f0d230df0dcb08a
 --- /dev/null
 +++ b/packages/core/src/business-areas/service.ts
-@@ -0,0 +1,159 @@
+@@ -0,0 +1,160 @@
 +import { sql, type SQL } from 'drizzle-orm'
 +import type { Database } from '@crm/db'
 +import { isSharedOffersCompany, requireSharedOffersCompany } from '../offers/policy'
@@ -776,7 +791,7 @@ index 0000000000000000000000000000000000000000..efe0a2534eb91f5bd75ebd1619ac3982
 +const rows = async <T>(db: Database, query: SQL) => (await db.execute(query)).rows as T[]
 +const uuid = (v: unknown): v is string => typeof v === 'string' && /^[a-f\d]{8}(-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(v)
 +const refs: Record<string, AreaResourceKind> = {
-+  product_id: 'product', flow_id: 'flow', target_flow_id: 'flow', integration_id: 'integration',
++  product_id: 'product', flow_id: 'flow', target_flow_id: 'flow', source_flow_id: 'flow', integration_id: 'integration',
 +  payment_integration_id: 'integration', ad_account_id: 'account', pixel_id: 'pixel', pixel_config_id: 'pixel',
 +}
 +
@@ -875,15 +890,16 @@ index 0000000000000000000000000000000000000000..efe0a2534eb91f5bd75ebd1619ac3982
 +      if (kind === 'link' && (await rows(db, sql`select 1 from crm.offers o where o.company_id=${company} and o.business_area_id is distinct from ${area}::uuid
 +        and exists(select 1 from jsonb_array_elements(o.config->'origins') origin where origin->>'type'='link' and origin->>'value'=${id}) limit 1`)).length)
 +        throw new BusinessAreaError('conflict', 'Link em oferta existente. Atribua a oferta completa pela opção de adoção explícita')
-+      if (kind === 'flow') {
-+        const actions = await rows<{ config: unknown }>(db, sql`select a.config from crm.flow_node_actions a join crm.flow_nodes n on n.id=a.node_id where a.company_id=${company} and n.flow_id=${id}`)
-+        const versions = await rows<{ definition: unknown }>(db, sql`select v.definition from crm.flow_versions v join crm.flows f on f.id=v.flow_id and f.published_version=v.version where v.company_id=${company} and v.flow_id=${id}`)
-+        for (const a of actions) await svc.assertReferences(company, area, a.config)
-+        for (const v of versions) await svc.assertReferences(company, area, v.definition)
-+      }
 +      await db.execute(sql`insert into crm.business_area_resources(company_id,area_id,kind,resource_id) values(${company},${area},${kind},${id}) on conflict(company_id,kind,resource_id) do nothing`)
++      if (kind === 'flow') await svc.assertFlowReferences(company,area,id)
 +      return { kind, resource_id: id, area_id: area }
 +    })
++  }
++  async assertFlowReferences(company: string, area: string | null, id: string) {
++    const actions = await rows<{ config: unknown }>(this.db, sql`select a.config from crm.flow_node_actions a join crm.flow_nodes n on n.id=a.node_id where a.company_id=${company} and n.flow_id=${id}`)
++    const versions = await rows<{ definition: unknown }>(this.db, sql`select v.definition from crm.flow_versions v join crm.flows f on f.id=v.flow_id and f.published_version=v.version where v.company_id=${company} and v.flow_id=${id}`)
++    for (const a of actions) await this.assertReferences(company,area,a.config)
++    for (const v of versions) await this.assertReferences(company,area,v.definition)
 +  }
 +  async catalog(company: string) {
 +    requireSharedOffersCompany(company)
@@ -1004,7 +1020,7 @@ index 0000000000000000000000000000000000000000..51c4e959ef31e81f9e699c84c84668b9
 +    run: async ({ id, ...body }, api) => fromApi(await api.request('POST', `/api/business-areas/${id}/adopt-offer`, { body })) }),
 +]
 diff --git a/packages/core/src/mcp/tools/index.ts b/packages/core/src/mcp/tools/index.ts
-index 51aff36eb300f2ff0231d868177f5a0b20df8c3a..18e73f696c926dca121d1343ad5e054dc5194883 100644
+index 51aff36eb300f2ff0231d868177f5a0b20df8c3a..a61338d7e527f946c323086f86824c4a5a935371 100644
 --- a/packages/core/src/mcp/tools/index.ts
 +++ b/packages/core/src/mcp/tools/index.ts
 @@ -8,14 +8,15 @@ import { mediaTools } from './media'
@@ -1017,7 +1033,7 @@ index 51aff36eb300f2ff0231d868177f5a0b20df8c3a..18e73f696c926dca121d1343ad5e054d
  import { registerApiTools, type McpApiContext } from './shared'
  
 -export const MCP_API_TOOLS = [...conversationsTools, ...flowsTools, ...spyTools, ...audioTools, ...mediaTools, ...insightsTools, ...pixelsTools, ...paymentsTools, ...connectionsTools] as const
-+export const MCP_API_TOOLS = [...conversationsTools, ...flowsTools.map(t => ({ ...t, areaScoped: true })), ...spyTools, ...audioTools, ...mediaTools, ...insightsTools.map(t => ({ ...t, areaScoped: t.name === 'get_ad_metrics' })), ...pixelsTools.map(t => ({ ...t, areaScoped: true })), ...paymentsTools.map(t => ({ ...t, areaScoped: true })), ...connectionsTools] as const
++export const MCP_API_TOOLS = [...conversationsTools.map(t=>({...t,areaScoped:t.name==='get_conversation_flow_runs'})), ...flowsTools.map(t => ({ ...t, areaScoped: true })), ...spyTools, ...audioTools, ...mediaTools, ...insightsTools.map(t => ({ ...t, areaScoped: t.name === 'get_ad_metrics' })), ...pixelsTools.map(t => ({ ...t, areaScoped: true })), ...paymentsTools.map(t => ({ ...t, areaScoped: true })), ...connectionsTools] as const
  
  export function registerAllApiTools(server: McpServer, ctx: McpApiContext, sharedOffers = false): string[] {
 -  return registerApiTools(server, ctx, sharedOffers ? [...MCP_API_TOOLS, ...offersTools] : MCP_API_TOOLS)
@@ -1301,10 +1317,10 @@ index 6574034dcc23767a3bf5ff465a999adc7df3dbcd..9ac6ded17cfa412e6ed07aedee85de5b
    'offer_connections',
 diff --git a/tests/acceptance/T125/business-areas.test.ts b/tests/acceptance/T125/business-areas.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..a8e4745a34bece90e9894c12fef81df135b0ce84
+index 0000000000000000000000000000000000000000..baf66768195d3694a24418c2020c8629831287a2
 --- /dev/null
 +++ b/tests/acceptance/T125/business-areas.test.ts
-@@ -0,0 +1,245 @@
+@@ -0,0 +1,292 @@
 +// Runs against disposable CI infrastructure and fake providers, never a live chip/provider.
 +/* eslint-disable @typescript-eslint/no-explicit-any -- acceptance JSON fixtures */
 +import { randomUUID } from 'node:crypto'
@@ -1493,6 +1509,8 @@ index 0000000000000000000000000000000000000000..a8e4745a34bece90e9894c12fef81df1
 +  expect((await call('GET','/api/offers',areas[0].id,undefined,account)).status).toBe(404)
 +  expect((await call('GET','/api/offers/'+bundles[0].offerId,undefined,undefined,account)).status).toBe(404)
 +  expect((await call('GET','/api/payment-integrations',undefined,undefined,account)).status).toBe(404)
++  expect((await call('GET','/api/events',undefined,undefined,account)).status).toBe(404)
++  expect((await call('GET','/api/jobs',undefined,undefined,account)).status).toBe(404)
 +  const made=await call('POST','/api/mcp_credentials',undefined,{name:'Different admin',access:'write'},account)
 +  expect(made.status).toBe(201)
 +  expect((await tool(made.body.token,'list_business_areas')).error).toBe(true)
@@ -1503,6 +1521,45 @@ index 0000000000000000000000000000000000000000..a8e4745a34bece90e9894c12fef81df1
 +  expect(profile.companies.find((c:any)=>c.id===t.companyId)).toMatchObject({business_areas_admin:false,business_areas_enabled:true})
 +  await sys.q('update crm.users set last_company_id=$1 where id=$2',[t.companyId,user])
 +})
++it('MCP listing, duplicate/import/paste and run IDs keep the area context, including materialized share-code references', async () => {
++  const a=areas[0].id,b=areas[1].id
++  const created=await call('POST','/api/flows',a,{name:'Scoped template A'})
++  expect(created.status).toBe(201);const id=created.body.flow.id
++  const listed=await tool(reader,'list_flows',{business_area_id:a})
++  expect(listed.data.flows.map((f:any)=>f.id)).toContain(id)
++  expect((await tool(reader,'list_flows',{business_area_id:b})).data.flows.map((f:any)=>f.id)).not.toContain(id)
++  const duplicated=await call('POST',`/api/flows/${id}/duplicate`,a,{})
++  expect(duplicated.status).toBe(201)
++  expect((await call('GET','/api/flows/'+duplicated.body.flow.id,b)).status).toBe(404)
++  const exported=await call('GET',`/api/flows/${id}/export`,a)
++  const imported=await call('POST','/api/flows/import-json',a,exported.body)
++  expect(imported.status,JSON.stringify(imported.body)).toBe(201)
++  expect((await call('GET','/api/flows/'+imported.body.flow.id,b)).status).toBe(404)
++  const code=(await call('GET',`/api/flows/${id}/share-code`,a)).body.code
++  const shared=await call('POST','/api/flows/import',a,{codes:[code]})
++  expect(shared.status,JSON.stringify(shared.body)).toBe(201)
++  expect(shared.body.items).toHaveLength(1)
++  expect((await call('GET','/api/flows/'+shared.body.items[0].flow.id,b)).status).toBe(404)
++  const foreignFlow=await call('POST','/api/flows',b,{name:'Scoped template B'})
++  expect(foreignFlow.status).toBe(201)
++  const node=await call('POST',`/api/flows/${foreignFlow.body.flow.id}/nodes`,b,{id:'pay',type:'payment',position:{x:200,y:0},actions:[{type:'create_payment_charge',config:{gateway:'xpag',method:'pix',amount:100,payment_integration_id:bundles[1].integration_id}}]})
++  expect(node.status,JSON.stringify(node.body)).toBe(201)
++  const foreignCode=(await call('GET',`/api/flows/${foreignFlow.body.flow.id}/share-code`,b)).body.code
++  const count=(await sys.q('select count(*)::int n from crm.flows where company_id=$1',[t.companyId]))[0].n
++  const refused=await call('POST','/api/flows/import',a,{codes:[foreignCode]})
++  expect(refused.status,JSON.stringify(refused.body)).toBe(422)
++  expect((await sys.q('select count(*)::int n from crm.flows where company_id=$1',[t.companyId]))[0].n).toBe(count)
++  const paste=await call('POST',`/api/flows/${id}/paste-nodes`,a,{source_flow_id:foreignFlow.body.flow.id,nodes:[{id:'pay'}]})
++  expect(paste.status).toBe(422);expect(paste.body.error.message).toContain('source_flow_id')
++  const [contact]=await sys.q("insert into crm.contacts(company_id,name) values($1,'Synthetic run lookup') returning id",[t.companyId])
++  const [chat]=await sys.q('insert into crm.chats(company_id,contact_id,connection_id) values($1,$2,$3) returning id',[t.companyId,contact.id,t.connectionId])
++  const [run]=await sys.q("insert into crm.flow_runs(company_id,flow_id,contact_id,chat_id,status) values($1,$2,$3,$4,'completed') returning id",[t.companyId,foreignFlow.body.flow.id,contact.id,chat.id])
++  expect((await call('GET','/api/flow-runs/'+run.id,a)).status).toBe(404)
++  expect((await call('POST','/api/flow-runs/'+run.id+'/cancel',a,{})).status).toBe(404)
++  expect((await call('GET','/api/flow-runs/'+run.id,b)).status).toBe(200)
++  expect((await tool(reader,'get_conversation_flow_runs',{id:chat.id,business_area_id:a})).data.items).toEqual([])
++  expect((await tool(reader,'get_conversation_flow_runs',{id:chat.id,business_area_id:b})).data.items).toHaveLength(1)
++})
 +it('desktop/mobile navigation selects the actual business area, filters offers and shows its declared BM', async () => {
 +  const root = resolve(process.env.CRM_EMBEDDED_DIST!)
 +  server = createServer(async (req,res) => {
@@ -1510,11 +1567,17 @@ index 0000000000000000000000000000000000000000..a8e4745a34bece90e9894c12fef81df1
 +      const pathname = new URL(req.url!, 'http://ci').pathname
 +      if (pathname.startsWith('/crm/api/')) {
 +        const chunks: Buffer[]=[]; for await(const chunk of req) chunks.push(Buffer.from(chunk))
-+        const response = await sys.app.request(req.url!.slice(4),{method:req.method,headers:req.headers as any,...(!['GET','HEAD'].includes(req.method!)?{body:Buffer.concat(chunks)}:{})})
-+        res.writeHead(response.status,Object.fromEntries(response.headers.entries()));res.end(Buffer.from(await response.arrayBuffer()));return
++        const abort=new AbortController();res.on('close',()=>abort.abort())
++        const response = await sys.app.request(req.url!.slice(4),{method:req.method,headers:req.headers as any,signal:abort.signal,...(!['GET','HEAD'].includes(req.method!)?{body:Buffer.concat(chunks)}:{})})
++        res.writeHead(response.status,Object.fromEntries(response.headers.entries()))
++        if(response.headers.get('content-type')?.includes('text/event-stream')) {
++          const reader=response.body!.getReader();res.on('close',()=>void reader.cancel().catch(()=>{}))
++          for(;;){const item=await reader.read();if(item.done)break;res.write(Buffer.from(item.value))}res.end()
++        }else res.end(Buffer.from(await response.arrayBuffer()))
++        return
 +      }
 +      const asset=resolve(root,'.'+pathname.replace(/^\/crm/,'')),file=asset.startsWith(root+'/')&&existsSync(asset)&&extname(asset)?asset:resolve(root,'index.html')
-+      const mime:Record<string,string>={'.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml'}
++      const mime:Record<string,string>={'.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml','.woff2':'font/woff2','.png':'image/png'}
 +      res.setHeader('content-type',mime[extname(file)]??'text/html');res.end(readFileSync(file))
 +    } catch { if(!res.headersSent)res.statusCode=500;res.end() }
 +  })
