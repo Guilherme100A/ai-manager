@@ -184,16 +184,18 @@ index 0f0ade308cff241e5c8165780f02db0d4cf7418a..11ac223c75b09e51e0e71c19e47c13f9
    const pttConverter = (data: Uint8Array) => toPttOgg(data)
 diff --git a/docs/private-media-and-two-chip-delivery.md b/docs/private-media-and-two-chip-delivery.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..aadb8298de4e42d3204e8cae240138f761bb7c68
+index 0000000000000000000000000000000000000000..0813ae6ddda0e3ea3d0de5609ab68193743936c5
 --- /dev/null
 +++ b/docs/private-media-and-two-chip-delivery.md
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,55 @@
 +# Midia privada e ingestao entre dois chips
 +
 +O ID de uma mensagem WhatsApp pode ser observado na saida de uma conexao e na
 +entrada de outra conexao da mesma empresa. A migration 0044 preserva as primeiras
-+44 migrations e muda a unicidade para empresa/chat/WAID. Lookups da ingestao e
-+ACKs tambem ficam limitados a conexao; ACK so atualiza outbound. Reentrega no
++44 migrations e muda a unicidade para empresa/chat/WAID. A ingestao resolve o
++contato/chat correto antes de procurar duplicata e usa esse chat no fallback de
++conflito. ACKs ficam limitados a conexao e outbound: pipeline exato tem prioridade;
++fallback por WAID ambiguo entre chats e recusado sem alterar nenhum deles. Reentrega no
 +mesmo chat nao incrementa nao-lidas nem chama o wait duas vezes. Nenhum historico
 +ou evento antigo e reprocessado pela migration.
 +
@@ -242,7 +244,7 @@ index 0000000000000000000000000000000000000000..aadb8298de4e42d3204e8cae240138f7
 +autorizados, pagamento ficticio e uma resposta nova com chave idempotente; nunca
 +simulacao offline como prova de entrega.
 diff --git a/packages/core/src/chats/ingest/chat-ingest.db.unit.test.ts b/packages/core/src/chats/ingest/chat-ingest.db.unit.test.ts
-index f15b072bbf2c0d66223721f9815d8251a7783c12..326d53a89ccb856b7823545191373f7266c4c966 100644
+index f15b072bbf2c0d66223721f9815d8251a7783c12..6e96480c1ca25c5b9a281444561aa3c1b3241bb3 100644
 --- a/packages/core/src/chats/ingest/chat-ingest.db.unit.test.ts
 +++ b/packages/core/src/chats/ingest/chat-ingest.db.unit.test.ts
 @@ -6,7 +6,7 @@ import type { IncomingMessage, WaEvent } from '@crm/wa-port'
@@ -254,7 +256,7 @@ index f15b072bbf2c0d66223721f9815d8251a7783c12..326d53a89ccb856b7823545191373f72
  
  let temp: TempDatabase
  let db: Database
-@@ -54,7 +54,50 @@ async function setup(settings: Record<string, unknown> = {}) {
+@@ -54,7 +54,87 @@ async function setup(settings: Record<string, unknown> = {}) {
    return { companyId, connectionId, sessionId, gw, published, inbound, ingest, msg, chatOf }
  }
  
@@ -264,6 +266,43 @@ index f15b072bbf2c0d66223721f9815d8251a7783c12..326d53a89ccb856b7823545191373f72
 +}
 +
  describe('ChatIngest', () => {
++  it('same connection: two identities keep their own chat/WAID, duplicate result and inbound counters', async () => {
++    const s = await setup(), id = 'WA-same-connection-' + randomBytes(4).toString('hex')
++    const a = s.msg({ id, from: '5511999990001@s.whatsapp.net', text: 'fixture A' })
++    const b = s.msg({ id, from: '5511988887777@s.whatsapp.net', text: 'fixture B' })
++    const firstA = single(await s.ingest.handle(a)), firstB = single(await s.ingest.handle(b))
++    if (firstA.status !== 'stored' || firstB.status !== 'stored') throw new Error('Expected both chats stored')
++    expect(firstA.chatId).not.toBe(firstB.chatId)
++    expect(firstA.messageId).not.toBe(firstB.messageId)
++    for (const [event, first] of [[a, firstA], [b, firstB]] as const) {
++      const repeats = await Promise.all([s.ingest.handle(event), s.ingest.handle(event)])
++      for (const repeat of repeats) expect(single(repeat)).toMatchObject({ status: 'duplicate', chatId: first.chatId, messageId: first.messageId })
++      const [chat] = await db.select().from(chats).where(eq(chats.id, first.chatId))
++      expect(chat!.unreadCount).toBe(1)
++    }
++    expect(s.inbound).toHaveLength(2)
++    expect(new Set(s.inbound.map(e => e.chat_id))).toEqual(new Set([firstA.chatId, firstB.chatId]))
++    expect(await db.select().from(messages).where(and(eq(messages.companyId, s.companyId), eq(messages.waMessageId, id)))).toHaveLength(2)
++  })
++
++  it('ambiguous same-connection WAID fallback changes no chat; exact pipeline updates only its outbound', async () => {
++    const s = await setup(), id = 'WA-ambiguous-' + randomBytes(4).toString('hex')
++    const sent: Array<{ id: string; pipeline: string }> = []
++    for (let i = 0; i < 2; i++) {
++      const [contact] = await db.insert(contacts).values({ companyId: s.companyId, name: 'ACK fixture ' + i }).returning()
++      const [chat] = await db.insert(chats).values({ companyId: s.companyId, connectionId: s.connectionId, contactId: contact!.id }).returning()
++      const pipeline = 'exact-' + randomBytes(6).toString('hex')
++      const [message] = await db.insert(messages).values({ companyId: s.companyId, chatId: chat!.id, direction: 'outbound', senderType: 'user', type: 'text', status: 'sent', waMessageId: id, pipelineMessageId: pipeline }).returning()
++      sent.push({ id: message!.id, pipeline })
++    }
++    const status = (pipeline: string) => s.ingest.handle({ v: 1, type: 'message.status', session_id: s.sessionId, at: AT, message_id: pipeline, transport_message_id: id, status: 'delivered' })
++    expect(single(await status('unknown-pipeline')).status).toBe('ignored')
++    for (const row of sent) expect((await db.select().from(messages).where(eq(messages.id, row.id)))[0]!.status).toBe('sent')
++    expect(single(await status(sent[1]!.pipeline)).status).toBe('updated')
++    expect((await db.select().from(messages).where(eq(messages.id, sent[0]!.id)))[0]!.status).toBe('sent')
++    expect((await db.select().from(messages).where(eq(messages.id, sent[1]!.id)))[0]!.status).toBe('delivered')
++  })
++
 +  it('same company: sender outbound must not suppress inbound on the other chip or its wait notification', async () => {
 +    const s = await setup()
 +    const [other] = await db.insert(connections).values({ companyId: s.companyId, sessionId: 'sender-' + randomBytes(4).toString('hex'), name: 'Other chip' }).returning()
@@ -306,7 +345,7 @@ index f15b072bbf2c0d66223721f9815d8251a7783c12..326d53a89ccb856b7823545191373f72
      const s = await setup()
      const ev = s.msg({ push_name: 'Ana' })
 diff --git a/packages/core/src/chats/ingest/chat-ingest.ts b/packages/core/src/chats/ingest/chat-ingest.ts
-index 52179708e2f54465292838964cabe3d3564da4de..5fead25ac2fd739aa30455b64a00e9b7f0a03e20 100644
+index 52179708e2f54465292838964cabe3d3564da4de..f2ec866c18aae113364c54559b6c07ead06520e1 100644
 --- a/packages/core/src/chats/ingest/chat-ingest.ts
 +++ b/packages/core/src/chats/ingest/chat-ingest.ts
 @@ -1,6 +1,6 @@
@@ -317,16 +356,28 @@ index 52179708e2f54465292838964cabe3d3564da4de..5fead25ac2fd739aa30455b64a00e9b7
  // Mensagens de grupo, status e canais são ignoradas (SPEC 3.8). Opt-out por palavra-chave bloqueia na hora (1.4 nº 3).
  // Revisão 3 (rastreamento Meta): mensagem ao vivo com referral de anúncio (`ctwa_clid`) grava o toque de atribuição;
  // mensagem com código de link rastreável (`(ref XXXXXX)`) liga o clique ao contato e é gravada sem o código. Nos dois
-@@ -129,7 +129,7 @@ export class ChatIngest {
+@@ -129,14 +129,17 @@ export class ChatIngest {
      if (!conn) return { status: 'ignored', reason: 'unknown_session' }
      const companyId = conn.companyId
  
 -    const exists = await this.findByWaId(companyId, m.id)
-+    const exists = await this.findByWaId(companyId, conn.connectionId, m.id)
-     if (exists) return { status: 'duplicate', chatId: exists.chatId, messageId: exists.id }
- 
+-    if (exists) return { status: 'duplicate', chatId: exists.chatId, messageId: exists.id }
+-
      const identity = identityOf(m.from, m.alt_jid)
-@@ -205,7 +205,7 @@ export class ChatIngest {
+     if (!identity.phone && !identity.lid) return { status: 'ignored', reason: 'no_identity' }
+     const upserted = await this.upsertContact(companyId, identity, m)
+     if (!upserted) return { status: 'ignored', reason: 'invalid_identity' }
+     const { contact, created: contactCreated } = upserted
++    // O indice e por chat: primeiro resolver a identidade e o chat desta conexao.
++    // Um WAID observado em outro chat nao identifica esta mensagem.
++    const [existingChat] = await this.db.select({ id: chats.id }).from(chats)
++      .where(and(eq(chats.companyId, companyId), eq(chats.connectionId, conn.connectionId), eq(chats.contactId, contact.id))).limit(1)
++    const exists = existingChat && await this.findByWaId(companyId, existingChat.id, m.id)
++    if (exists) return { status: 'duplicate', chatId: exists.chatId, messageId: exists.id }
+ 
+     const fromContact = !m.from_me
+     const live = fromContact && !historical
+@@ -205,7 +208,7 @@ export class ChatIngest {
            waTimestamp: Number.isFinite(at.getTime()) ? at : null,
            ...(fromContact ? {} : { sentAt: at }),
          })
@@ -335,16 +386,16 @@ index 52179708e2f54465292838964cabe3d3564da4de..5fead25ac2fd739aa30455b64a00e9b7
          .returning()
        if (!message) return { duplicate: true as const, chatId: chat!.id }
  
-@@ -232,7 +232,7 @@ export class ChatIngest {
+@@ -232,7 +235,7 @@ export class ChatIngest {
      })
  
      if (r.duplicate) {
 -      const dup = await this.findByWaId(companyId, m.id)
-+      const dup = await this.findByWaId(companyId, conn.connectionId, m.id)
++      const dup = await this.findByWaId(companyId, r.chatId, m.id)
        return { status: 'duplicate', chatId: r.chatId, messageId: dup?.id ?? '' }
      }
  
-@@ -318,17 +318,20 @@ export class ChatIngest {
+@@ -318,18 +321,25 @@ export class ChatIngest {
      const conn = await this.resolve(event.session_id)
      if (!conn) return { status: 'ignored', reason: 'unknown_session' }
      const next = event.status as CrmMessageStatus
@@ -359,27 +410,34 @@ index 52179708e2f54465292838964cabe3d3564da4de..5fead25ac2fd739aa30455b64a00e9b7
 +        .where(and(eq(messages.companyId, conn.companyId), connectionScope, eq(messages.direction, 'outbound'), eq(messages.pipelineMessageId, event.message_id)))
          .for('update')
        if (!msg && event.transport_message_id) {
-         ;[msg] = await tx
+-        ;[msg] = await tx
++        const candidates = await tx
            .select()
            .from(messages)
 -          .where(and(eq(messages.companyId, conn.companyId), eq(messages.waMessageId, event.transport_message_id)))
 +          .where(and(eq(messages.companyId, conn.companyId), connectionScope, eq(messages.direction, 'outbound'), eq(messages.waMessageId, event.transport_message_id)))
++          .limit(2)
            .for('update')
++        // Sem pipeline exato, o WAID sozinho nao escolhe entre chats distintos.
++        if (candidates.length !== 1) return null
++        msg = candidates[0]
        }
        if (!msg || !canAdvanceStatus(msg.status, next)) return null
-@@ -394,10 +397,11 @@ export class ChatIngest {
+       const at = new Date(event.at)
+@@ -394,11 +404,11 @@ export class ChatIngest {
  
    // ---- internos ---------------------------------------------------------------------------------------------
  
 -  private async findByWaId(companyId: string, waMessageId: string): Promise<{ id: string; chatId: string } | undefined> {
-+  private async findByWaId(companyId: string, connectionId: string, waMessageId: string): Promise<{ id: string; chatId: string } | undefined> {
++  private async findByWaId(companyId: string, chatId: string, waMessageId: string): Promise<{ id: string; chatId: string } | undefined> {
      const [row] = await this.db
        .select({ id: messages.id, chatId: messages.chatId })
        .from(messages)
-+      .innerJoin(chats, and(eq(chats.id, messages.chatId), eq(chats.companyId, companyId), eq(chats.connectionId, connectionId)))
-       .where(and(eq(messages.companyId, companyId), eq(messages.waMessageId, waMessageId)))
+-      .where(and(eq(messages.companyId, companyId), eq(messages.waMessageId, waMessageId)))
++      .where(and(eq(messages.companyId, companyId), eq(messages.chatId, chatId), eq(messages.waMessageId, waMessageId)))
      return row
    }
+ 
 diff --git a/packages/core/src/media/index.ts b/packages/core/src/media/index.ts
 index 5dfee262ccd9763d0bc5baad89a1e2c9565d3a49..d5be5fd322898dc8364652d23ad34ef70ac4b49a 100644
 --- a/packages/core/src/media/index.ts
