@@ -263,10 +263,10 @@ index 90552ef..36aba48 100644
      return offerRows<OfferRow>(this.db, sql`select * from crm.offers where company_id=${company} order by created_at`)
 diff --git a/tests/acceptance/T125/mcp-offers.test.ts b/tests/acceptance/T125/mcp-offers.test.ts
 new file mode 100644
-index 0000000..e108102
+index 0000000..eed49bd
 --- /dev/null
 +++ b/tests/acceptance/T125/mcp-offers.test.ts
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,115 @@
 +// Disposable PostgreSQL/Redis and fake providers, executed on CI only.
 +import { randomUUID } from 'node:crypto'
 +import { afterAll, beforeAll, expect, it } from 'vitest'
@@ -281,7 +281,9 @@ index 0000000..e108102
 +async function invoke(token: string, name: string, args: Record<string, unknown> = {}) {
 +  const response = await rpc(token, 'tools/call', { name, arguments: args })
 +  const result = response.body.result
-+  return { ...response, error: Boolean(response.body.error || result?.isError), data: result?.content?.[0]?.text ? JSON.parse(result.content[0].text) : null }
++  let data: any = result?.content?.[0]?.text ?? null
++  if (typeof data === 'string') { try { data = JSON.parse(data) } catch { /* Protocol validation errors may be plain text. */ } }
++  return { ...response, error: Boolean(response.body.error || result?.isError), data }
 +}
 +const names = async (token: string) => (await rpc(token, 'tools/list')).body.result.tools.map((tool: any) => tool.name)
 +beforeAll(async () => {
