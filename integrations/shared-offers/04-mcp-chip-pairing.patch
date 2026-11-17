@@ -1,0 +1,769 @@
+diff --git a/apps/api/src/routes/connections/index.ts b/apps/api/src/routes/connections/index.ts
+index 2d2a820..91b85f4 100644
+--- a/apps/api/src/routes/connections/index.ts
++++ b/apps/api/src/routes/connections/index.ts
+@@ -5,6 +5,8 @@ import {
+   ConnectionPausedFlows,
+   ConnectionsError,
+   ConnectionsService,
++  ChipPairingService,
++  chipQrWaitSchema,
+   isWaExtensionMode,
+   registerConnectionSessionsSource,
+   waRpcProfile,
+@@ -84,6 +86,10 @@ export function connectionsRoutes(deps: ResolvedDeps) {
+     return service
+   }
+   const app = new Hono<AppEnv>()
++  const pairing = () => {
++    if (!deps.waGateway) throw new ApiError('INTERNAL', 'WaGateway não configurado')
++    return new ChipPairingService({ db: deps.db, gateway: deps.waGateway, ...(deps.credentialsCipher ? { cipher: deps.credentialsCipher } : {}) })
++  }
+   const view = requirePerm('connections.view')
+   const edit = requirePerm('connections.edit')
+   const del = requirePerm('connections.delete')
+@@ -97,6 +103,19 @@ export function connectionsRoutes(deps: ResolvedDeps) {
+     await next()
+   }
+ 
++  app.post('/api/connections/pairing', edit, async (c) => {
++    const input = await body(c)
++    const result = await domain(() => pairing().connect(company(c), input, getCompanyCtx(c).user?.id ?? null))
++    setAudit(c, { action: 'connections.pairing', targetType: 'connection', targetId: result.connection_id,
++      detail: { session_id: result.session_id, created: result.created, pairing_only: result.pairing_only, status: result.status } })
++    return c.json(result, 200)
++  })
++  app.get('/api/connections/:id/pairing-qr', edit, validate('query', chipQrWaitSchema), async (c) => {
++    const result = await domain(() => pairing().read(company(c), id(c), c.req.valid('query').wait_seconds))
++    setAudit(c, { skip: true })
++    return c.json(result, 200)
++  })
++
+   app.get('/api/connections', view, validate('query', listQuery), async (c) => {
+     const page = await domain(() => svc().list(company(c), c.req.valid('query')))
+     return c.json({ ...page, features: { import_ai_manager: extension() } }, 200)
+diff --git a/apps/api/src/routes/mcp/mcp-chip-pairing.db.unit.test.ts b/apps/api/src/routes/mcp/mcp-chip-pairing.db.unit.test.ts
+new file mode 100644
+index 0000000..5709c48
+--- /dev/null
++++ b/apps/api/src/routes/mcp/mcp-chip-pairing.db.unit.test.ts
+@@ -0,0 +1,194 @@
++/* eslint-disable @typescript-eslint/no-explicit-any -- protocol responses */
++import { randomBytes } from 'node:crypto'
++import { and, eq } from 'drizzle-orm'
++import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
++import { auditLogs, connections, createDb, type Database } from '@crm/db'
++import { createTempDatabase, type TempDatabase } from '@crm/db/testing'
++import { createCipher, createLogger, generateCredentialsKey, MemoryMailer, redisConnection } from '@crm/node-kit'
++import { FakeWaGateway } from '@crm/wa-port/testing'
++import { createApp, type RedisClient } from '../../app'
++
++let temp: TempDatabase, db: Database, redis: RedisClient, app: ReturnType<typeof createApp>
++const gateway = new FakeWaGateway()
++const H = { 'content-type': 'application/json', 'x-requested-with': 'crm' }
++const rnd = () => randomBytes(6).toString('hex')
++type Session = { cookie: string; companyId: string }
++let seq = 0
++beforeAll(async () => {
++  temp = await createTempDatabase({ migrate: true })
++  db = createDb(temp.url, { max: 8 })
++  redis = redisConnection({ url: process.env.REDIS_URL ?? 'redis://127.0.0.1:6379/1' })
++  app = createApp({ db, redis, waGateway: gateway, waProfile: 'ai-manager', mailer: new MemoryMailer(), trustProxy: true, logger: createLogger({ level: 'silent' }), credentialsCipher: createCipher({ key: generateCredentialsKey() }), mcpEnv: { API_PUBLIC_URL: 'https://api.example.test' } })
++}, 120000)
++afterAll(async () => { await gateway.stop(); redis?.disconnect(); await db?.$client.end(); await temp?.drop() })
++async function tenant(): Promise<Session> {
++  const email = `chip-${rnd()}@example.test`, ip = { 'x-forwarded-for': `10.91.${Math.floor(Math.random() * 250)}.${Math.floor(Math.random() * 250)}` }
++  const reg = await app.request('/api/auth/register', { method: 'POST', headers: { ...H, ...ip }, body: JSON.stringify({ name: 'Chip owner', email, password: '12345678', password_confirmation: '12345678' }) })
++  expect(reg.status).toBe(201)
++  const data = await reg.json() as any
++  const login = await app.request('/api/auth/login', { method: 'POST', headers: { ...H, ...ip }, body: JSON.stringify({ email, password: '12345678' }) })
++  expect(login.status).toBe(200)
++  return { cookie: /crm_session=[^;]+/.exec(login.headers.get('set-cookie') ?? '')![0], companyId: data.user.last_company_id }
++}
++async function call(s: Session, method: string, path: string, body?: unknown) {
++  const r = await app.request(path, { method, headers: { ...H, cookie: s.cookie }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
++  return { status: r.status, data: await r.json() as any }
++}
++async function credential(s: Session, access: 'read' | 'write') {
++  const r = await call(s, 'POST', '/api/mcp_credentials', { name: 'chip tests', access })
++  expect(r.status).toBe(201)
++  return r.data as { token: string; mcp_credential: { id: string } }
++}
++async function rpc(token: string, method: string, params: unknown = {}) {
++  const r = await app.request('/api/mcp', { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-06-18', authorization: 'Bearer ' + token }, body: JSON.stringify({ jsonrpc: '2.0', id: ++seq, method, params }) })
++  return { status: r.status, data: await r.json() as any }
++}
++const invoke = async (token: string, name: string, args: unknown) => (await rpc(token, 'tools/call', { name, arguments: args })).data
++const failed = (body: any) => !!body.error || body.result?.isError === true
++const metadata = (body: any) => JSON.parse(body.result.content[0].text)
++
++describe('MCP chip pairing through real authenticated API with fake gateway', () => {
++  it('write token initializes, creates chip with proxy and returns a PNG image; retry reuses it', async () => {
++    const s = await tenant(), c = await credential(s, 'write')
++    expect((await rpc(c.token, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'chip-test', version: '1' } })).status).toBe(200)
++    const args = { name: 'Chip MCP', proxy: 'proxy.example:10001:operator:proxy-password-secret', wait_seconds: 0 }
++    const result = await invoke(c.token, 'connect_chip', args)
++    expect(failed(result)).toBe(false)
++    expect(result.result.content[1]).toMatchObject({ type: 'image', mimeType: 'image/png' })
++    const info = metadata(result)
++    expect(info).toMatchObject({ status: 'qr_ready', created: true, pairing_only: true })
++    expect(info).not.toHaveProperty('qr_code')
++    expect(JSON.stringify(result)).not.toContain('proxy-password-secret')
++    const again = await invoke(c.token, 'connect_chip', args)
++    expect(failed(again)).toBe(false)
++    expect(metadata(again)).toMatchObject({ connection_id: info.connection_id, created: false })
++    const rows = await db.select().from(connections).where(eq(connections.companyId, s.companyId))
++    expect(rows).toHaveLength(1)
++    expect(rows[0]).toMatchObject({ proxyHost: 'proxy.example', proxyPort: 10001, requiresRestart: false })
++    expect(rows[0]!.proxyPasswordEnc).toBeTruthy()
++    expect(JSON.stringify(rows)).not.toContain('proxy-password-secret')
++    expect(JSON.stringify(await db.select().from(auditLogs).where(eq(auditLogs.companyId, s.companyId)))).not.toContain('proxy-password-secret')
++    const qr = await invoke(c.token, 'get_chip_qr', { connection_id: info.connection_id })
++    expect(failed(qr)).toBe(false)
++    expect(qr.result.content[1].type).toBe('image')
++  })
++  it('read token cannot see/call pairing or obtain the QR', async () => {
++    const s = await tenant(), c = await credential(s, 'read')
++    const list = await rpc(c.token, 'tools/list')
++    expect(list.data.result.tools.some((t: any) => ['connect_chip', 'get_chip_qr'].includes(t.name))).toBe(false)
++    expect(failed(await invoke(c.token, 'connect_chip', { name: 'Denied chip', direct: true }))).toBe(true)
++    expect(await db.select().from(connections).where(eq(connections.companyId, s.companyId))).toHaveLength(0)
++  })
++  it('foreign connection id is denied without gateway changes', async () => {
++    const a = await tenant(), b = await tenant()
++    const ca = await credential(a, 'write'), cb = await credential(b, 'write')
++    const made = await invoke(ca.token, 'connect_chip', { name: 'Private chip', direct: true, wait_seconds: 0 })
++    const id = metadata(made).connection_id
++    const spy = vi.spyOn(gateway.sessions, 'preparePairing')
++    expect(failed(await invoke(cb.token, 'connect_chip', { name: 'Private chip', connection_id: id }))).toBe(true)
++    expect(failed(await invoke(cb.token, 'get_chip_qr', { connection_id: id }))).toBe(true)
++    expect(spy).not.toHaveBeenCalled()
++    spy.mockRestore()
++  })
++  it('invalid proxy is redacted and does not create a session binding', async () => {
++    const s = await tenant(), c = await credential(s, 'write')
++    const r = await invoke(c.token, 'connect_chip', { name: 'Bad proxy', proxy: 'ftp://u:secret-in-bad-proxy@proxy.example:21' })
++    expect(failed(r)).toBe(true)
++    expect(JSON.stringify(r)).not.toContain('secret-in-bad-proxy')
++    expect(await db.select().from(connections).where(eq(connections.companyId, s.companyId))).toHaveLength(0)
++  })
++  it('pending QR returns an id, then can be refreshed without another create', async () => {
++    const s = await tenant(), c = await credential(s, 'write')
++    const spy = vi.spyOn(gateway.sessions, 'getQr').mockResolvedValue({ qr: null, generatedAt: null })
++    const r = await invoke(c.token, 'connect_chip', { name: 'Slow chip', direct: true, wait_seconds: 0 })
++    expect(metadata(r)).toMatchObject({ status: 'pending' })
++    expect(r.result.content).toHaveLength(1)
++    spy.mockRestore()
++    const qr = await invoke(c.token, 'get_chip_qr', { connection_id: metadata(r).connection_id })
++    expect(qr.result.content[1].type).toBe('image')
++  })
++  it('repeated callers do not duplicate the company connection', async () => {
++    const s = await tenant(), c = await credential(s, 'write')
++    const results = await Promise.all([invoke(c.token, 'connect_chip', { name: 'One chip', direct: true, wait_seconds: 0 }), invoke(c.token, 'connect_chip', { name: 'One chip', direct: true, wait_seconds: 0 })])
++    expect(results.some(r => !failed(r))).toBe(true)
++    expect(await db.select().from(connections).where(and(eq(connections.companyId, s.companyId), eq(connections.name, 'One chip')))).toHaveLength(1)
++  })
++  it('a connected chip is never logged out or reconfigured and stale QR is not exposed', async () => {
++    const s = await tenant(), c = await credential(s, 'write')
++    const made = metadata(await invoke(c.token, 'connect_chip', { name: 'Linked chip', direct: true, wait_seconds: 0 }))
++    await gateway.connect(made.session_id)
++    const prepare = vi.spyOn(gateway.sessions, 'preparePairing'), logout = vi.spyOn(gateway.sessions, 'logout')
++    const changed = await invoke(c.token, 'connect_chip', { name: 'Linked chip', proxy: 'http://proxy.example:8080', wait_seconds: 0 })
++    expect(failed(changed)).toBe(true)
++    const same = await invoke(c.token, 'connect_chip', { name: 'Linked chip', wait_seconds: 0 })
++    expect(metadata(same)).toMatchObject({ status: 'not_pairable', session_state: 'WARMING' })
++    expect(same.result.content).toHaveLength(1)
++    const qr = await invoke(c.token, 'get_chip_qr', { connection_id: made.connection_id })
++    expect(metadata(qr).status).toBe('not_pairable')
++    expect(qr.result.content).toHaveLength(1)
++    expect(prepare).not.toHaveBeenCalled()
++    expect(logout).not.toHaveBeenCalled()
++    prepare.mockRestore(); logout.mockRestore()
++  })
++  it('a preparation failure keeps the binding for a safe retry and redacts upstream errors', async () => {
++    const s = await tenant(), c = await credential(s, 'write')
++    const spy = vi.spyOn(gateway.sessions, 'preparePairing').mockRejectedValueOnce(new Error('proxy-secret-must-never-escape'))
++    const args = { name: 'Retry chip', direct: true, wait_seconds: 0 }
++    const first = await invoke(c.token, 'connect_chip', args)
++    expect(failed(first)).toBe(true)
++    expect(JSON.stringify(first)).not.toContain('proxy-secret-must-never-escape')
++    const rows = await db.select().from(connections).where(eq(connections.companyId, s.companyId))
++    expect(rows).toHaveLength(1)
++    spy.mockRestore()
++    const retry = await invoke(c.token, 'connect_chip', args)
++    expect(metadata(retry)).toMatchObject({ connection_id: rows[0]!.id, created: false, status: 'qr_ready' })
++  })
++  it('restarts pairing on a disconnected chip without creating another connection', async () => {
++    const s = await tenant(), c = await credential(s, 'write')
++    const args = { name: 'Reconnect chip', direct: true, wait_seconds: 0 }
++    const first = metadata(await invoke(c.token, 'connect_chip', args))
++    await gateway.setSessionState(first.session_id, 'DISCONNECTED')
++    const retry = metadata(await invoke(c.token, 'connect_chip', args))
++    expect(retry).toMatchObject({ connection_id: first.connection_id, status: 'qr_ready', created: false })
++  })
++  it('revocation prevents further MCP operation', async () => {
++    const s = await tenant(), c = await credential(s, 'write')
++    expect((await call(s, 'DELETE', '/api/mcp_credentials/' + c.mcp_credential.id)).status).toBe(200)
++    expect((await rpc(c.token, 'tools/list')).status).toBe(401)
++  })
++  it('panel-only name collision is rejected without adoption, duplication or interrupting an active chip; explicit import reuses its exact session', async () => {
++    const s = await tenant(), c = await credential(s, 'write')
++    const panel = await gateway.sessions.create({ name: 'Panel-only unique chip' })
++    await gateway.connect(panel.id)
++    const before = await gateway.sessions.get(panel.id)
++    const create = vi.spyOn(gateway.sessions, 'create'), prepare = vi.spyOn(gateway.sessions, 'preparePairing'), logout = vi.spyOn(gateway.sessions, 'logout')
++    const collision = await invoke(c.token, 'connect_chip', { name: 'panel-ONLY UNIQUE chip', direct: true, wait_seconds: 0 })
++    expect(failed(collision)).toBe(true)
++    expect(JSON.stringify(collision)).toContain('CONFLICT')
++    expect(create).not.toHaveBeenCalled()
++    expect(prepare).not.toHaveBeenCalled()
++    expect(logout).not.toHaveBeenCalled()
++    expect(await db.select().from(connections).where(eq(connections.companyId, s.companyId))).toHaveLength(0)
++    expect(await gateway.sessions.get(panel.id)).toEqual(before)
++    const reader = await credential(s, 'read')
++    const available = await invoke(reader.token, 'list_importable_chips', {})
++    expect(metadata(available).items.some((i: any) => i.session_id === panel.id)).toBe(true)
++    expect(failed(await invoke(reader.token, 'import_panel_chips', { session_ids: [panel.id] }))).toBe(true)
++    expect(await db.select().from(connections).where(eq(connections.companyId, s.companyId))).toHaveLength(0)
++    const imported = await invoke(c.token, 'import_panel_chips', { session_ids: [panel.id] })
++    expect(failed(imported)).toBe(false)
++    expect(metadata(imported).items).toHaveLength(1)
++    const bound = metadata(imported).items[0]
++    expect(bound.session_id).toBe(panel.id)
++    const reused = await invoke(c.token, 'connect_chip', { name: bound.name, connection_id: bound.id, wait_seconds: 0 })
++    expect(metadata(reused)).toMatchObject({ connection_id: bound.id, session_id: panel.id, status: 'not_pairable' })
++    expect(create).not.toHaveBeenCalled()
++    expect(prepare).not.toHaveBeenCalled()
++    expect(logout).not.toHaveBeenCalled()
++    expect(await gateway.sessions.get(panel.id)).toEqual(before)
++    const other = await tenant(), outsider = await credential(other, 'write')
++    expect(failed(await invoke(outsider.token, 'import_panel_chips', { session_ids: [panel.id] }))).toBe(true)
++    expect(await db.select().from(connections).where(eq(connections.companyId, other.companyId))).toHaveLength(0)
++    create.mockRestore(); prepare.mockRestore(); logout.mockRestore()
++  })
++})
+diff --git a/docs/mcp-chip-pairing.md b/docs/mcp-chip-pairing.md
+new file mode 100644
+index 0000000..f7fa30a
+--- /dev/null
++++ b/docs/mcp-chip-pairing.md
+@@ -0,0 +1,80 @@
++# Chips do painel e pareamento pelo MCP
++
++As ferramentas usam a API autenticada do CRM e a empresa da credencial. Todas
++exigem `connections.edit`. Credenciais somente leitura podem listar os chips
++disponíveis; importar, preparar pareamento e obter o QR exigem escrita.
++
++## Usar no CRM um chip que já existe no painel
++
++1. Chame `list_importable_chips` e identifique a sessão pelo `session_id`, nome
++   e número. A lista contém somente sessões ainda sem vínculo em qualquer empresa.
++2. Após seleção explícita, chame `import_panel_chips` com
++   `{"session_ids":["<session_id selecionado>"]}`. Não selecione todos por padrão.
++3. A resposta contém as conexões CRM criadas, seus IDs e o mesmo `session_id`.
++   Elas passam a aparecer em `list_connections` e na tela de Conexões do CRM.
++   A seleção de um fluxo para essa conexão é uma operação posterior e explícita.
++
++A importação reutiliza a sessão existente. Não pede novo pareamento, não cria
++outro chip e não altera proxy, perfil de aparelho, automações ou conexão WhatsApp.
++Ela não envia mensagens nem dispara fluxos. Uma sessão já vinculada a qualquer
++empresa é recusada. Não há adoção automática por coincidência de nome.
++
++Essas ferramentas utilizam as rotas existentes do perfil `ai-manager`:
++`GET /api/connections/importable` e `POST /api/connections/import`.
++Na instalação sob `/crm`, o prefixo externo é `/crm/api`.
++
++## Preparar um chip novo ou uma conexão CRM desconectada
++
++`connect_chip` recebe `name` e `proxy`, com `connection_id` opcional para
++desambiguar conexões CRM. A proxy aceita objeto (`protocol`, `host`, `port`,
++`username`, `password`), URL HTTP/HTTPS/SOCKS5 ou
++`host:porta:usuario:senha` (HTTP por padrão). Nunca publique credenciais em logs.
++Para criar sem proxy, informe `direct:true` explicitamente. Omitir a proxy em
++uma conexão existente preserva a configuração; `direct:true` remove a proxy
++somente se a sessão permitir pareamento.
++
++O nome é pesquisado apenas entre conexões CRM ativas da empresa. Nomes CRM
++duplicados exigem `connection_id`. Se ainda não houver vínculo CRM e uma sessão
++do painel tiver o mesmo nome (ignorando maiúsculas/minúsculas e espaços nas
++extremidades), a criação é recusada. Use a importação explícita ou outro nome.
++Uma falha ao consultar os chips do painel também impede a criação.
++
++Sessões conectadas/pausadas não são deslogadas, reiniciadas ou reconfiguradas.
++Uma conexão existente sem proxy fornecida retorna `not_pairable` nesse estado;
++uma tentativa de trocar proxy é recusada. Sessões novas/desconectadas com envios
++pendentes também são recusadas. Revise a fila; a ferramenta não cancela mensagens.
++
++Antes de iniciar o socket de pareamento, o worker encerra o socket antigo ainda
++não conectado, aplica a proxy e desabilita rodízio/autoresposta e automação de
++grupos **somente daquele chip**, preservando os demais parâmetros e o perfil de
++aparelho persistido. Esse modo de pareamento não impede uma operação comercial
++que seja posteriormente autorizada em outro fluxo.
++
++`connect_chip` aguarda até `wait_seconds` (0–20; padrão 15). Se o QR estiver
++pronto, retorna um bloco MCP `image` PNG e metadados sem o QR/senha. Se estiver
++`pending`, conserve o `connection_id` e chame `get_chip_qr`, sem criar outro chip.
++`get_chip_qr` aceita espera de 0–20 segundos (padrão 0). Nenhuma ferramenta
++confirma pareamento só porque gerou uma imagem; o celular precisa escanear e o
++estado real precisa ser verificado depois. O QR é uma credencial temporária:
++não deve ser registrado em terminal ou publicado em URL pública.
++
++As rotas novas são `POST /api/connections/pairing` e
++`GET /api/connections/:id/pairing-qr`. A rota interna adicional é
++`sessions.preparePairing`. Gateways sem essa preparação segura recusam a operação.
++Uma falha de preparação mantém o vínculo CRM para repetição por nome/ID e devolve
++erro sem refletir credenciais. Os efeitos remotos e a transação CRM não são uma
++transação distribuída: confira o estado após falhas parciais, sem limpar ou
++restaurar automaticamente sessões/filas.
++
++## Integração e validação
++
++O componente exporta `connectionsTools`; o integrador deve adicioná-lo ao
++agregador `packages/core/src/mcp/tools/index.ts`, junto das ferramentas de Ofertas.
++Esse arquivo e o manifesto final da distribuição pertencem à integração única.
++O worker e o CRM precisam ser publicados no mesmo pacote compatível.
++
++Os testes fonte incluem protocolo MCP autenticado, isolamento por empresa,
++credencial somente leitura/revogação, importação explícita e colisão de nomes,
++proxy cifrada, resposta PNG, QR pendente, repetição sem duplicação, chip conectado
++e recusa de fila pendente. Os testes com PostgreSQL/Redis e a validação completa
++rodam no CI integrado. Não use cobranças ou envios reais para validar.
+diff --git a/packages/core/src/connections/index.ts b/packages/core/src/connections/index.ts
+index a64786f..a380932 100644
+--- a/packages/core/src/connections/index.ts
++++ b/packages/core/src/connections/index.ts
+@@ -6,6 +6,7 @@ import { crmManagedOf } from './service'
+ export * from './errors'
+ export * from './status'
+ export * from './service'
++export * from './pairing'
+ 
+ /**
+  * Fonte das sessões da empresa para a desativação (T22): as sessões das conexões criadas pelo CRM (chips importados
+diff --git a/packages/core/src/connections/pairing.ts b/packages/core/src/connections/pairing.ts
+new file mode 100644
+index 0000000..9bef3d6
+--- /dev/null
++++ b/packages/core/src/connections/pairing.ts
+@@ -0,0 +1,148 @@
++import { connections, type Database } from '@crm/db'
++import { getCredentialsCipher, serializeEncrypted } from '@crm/node-kit'
++import type { InlineProxyInput, SessionState } from '@crm/wa-port'
++import { and, eq, isNull, sql } from 'drizzle-orm'
++import { z } from 'zod'
++import { ConnectionsError } from './errors'
++import { ConnectionsService, type ConnectionsServiceOptions } from './service'
++
++const proxyObject = z.object({
++  protocol: z.enum(['http', 'https', 'socks5']),
++  host: z.string().trim().min(1).max(253).regex(/^[^\s/@?#]+$/),
++  port: z.number().int().min(1).max(65535),
++  username: z.string().max(255).nullable().optional(),
++  password: z.string().max(1024).nullable().optional(),
++}).strict()
++export const pairChipSchema = z.object({
++  name: z.string().trim().min(2).max(100),
++  connection_id: z.uuid().optional(),
++  proxy: z.union([z.string().trim().min(1).max(4096), proxyObject]).optional(),
++  direct: z.boolean().optional(),
++  wait_seconds: z.number().int().min(0).max(20).default(15),
++}).strict()
++export const chipQrWaitSchema = z.object({ wait_seconds: z.coerce.number().int().min(0).max(20).default(0) }).strict()
++type PairInput = z.infer<typeof pairChipSchema>
++const invalidProxy = () => new ConnectionsError('validation', 'Proxy inválida. Use URL http/https/socks5, host:porta:usuario:senha ou os campos estruturados; credenciais não são exibidas.')
++
++/** Parse credentials without ever including the input in errors or output. */
++export function parsePairingProxy(input: NonNullable<PairInput['proxy']>): InlineProxyInput {
++  try {
++    if (typeof input !== 'string') {
++      const p = proxyObject.parse(input)
++      return { ...p, username: p.username ?? null, password: p.password ?? null }
++    }
++    if ([...input].some(c => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127)) throw invalidProxy()
++    let value = input.trim()
++    if (!value.includes('://')) {
++      const [host, port, username, ...password] = value.split(':')
++      if (!host || !/^\d+$/.test(port ?? '') || (username !== undefined && password.length === 0)) throw invalidProxy()
++      const auth = username === undefined ? '' : `${encodeURIComponent(username)}:${encodeURIComponent(password.join(':'))}@`
++      value = `http://${auth}${host}:${port}`
++    }
++    const u = new URL(value)
++    if (u.pathname && u.pathname !== '/' || u.search || u.hash) throw invalidProxy()
++    return proxyObject.parse({ protocol: u.protocol.slice(0, -1), host: u.hostname, port: Number(u.port || (u.protocol === 'https:' ? 443 : u.protocol === 'http:' ? 80 : 1080)), username: u.username ? decodeURIComponent(u.username) : null, password: u.password ? decodeURIComponent(u.password) : null })
++  } catch { throw invalidProxy() }
++}
++
++export interface ChipPairingResult {
++  connection_id: string
++  session_id: string
++  name: string
++  status: 'qr_ready' | 'pending' | 'not_pairable' | 'disconnected'
++  session_state: SessionState
++  generated_at: string | null
++  qr_code: string | null
++  created?: boolean
++  pairing_only?: boolean
++}
++
++/** Company-bound connection setup. The gateway owns sockets, proxy encryption and persisted device profile. */
++export class ChipPairingService {
++  constructor(private readonly opts: ConnectionsServiceOptions) {}
++
++  async connect(companyId: string, raw: unknown, actorUserId: string | null): Promise<ChipPairingResult> {
++    const parsed = pairChipSchema.safeParse(raw)
++    if (!parsed.success) throw new ConnectionsError('validation', 'Nome, proxy ou opções de pareamento inválidos.')
++    const input = parsed.data
++    if (input.proxy !== undefined && input.direct) throw new ConnectionsError('validation', 'Informe proxy ou conexão direta, não ambos.')
++    const proxy = input.proxy !== undefined ? parsePairingProxy(input.proxy) : input.direct ? null : undefined
++    const prepare = this.opts.gateway.sessions.preparePairing?.bind(this.opts.gateway.sessions)
++    if (!prepare) throw new ConnectionsError('not_supported', 'O gateway não oferece preparação segura de pareamento.')
++
++    // One company-level transaction lock prevents duplicate names/limit races between MCP callers.
++    const setup = await this.opts.db.transaction(async tx => {
++      const lock = await tx.execute(sql`select pg_try_advisory_xact_lock(hashtextextended(${`mcp-chip-pairing:${companyId}`}, 0)) as locked`)
++      if (lock.rows[0]?.locked !== true) throw new ConnectionsError('conflict', 'Outro pareamento está sendo preparado nesta empresa; tente novamente.')
++      const db = tx as unknown as Database
++      const svc = new ConnectionsService({ ...this.opts, db })
++      const rows = await db.select().from(connections).where(and(eq(connections.companyId, companyId), isNull(connections.unlinkedAt), input.connection_id ? eq(connections.id, input.connection_id) : sql`lower(${connections.name}) = lower(${input.name})`))
++      if (input.connection_id && rows.length === 0) throw new ConnectionsError('not_found', 'Conexão não encontrada.')
++      if (rows.length > 1) throw new ConnectionsError('conflict', 'Há mais de um chip com esse nome; informe connection_id.')
++      if (rows[0] && rows[0].name.toLowerCase() !== input.name.toLowerCase()) throw new ConnectionsError('validation', 'O nome não corresponde à conexão informada.')
++      if (rows[0]?.scheduledForDeletionAt) throw new ConnectionsError('conflict', 'A conexão está agendada para exclusão.')
++      let row = rows[0]
++      const created = !row
++      if (!row) {
++        if (proxy === undefined) throw new ConnectionsError('validation', 'Informe a proxy ou direct:true para criar um chip.')
++        // A panel session is not a CRM connection: never adopt it by name or silently create a duplicate.
++        let panelSessions
++        try { panelSessions = await this.opts.gateway.sessions.list() }
++        catch { throw new ConnectionsError('upstream', 'Não foi possível verificar os chips existentes. Nenhuma sessão foi criada.') }
++        if (panelSessions.some(s => s.name.trim().toLowerCase() === input.name.toLowerCase())) {
++          throw new ConnectionsError('conflict', 'Já existe um chip com esse nome no painel. Use a importação explícita da sessão na empresa autorizada ou escolha outro nome; nenhuma sessão foi criada ou adotada.')
++        }
++        const made = await svc.create(companyId, { name: input.name }, actorUserId)
++        ;[row] = await db.select().from(connections).where(and(eq(connections.id, made.id), eq(connections.companyId, companyId)))
++      }
++      if (!row) throw new ConnectionsError('upstream', 'Não foi possível registrar a conexão.')
++      const metadata = { connection_id: row.id, session_id: row.sessionId, name: row.name, created }
++      // Catch gateway failures inside the transaction so the binding remains available for safe retry by name/id.
++      try {
++        const current = await this.opts.gateway.sessions.get(row.sessionId)
++        if (!['NEW', 'DISCONNECTED'].includes(current.status)) {
++          return { ...metadata, state: current.status, already: true as const }
++        }
++        const proxySet = proxy === undefined ? {} : proxy === null
++          ? { proxyProtocol: null, proxyHost: null, proxyPort: null, proxyUsername: null, proxyPasswordEnc: null }
++          : { proxyProtocol: proxy.protocol, proxyHost: proxy.host, proxyPort: proxy.port, proxyUsername: proxy.username ?? null,
++              proxyPasswordEnc: proxy.password ? serializeEncrypted((this.opts.cipher ?? getCredentialsCipher()).encrypt(proxy.password, `connection/${row.id}/proxy`)) : null }
++        await prepare(row.sessionId, proxy === undefined ? {} : { proxy })
++        await db.update(connections).set({ ...proxySet, requiresRestart: false, qrRequestedAt: new Date(), updatedAt: new Date() }).where(and(eq(connections.companyId, companyId), eq(connections.id, row.id)))
++        const started = await this.opts.gateway.sessions.startQr(row.sessionId)
++        return { ...metadata, state: started.status, already: false as const }
++      } catch (error) {
++        const code = (error as { code?: unknown })?.code
++        return { ...metadata, failed: true as const, code: typeof code === 'string' && /^[A-Z_]{1,64}$/.test(code) ? code : 'UPSTREAM_ERROR' }
++      }
++    })
++    if ('failed' in setup) throw new ConnectionsError('upstream', 'Não foi possível preparar o QR. Confira o estado, a proxy e possíveis envios pendentes antes de tentar novamente.', { connection_id: setup.connection_id, session_id: setup.session_id, reason_code: setup.code })
++    if (setup.already) {
++      if (proxy !== undefined) throw new ConnectionsError('invalid_transition', 'O chip já está conectado ou pausado. A proxy não foi alterada.', { connection_id: setup.connection_id })
++      return { ...setup, status: 'not_pairable', session_state: setup.state, generated_at: null, qr_code: null }
++    }
++    const qr = await this.read(companyId, setup.connection_id, input.wait_seconds)
++    return { ...qr, created: setup.created, pairing_only: true }
++  }
++
++  async read(companyId: string, id: string, waitSeconds = 0): Promise<ChipPairingResult> {
++    if (!Number.isInteger(waitSeconds) || waitSeconds < 0 || waitSeconds > 20) throw new ConnectionsError('validation', 'Espera entre 0 e 20 segundos.')
++    if (!z.uuid().safeParse(id).success) throw new ConnectionsError('not_found', 'Conexão não encontrada.')
++    const [connection] = await this.opts.db.select().from(connections).where(and(eq(connections.id, id), eq(connections.companyId, companyId), isNull(connections.unlinkedAt)))
++    if (!connection) throw new ConnectionsError('not_found', 'Conexão não encontrada.')
++    const until = Date.now() + waitSeconds * 1000
++    for (;;) {
++      try {
++        const current = await this.opts.gateway.sessions.get(connection.sessionId)
++        const metadata = { connection_id: connection.id, session_id: connection.sessionId, name: connection.name, session_state: current.status }
++        if (current.status !== 'NEW') return { ...metadata, status: current.status === 'DISCONNECTED' ? 'disconnected' : 'not_pairable', generated_at: null, qr_code: null }
++        const qr = await this.opts.gateway.sessions.getQr(connection.sessionId)
++        if (qr.qr) return { ...metadata, status: 'qr_ready', generated_at: qr.generatedAt, qr_code: qr.qr }
++        if (Date.now() >= until) return { ...metadata, status: 'pending', generated_at: null, qr_code: null }
++      } catch {
++        throw new ConnectionsError('upstream', 'Não foi possível consultar o QR atual. Tente novamente com este connection_id.', { connection_id: connection.id })
++      }
++      await new Promise(resolve => setTimeout(resolve, Math.min(500, until - Date.now())))
++    }
++  }
++}
+diff --git a/packages/core/src/mcp/tools/connections.ts b/packages/core/src/mcp/tools/connections.ts
+new file mode 100644
+index 0000000..17cf69e
+--- /dev/null
++++ b/packages/core/src/mcp/tools/connections.ts
+@@ -0,0 +1,47 @@
++import { z } from 'zod'
++import { pairChipSchema, type ChipPairingResult } from '../../connections/pairing'
++import { fail, fromApi, tool, UUID, type CallResult, type McpApiResponse } from './shared'
++
++/** QR is returned as an MCP image, never as JSON/base64 text or a public URL. */
++export function pairingResult(response: McpApiResponse): CallResult {
++  if (response.status < 200 || response.status >= 300) return fromApi(response)
++  const result = response.body as ChipPairingResult
++  if (!result || typeof result.connection_id !== 'string') return fail({ error: { code: 'UPSTREAM_ERROR', message: 'Resposta de pareamento inválida.' } })
++  const info = { connection_id: result.connection_id, session_id: result.session_id, name: result.name, status: result.status,
++    session_state: result.session_state, generated_at: result.generated_at, created: result.created, pairing_only: result.pairing_only,
++    instruction: result.status === 'qr_ready' ? 'Escaneie a imagem no WhatsApp > Aparelhos conectados. O QR expira; use get_chip_qr para atualizar. Gerar QR não confirma pareamento.'
++      : result.status === 'pending' ? 'QR ainda em preparação. Chame get_chip_qr com este connection_id; não crie outra conexão.'
++      : 'Nenhum QR disponível neste estado. A sessão não foi deslogada nem substituída.' }
++  const content: CallResult['content'] = [{ type: 'text', text: JSON.stringify(info) }]
++  if (result.status === 'qr_ready') {
++    const encoded = result.qr_code?.match(/^data:image\/png;base64,([A-Za-z0-9+/]+={0,2})$/)?.[1]
++    if (!encoded || encoded.length > 1024 * 1024 || Buffer.from(encoded, 'base64').subarray(0, 8).toString('hex') !== '89504e470d0a1a0a') {
++      return fail({ error: { code: 'UPSTREAM_ERROR', message: 'O gateway não retornou uma imagem PNG de QR válida.' }, connection_id: result.connection_id })
++    }
++    content.push({ type: 'image', data: encoded, mimeType: 'image/png' })
++  }
++  return { content, structuredContent: info }
++}
++
++export const connectionsTools = [
++  tool({ name: 'list_importable_chips', title: 'Listar chips disponíveis do painel', kind: 'read', perm: 'connections.edit',
++    description: 'Lista chips existentes no painel ai-manager que ainda não têm vínculo em nenhuma empresa CRM. Mostra session_id, nome e estado para seleção explícita. Não importa, não gera QR, não troca proxy nem envia mensagens. Exige connections.edit, como a listagem de importação do painel CRM; disponível somente no perfil ai-manager.',
++    input: {},
++    run: async (_args, api) => fromApi(await api.request('GET', '/api/connections/importable')),
++  }),
++  tool({ name: 'import_panel_chips', title: 'Usar chips do painel no CRM', kind: 'write', perm: 'connections.edit',
++    description: 'Vincula à empresa CRM somente os session_ids selecionados explicitamente após list_importable_chips. Reutiliza as mesmas sessões, proxy, perfil de aparelho e conexão WhatsApp do painel. Não cria chip, não gera QR, não reinicia/desloga e não envia mensagens. Sessão já vinculada a qualquer empresa é recusada. Exige credencial de escrita e connections.edit; somente perfil ai-manager. Não importe outros chips por coincidência de nome.',
++    input: { session_ids: z.array(z.string().trim().min(1).max(200)).min(1).max(50) },
++    run: async (args, api) => fromApi(await api.request('POST', '/api/connections/import', { body: { session_ids: args.session_ids }, write: true })),
++  }),
++  tool({ name: 'connect_chip', title: 'Conectar chip e mostrar QR', kind: 'write', perm: 'connections.edit', openWorld: true,
++    description: 'Cria ou reutiliza uma conexão CRM da empresa e devolve QR em imagem PNG. Recebe nome e proxy (URL http/https/socks5, host:porta:usuario:senha com HTTP por padrão, ou objeto). Repetições usam o mesmo nome/connection_id; nomes CRM duplicados exigem id. Chip existente só no painel exige importação explícita: colisão de nome bloqueia a criação, sem adoção automática. Chip novo sem proxy exige direct:true. Proxy omitida em conexão existente é preservada. Não desloga chip conectado e não ativa rodízio, autoresposta ou grupos; fila pendente bloqueia a preparação. Senha não é devolvida. Exige escrita e connections.edit. Gerar QR não confirma conexão.',
++    input: pairChipSchema.shape,
++    run: async (args, api) => pairingResult(await api.request('POST', '/api/connections/pairing', { body: args, write: true })),
++  }),
++  tool({ name: 'get_chip_qr', title: 'Atualizar QR de um chip', kind: 'write', perm: 'connections.edit',
++    description: 'Obtém o QR atual como imagem PNG de uma conexão da empresa, sem criar outra sessão nem deslogar. Use após connect_chip retornar pending ou quando a imagem expirar. Exige escrita porque QR é uma credencial de pareamento. Não confirma que o celular escaneou.',
++    input: { connection_id: UUID, wait_seconds: z.number().int().min(0).max(20).default(0) },
++    run: async (args, api) => pairingResult(await api.request('GET', `/api/connections/${args.connection_id}/pairing-qr`, { query: { wait_seconds: args.wait_seconds }, write: true })),
++  }),
++] as const
+diff --git a/packages/core/src/mcp/tools/connections.unit.test.ts b/packages/core/src/mcp/tools/connections.unit.test.ts
+new file mode 100644
+index 0000000..c52253b
+--- /dev/null
++++ b/packages/core/src/mcp/tools/connections.unit.test.ts
+@@ -0,0 +1,60 @@
++import { describe, expect, it, vi } from 'vitest'
++import { parsePairingProxy } from '../../connections/pairing'
++import { connectionsTools, pairingResult } from './connections'
++import { registerApiTools, type McpApi } from './shared'
++import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
++
++const connectionId = '10000000-0000-4000-8000-000000000001'
++const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZV5sAAAAASUVORK5CYII='
++const ready = { connection_id: connectionId, session_id: 'session-1', name: 'Chip MCP', status: 'qr_ready', session_state: 'NEW', generated_at: '2026-11-17T12:00:00Z', qr_code: 'data:image/png;base64,' + png }
++
++describe('chip MCP: proxy and image contract', () => {
++  it.each(['http://operator:private-password@proxy.example:10001', 'proxy.example:10001:operator:private-password'])('parses supported proxy without logging credentials', input => {
++    expect(parsePairingProxy(input)).toEqual({ protocol: 'http', host: 'proxy.example', port: 10001, username: 'operator', password: 'private-password' })
++  })
++  it('supports socks5 and encoded password characters', () => {
++    expect(parsePairingProxy('socks5://u:p%40ss%3Aword@proxy.example:1080')).toMatchObject({ protocol: 'socks5', password: 'p@ss:word' })
++  })
++  it.each(['ftp://u:secret-value@proxy.example:21', 'http://u:secret-value@proxy.example:8080/path', 'host:99999:u:secret-value', 'http://host:80/?password=secret-value', 'host:80\nsecret-value'])('rejects invalid proxy with a redacted error', input => {
++    expect(() => parsePairingProxy(input)).toThrow()
++    try { parsePairingProxy(input) } catch (e) { expect(String(e)).not.toContain('secret-value') }
++  })
++  it('image content is returned separately; text and structured metadata exclude the QR', () => {
++    const result = pairingResult({ status: 200, body: ready })
++    expect(result.content[1]).toEqual({ type: 'image', data: png, mimeType: 'image/png' })
++    expect(result.content[0].text).not.toContain(png)
++    expect(JSON.stringify(result.structuredContent)).not.toContain(png)
++    expect(result.structuredContent).toMatchObject({ connection_id: connectionId, status: 'qr_ready' })
++  })
++  it('pending preserves the connection id without pretending an image exists', () => {
++    const result = pairingResult({ status: 200, body: { ...ready, status: 'pending', qr_code: null } })
++    expect(result.content).toHaveLength(1)
++    expect(result.structuredContent).toMatchObject({ connection_id: connectionId, status: 'pending' })
++  })
++  it('rejects malformed PNG without echoing data', () => {
++    const result = pairingResult({ status: 200, body: { ...ready, qr_code: 'data:image/png;base64,c2VjcmV0' } })
++    expect(result.isError).toBe(true)
++    expect(JSON.stringify(result)).not.toContain('c2VjcmV0')
++  })
++  it('API errors remain errors', () => expect(pairingResult({ status: 403, body: { error: { code: 'FORBIDDEN' } } }).isError).toBe(true))
++  it('read credentials only list importable chips; users without edit permission cannot register these tools', () => {
++    for (const [access, perms] of [['read', ['connections.edit']], ['write', ['connections.view']]] as const) {
++      const registerTool = vi.fn()
++      const api = { request: vi.fn() } as unknown as McpApi
++      const expected = access === 'read' ? ['list_importable_chips'] : []
++      expect(registerApiTools({ registerTool } as unknown as McpServer, { api, access, perms: new Set(perms) }, connectionsTools)).toEqual(expected)
++      expect(registerTool).toHaveBeenCalledTimes(expected.length)
++    }
++  })
++  it('write owner receives import and pairing tools with correct network annotation', () => {
++    const registerTool = vi.fn()
++    expect(registerApiTools({ registerTool } as unknown as McpServer, { api: { request: vi.fn() } as unknown as McpApi, access: 'write', perms: new Set(['connections.edit']) }, connectionsTools)).toEqual(['list_importable_chips', 'import_panel_chips', 'connect_chip', 'get_chip_qr'])
++    expect(registerTool.mock.calls.find(c => c[0] === 'connect_chip')?.[1].annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false, openWorldHint: true })
++  })
++  it('explicit import forwards only selected session ids through the existing authenticated API', async () => {
++    const request = vi.fn(async () => ({ status: 201, body: { items: [{ id: connectionId, session_id: 'panel-a' }] } }))
++    const tool = connectionsTools.find(t => t.name === 'import_panel_chips')!
++    await tool.run({ session_ids: ['panel-a'] }, { request })
++    expect(request).toHaveBeenCalledExactlyOnceWith('POST', '/api/connections/import', { body: { session_ids: ['panel-a'] }, write: true })
++  })
++})
+diff --git a/packages/core/src/mcp/tools/index.ts b/packages/core/src/mcp/tools/index.ts
+index 41afe79..51aff36 100644
+--- a/packages/core/src/mcp/tools/index.ts
++++ b/packages/core/src/mcp/tools/index.ts
+@@ -9,9 +9,10 @@ import { insightsTools } from './insights'
+ import { paymentsTools } from './payments'
+ import { pixelsTools } from './pixels'
+ import { offersTools } from './offers'
++import { connectionsTools } from './connections'
+ import { registerApiTools, type McpApiContext } from './shared'
+ 
+-export const MCP_API_TOOLS = [...conversationsTools, ...flowsTools, ...spyTools, ...audioTools, ...mediaTools, ...insightsTools, ...pixelsTools, ...paymentsTools] as const
++export const MCP_API_TOOLS = [...conversationsTools, ...flowsTools, ...spyTools, ...audioTools, ...mediaTools, ...insightsTools, ...pixelsTools, ...paymentsTools, ...connectionsTools] as const
+ 
+ export function registerAllApiTools(server: McpServer, ctx: McpApiContext, sharedOffers = false): string[] {
+   return registerApiTools(server, ctx, sharedOffers ? [...MCP_API_TOOLS, ...offersTools] : MCP_API_TOOLS)
+diff --git a/packages/core/src/mcp/tools/shared.ts b/packages/core/src/mcp/tools/shared.ts
+index 9420ac3..4f63aad 100644
+--- a/packages/core/src/mcp/tools/shared.ts
++++ b/packages/core/src/mcp/tools/shared.ts
+@@ -40,7 +40,11 @@ export const page = {
+   limit: z.number().int().min(1).max(100).optional().describe('Itens por página (1–100)'),
+ }
+ 
+-type CallResult = { content: { type: 'text'; text: string }[]; isError?: boolean }
++export type CallResult = {
++  content: [{ type: 'text'; text: string }, ...{ type: 'image'; data: string; mimeType: 'image/png' }[]]
++  isError?: boolean
++  structuredContent?: Record<string, unknown>
++}
+ 
+ export const text = (data: unknown): CallResult => ({ content: [{ type: 'text', text: JSON.stringify(data) }] })
+ export const fail = (data: unknown): CallResult => ({ ...text(data), isError: true })
+@@ -52,6 +56,7 @@ export function fromApi(res: McpApiResponse): CallResult {
+ }
+ 
+ export interface ToolSpec<S extends ZodRawShape> {
++  openWorld?: boolean
+   name: string
+   title: string
+   description: string
+@@ -70,7 +75,7 @@ export function registerApiTools(server: McpServer, ctx: McpApiContext, tools: r
+     if (kind !== 'read' && ctx.access !== 'write') continue
+     const perms = t.perm === undefined ? [] : typeof t.perm === 'string' ? [t.perm] : t.perm
+     if (perms.length > 0 && !perms.some((p) => ctx.perms.has(p))) continue
+-    const annotations = kind === 'read' ? READ : kind === 'write' ? WRITE : DESTRUCTIVE
++    const annotations = { ...(kind === 'read' ? READ : kind === 'write' ? WRITE : DESTRUCTIVE), openWorldHint: t.openWorld ?? false }
+     const api: McpApi = {
+       // Defesa extra: ferramenta de leitura nunca grava, mesmo que a rota aceite.
+       request: (method, path, req) => ctx.api.request(method, path, { ...req, write: kind !== 'read' && (req?.write ?? true) }),
+diff --git a/packages/wa-gateway-rpc/src/gateway.ts b/packages/wa-gateway-rpc/src/gateway.ts
+index b75a381..b04bcd5 100644
+--- a/packages/wa-gateway-rpc/src/gateway.ts
++++ b/packages/wa-gateway-rpc/src/gateway.ts
+@@ -109,6 +109,7 @@ export function createRpcGateway(opts: RpcGatewayOptions): RpcWaGateway {
+   }
+ 
+   const sessions: WaSessionsControl = {
++    ...(has('sessions.preparePairing') ? { preparePairing: (id: string, input: Parameters<NonNullable<WaSessionsControl['preparePairing']>>[1]) => invoke<SessionView>('sessions.preparePairing', [id, input]) } : {}),
+     create: (input: CreateSessionInput) => invoke<SessionView>('sessions.create', [input]),
+     list: () => invoke<SessionView[]>('sessions.list', []),
+     get: (id) => invoke<SessionView>('sessions.get', [id]),
+diff --git a/packages/wa-gateway-rpc/src/gateway.unit.test.ts b/packages/wa-gateway-rpc/src/gateway.unit.test.ts
+index e55e64e..c87dd06 100644
+--- a/packages/wa-gateway-rpc/src/gateway.unit.test.ts
++++ b/packages/wa-gateway-rpc/src/gateway.unit.test.ts
+@@ -38,6 +38,16 @@ afterEach(async () => {
+ })
+ 
+ describe('RPC: formato da chamada e perfil crm', () => {
++  it('safe pairing is optional and routed only for the ai-manager profile', async () => {
++    const f = fakeFetch(() => ok({ id: 'chip-a', status: 'NEW' }))
++    const legacy = gw(f.fn)
++    expect(legacy.sessions.preparePairing).toBeUndefined()
++    expect(f.calls).toHaveLength(0)
++    const current = gw(f.fn, { profile: 'ai-manager' })
++    const proxy = { protocol: 'socks5' as const, host: 'proxy.test', port: 1080, username: 'operator', password: 'private' }
++    expect(await current.sessions.preparePairing!('chip-a', { proxy })).toEqual({ id: 'chip-a', status: 'NEW' })
++    expect(f.calls[0]!.body).toEqual({ target: 'sessions', method: 'preparePairing', args: ['chip-a', { proxy }] })
++  })
+   it('POST /internal/rpc com Bearer e { target, method, args }; resultado em `result`', async () => {
+     const f = fakeFetch(() => ok([{ id: 's1' }]))
+     const list = await gw(f.fn).sessions.list()
+diff --git a/packages/wa-gateway-rpc/src/profiles.ts b/packages/wa-gateway-rpc/src/profiles.ts
+index 95a0b78..6a18cef 100644
+--- a/packages/wa-gateway-rpc/src/profiles.ts
++++ b/packages/wa-gateway-rpc/src/profiles.ts
+@@ -7,6 +7,7 @@ import { defaultCapabilities, type WaCapabilities } from '@crm/wa-port'
+ /** Métodos do `WaGateway` que viram chamada RPC (`subscribe` lê o stream; não passa pelo RPC). */
+ export const GATEWAY_METHODS = [
+   'sessions.create',
++  'sessions.preparePairing',
+   'sessions.list',
+   'sessions.get',
+   'sessions.startQr',
+diff --git a/packages/wa-gateway-rpc/src/profiles/ai-manager/profile.ts b/packages/wa-gateway-rpc/src/profiles/ai-manager/profile.ts
+index ec2a96e..8f28a19 100644
+--- a/packages/wa-gateway-rpc/src/profiles/ai-manager/profile.ts
++++ b/packages/wa-gateway-rpc/src/profiles/ai-manager/profile.ts
+@@ -17,6 +17,7 @@ export type AiManagerChange = 'A3' | 'A7' | 'A8'
+  */
+ export const AI_MANAGER_CURRENT_ROUTES = {
+   'sessions.create': 'sessions.create',
++  'sessions.preparePairing': 'sessions.preparePairing',
+   'sessions.list': 'sessions.list',
+   'sessions.get': 'sessions.get',
+   'sessions.startQr': 'sessions.startQr',
+diff --git a/packages/wa-gateway-rpc/src/profiles/ai-manager/testing/simulator.ts b/packages/wa-gateway-rpc/src/profiles/ai-manager/testing/simulator.ts
+index 689bff3..1efe1e0 100644
+--- a/packages/wa-gateway-rpc/src/profiles/ai-manager/testing/simulator.ts
++++ b/packages/wa-gateway-rpc/src/profiles/ai-manager/testing/simulator.ts
+@@ -233,6 +233,7 @@ export async function startAiManagerSimulator(opts: AiManagerSimulatorOptions):
+   // Alvos de HOJE (bridgeHandlers do ai-manager).
+   const handlers: Record<string, Record<string, Handler>> = {
+     sessions: {
++      preparePairing: unavailable('safe pairing'),
+       getConversation: unavailable('conversation'),
+       configureConversation: unavailable('conversation'),
+       tickConversation: unavailable('conversation'),
+diff --git a/packages/wa-port/src/gateway.ts b/packages/wa-port/src/gateway.ts
+index 661433e..d32e477 100644
+--- a/packages/wa-port/src/gateway.ts
++++ b/packages/wa-port/src/gateway.ts
+@@ -191,6 +191,8 @@ export interface CreateSessionInput {
+ 
+ /** Controle de sessões (ai-manager `SessionsControl`). */
+ export interface WaSessionsControl {
++  /** Safe pairing preparation; supported by the ai-manager bridge. Does not send messages. */
++  preparePairing?(id: string, input: { proxy?: InlineProxyInput | null }): Promise<SessionView>
+   create(input: CreateSessionInput): Promise<SessionView>
+   list(): Promise<SessionView[]>
+   get(id: string): Promise<SessionView>
+diff --git a/packages/wa-port/src/testing/fake-gateway.ts b/packages/wa-port/src/testing/fake-gateway.ts
+index dbb20f4..206c40f 100644
+--- a/packages/wa-port/src/testing/fake-gateway.ts
++++ b/packages/wa-port/src/testing/fake-gateway.ts
+@@ -403,10 +403,17 @@ export class FakeWaGateway implements WaGateway {
+         stored.proxyId = input.proxyId ?? (input.proxy ? this.nextId('proxy') : null)
+         return view(stored)
+       },
++      preparePairing: async (id, input) => {
++        const stored = this.requireSession(id)
++        if (!['NEW', 'DISCONNECTED'].includes(stored.status)) throw new WaGatewayError('INVALID_TRANSITION', 'Session already connected')
++        if (input.proxy !== undefined) stored.proxyId = input.proxy ? this.nextId('proxy') : null
++        return view(stored)
++      },
+       list: async () => [...this.sessionMap.values()].map(view),
+       get: async (id: string) => view(this.requireSession(id)),
+       startQr: async (id: string) => {
+         const session = this.requireSession(id)
++        if (session.status === 'DISCONNECTED') await this.setSessionState(id, 'NEW')
+         const generatedAt = this.iso()
+         this.qrs.set(id, { qr: FAKE_QR_DATA_URL, generatedAt })
+         await this.emit({ v: WA_EVENT_VERSION, type: 'session.qr', session_id: id, at: generatedAt, qr: FAKE_QR_DATA_URL })

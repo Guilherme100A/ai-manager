@@ -19,7 +19,8 @@ import {
   type TransitionOptions,
   type WaTransport,
 } from '@wsm/core'
-import type { Database } from '@wsm/db'
+import { messages, type Database } from '@wsm/db'
+import { and, eq, inArray } from 'drizzle-orm'
 import { toQrDataUrl } from './qr'
 
 export interface SessionManagerLogger {
@@ -228,6 +229,21 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
   }
 
   // ---- autenticação (AC-T05-02) -------------------------------------------------
+
+  /** Prepare an unpaired session without starting a socket or removing credentials. */
+  async preparePairing(id: string, input: { proxy?: CreateSessionInput['proxy'] } = {}): Promise<SessionView> {
+    const row = await this.store.get(id)
+    assertAction('connect', row.status)
+    const [pending] = await this.opts.db.select({ id: messages.id }).from(messages).where(and(
+      eq(messages.sessionId, id), eq(messages.direction, 'outbound'), inArray(messages.status, ['queued', 'processing', 'retrying']),
+    )).limit(1)
+    if (pending) throw new SessionError('VALIDATION_ERROR', 'Há envios pendentes nesta sessão. Revise a fila antes de solicitar novo pareamento.')
+    const rt = this.runtimes.get(id)
+    if (rt?.connected) throw new SessionError('VALIDATION_ERROR', 'A sessão já conectou; o pareamento não pode interrompê-la.')
+    if (rt) await this.dispose(rt, 'local')
+    if (input.proxy !== undefined) await this.store.updateDetails(id, { proxy: input.proxy })
+    return this.get(id)
+  }
 
   /** POST /qr: inicia a conexão (QR). Válido em NEW ou DISCONNECTED (DISCONNECTED → NEW). */
   async startQr(id: string): Promise<SessionView> {

@@ -265,10 +265,10 @@ index 90552ef..36aba48 100644
      return offerRows<OfferRow>(this.db, sql`select * from crm.offers where company_id=${company} order by created_at`)
 diff --git a/tests/acceptance/T125/mcp-offers.test.ts b/tests/acceptance/T125/mcp-offers.test.ts
 new file mode 100644
-index 0000000..7608757
+index 0000000..571ad8e
 --- /dev/null
 +++ b/tests/acceptance/T125/mcp-offers.test.ts
-@@ -0,0 +1,118 @@
+@@ -0,0 +1,122 @@
 +// Disposable PostgreSQL/Redis and fake providers, executed on CI only.
 +import { randomUUID } from 'node:crypto'
 +import { afterAll, beforeAll, expect, it } from 'vitest'
@@ -355,6 +355,10 @@ index 0000000..7608757
 +  expect(denied.error).toBe(true); expect(denied.data.status).toBe(422)
 +  const missing = await invoke(reader, 'get_offer', { id: randomUUID() })
 +  expect(missing.error).toBe(true); expect(missing.data.status).toBe(404)
++  const [foreignOffer] = await sys.q("insert into crm.offers(company_id,name,active,config) values($1,'Foreign row fixture',false,$2::jsonb) returning id", [other.companyId, JSON.stringify(config)])
++  const foreignRead = await invoke(reader, 'get_offer', { id: foreignOffer.id })
++  expect(foreignRead.error).toBe(true); expect(foreignRead.data.status).toBe(404)
++  expect((await invoke(reader, 'list_offers')).data.items.some((item: any) => item.id === foreignOffer.id)).toBe(false)
 +  expect((await invoke(reader, 'get_offer_results', { owner_user_id: config.owner_user_id, offer_id: offer.id })).data.items).toEqual([])
 +})
 +it('hides tools from another company and enforces the gate again after catalog discovery', async () => {

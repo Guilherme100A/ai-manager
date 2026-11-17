@@ -7,14 +7,15 @@ mesma identidade de responsável; não se criam três contas nem se atribui auto
 individual com base na sessão. As regressões com usuários distintos continuam
 como cobertura adicional. Esta
 mudança prepara instalação e recuperação; não altera ACL nem cria isolamento de
-visibilidade entre administradores. O UUID de produção continua sem confirmação.
-API e worker são instalados com `SHARED_OFFERS_COMPANY_ID` vazio.
+visibilidade entre administradores. A primeira instalação exige
+`SHARED_OFFERS_COMPANY_ID` vazio. Atualizações preservam o UUID já confirmado e
+persistido em `active.json`, conferindo API e worker antes e depois do corte.
 
 ## Artefato e CI
 
 O job `crm-release` do workflow CI reutiliza
 `scripts/prepare-shared-offers-crm.mjs`: reconstrói a distribuição sanitizada e
-confere a árvore `24cec7d30f200818e64cd9693bfe8ff38ed1d0c3`. Não usa checkout
+confere a árvore fixada em `integrations/shared-offers/manifest.json`. Não usa checkout
 operacional do CRM nem seu histórico privado.
 
 No runner GitHub, Postgres/Redis descartáveis exercitam backup/restore da fixture
