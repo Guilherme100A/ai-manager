@@ -143,9 +143,9 @@ export function deploy(options, run = command) {
       const s = json(run, 'verify-state-' + name, 'docker', ['inspect', '--format', '{{json .State}}', id])
       requireThat(s.Status === 'running' && (name !== 'crm-api' || s.Health?.Status === 'healthy'), 'CRM service not ready')
       const e = json(run, 'verify-env-' + name, 'docker', ['inspect', '--format', '{{json .Config.Env}}', id])
-      requireThat(e.includes('SHARED_OFFERS_COMPANY_ID=' + company), 'Gate changed during cutover')
       const actualMounts = json(run, 'verify-mounts-' + name, 'docker', ['inspect', '--format', '{{json .Mounts}}', id])
       if (name !== 'crm-web') {
+        requireThat(e.includes('SHARED_OFFERS_COMPANY_ID=' + company), 'Gate changed during cutover')
         for (const key of secrets) requireThat(e.includes(key + '=' + before.services[name].environment[key]), 'Credential changed during cutover')
         requireThat(json(run, 'verify-image-' + name, 'docker', ['inspect', '--format', '{{json .Image}}', id]) === m.image_id, 'Running image drift')
         requireThat(!actualMounts.some(x => x.Type === 'bind' || x.Destination === '/crm') && actualMounts.some(x => x.Destination === '/crm/node_modules' && x.Name === spec.deps && x.RW === false) && actualMounts.some(x => x.Destination === '/data/storage' && x.Name === spec.storage), 'Running dependency/storage mount drift')

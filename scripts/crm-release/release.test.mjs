@@ -69,6 +69,7 @@ function fixture(t) {
     if (label === 'source-paths') return 'tracked.ts\0'
     if (label === 'base-config') return JSON.stringify(before)
     if (label === 'candidate-config') return JSON.stringify(after)
+    if (label === 'verify-env-crm-web') return JSON.stringify(['PATH=/usr/sbin:/usr/bin'])
     if (label.startsWith('env-') || label.startsWith('verify-env-')) return JSON.stringify(Object.entries(env).map(([k, v]) => k + '=' + v))
     if (label === 'storage-mount' || label === 'worker-storage-mount') return JSON.stringify([{ Destination: '/data/storage', Type: 'volume', Name: 'preserved_storage' }])
     if (label.startsWith('verify-image-')) return JSON.stringify(image)
@@ -120,9 +121,16 @@ for (const mismatch of ['api-running', 'worker-config', 'candidate', 'persisted-
   assert.throws(() => deploy(f.options, f.run))
   assert.ok(!f.calls.some(c => c.label === 'stop-only-crm'))
 })
-test('upgrade checks the preserved company in the actual new containers after cutover', t => {
+test('activated upgrade accepts Nginx without a company gate and preserves API/worker activation', t => {
   const f = installedFixture(t)
-  f.responses.set('verify-env-crm-api', () => JSON.stringify(['SHARED_OFFERS_COMPANY_ID=']))
+  deploy(f.options, f.run)
+  assert.equal(read(path.join(f.state, 'active.json')).company_id, f.company)
+  assert.equal(read(path.join(f.state, 'releases', revision, 'result.json')).gate_empty, false)
+  assert.equal(fs.existsSync(path.join(f.state, 'maintenance.json')), false)
+})
+for (const service of ['crm-api', 'crm-worker']) test('upgrade checks the preserved company in the actual new container after cutover: ' + service, t => {
+  const f = installedFixture(t)
+  f.responses.set('verify-env-' + service, () => JSON.stringify(['SHARED_OFFERS_COMPANY_ID=']))
   assert.throws(() => deploy(f.options, f.run), /Gate changed during cutover/)
   assert.equal(fs.existsSync(path.join(f.state, 'maintenance.json')), true)
 })
