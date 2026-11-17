@@ -11,7 +11,7 @@ describe('dashboard remembered login', () => {
     await page.getByTestId('login-password').fill(ADMIN_PASSWORD)
     await page.getByTestId('login-remember').setChecked(remember)
     await page.getByTestId('login-submit').click()
-    await page.getByTestId('nav-logout').waitFor()
+    await page.getByTestId('page-home').waitFor()
   }
   it('unchecked stays session-only and reopening requires login', async () => {
     const page = await ctx.newPage({ login: false })
