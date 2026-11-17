@@ -1,6 +1,12 @@
 name: Verify live admin business areas
+run-name: Verify admin areas ${{ inputs.proof }}
 on:
   workflow_dispatch:
+    inputs:
+      proof:
+        description: Operator recovery identifier
+        type: string
+        required: true
 permissions:
   contents: read
 jobs:
