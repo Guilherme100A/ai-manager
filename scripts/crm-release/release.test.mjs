@@ -85,7 +85,7 @@ function fixture(t) {
     if (label === 'principal-health' || label.startsWith('legacy-state-') || label.startsWith('verify-state-') || label.startsWith('recovery-state-')) return JSON.stringify({ Status: 'running', Health: { Status: 'healthy' } })
     if (label.startsWith('journal-')) return JSON.stringify(m.migrations.slice(0, Number(label.slice(8))).map(x => ({ hash: x.hash, created_at: x.when })))
     if (label === 'image-proof') return JSON.stringify({ Id: image, Architecture: 'amd64', Os: 'linux', Config: { Labels: { 'crm.source-tree': TREE } } })
-    if (label === 'verify-message-identity-schema') return JSON.stringify({scoped:true,old_global:false})
+    if (label === 'verify-message-identity-schema') return JSON.stringify({scoped:true,old_global:false,column:true,trigger:true,fk:'FOREIGN KEY (company_id, chat_id, connection_id) REFERENCES crm.chats(company_id, id, connection_id) ON DELETE CASCADE'})
     if (label === 'verify-business-area-schema') return JSON.stringify({ areas:true,resources:true,offer_column:true })
     if (label === 'verify-offer-schema') return JSON.stringify({ column: true, trigger: true, indexes: 2 })
     if (label === 'backup-legacy-source') fs.writeFileSync(args[1], 'mock private source backup')
@@ -343,7 +343,15 @@ test('missing business-area schema retains maintenance before any new API cutove
 
 test('global WA identity index cannot survive message-scope migration unnoticed', t => {
   const f = installedFixture(t)
-  f.responses.set('verify-message-identity-schema', () => JSON.stringify({ scoped: true, old_global: true }))
+  f.responses.set('verify-message-identity-schema', () => JSON.stringify({ scoped: true, old_global: true, column:true, trigger:true, fk:'FOREIGN KEY (company_id, chat_id, connection_id) REFERENCES crm.chats(company_id, id, connection_id) ON DELETE CASCADE' }))
+  assert.throws(() => deploy(f.options, f.run), /Message identity schema/)
+  assert.ok(fs.existsSync(path.join(f.state, 'maintenance.json')))
+  assert.ok(!f.calls.some(c => c.label === 'cutover-crm-api'))
+})
+
+for (const [field, bad] of [['column', false], ['trigger', false], ['fk', 'FOREIGN KEY (chat_id) REFERENCES crm.chats(id)']]) test('connection identity requires verified ' + field + ' before cutover', t => {
+  const f = installedFixture(t)
+  f.responses.set('verify-message-identity-schema', () => JSON.stringify({ scoped:true, old_global:false, column:true, trigger:true, fk:'FOREIGN KEY (company_id, chat_id, connection_id) REFERENCES crm.chats(company_id, id, connection_id) ON DELETE CASCADE', [field]:bad }))
   assert.throws(() => deploy(f.options, f.run), /Message identity schema/)
   assert.ok(fs.existsSync(path.join(f.state, 'maintenance.json')))
   assert.ok(!f.calls.some(c => c.label === 'cutover-crm-api'))

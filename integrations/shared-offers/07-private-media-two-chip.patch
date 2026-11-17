@@ -184,20 +184,33 @@ index 0f0ade308cff241e5c8165780f02db0d4cf7418a..11ac223c75b09e51e0e71c19e47c13f9
    const pttConverter = (data: Uint8Array) => toPttOgg(data)
 diff --git a/docs/private-media-and-two-chip-delivery.md b/docs/private-media-and-two-chip-delivery.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..0813ae6ddda0e3ea3d0de5609ab68193743936c5
+index 0000000000000000000000000000000000000000..c145cc2776c1e1865ab684f536e98d30870e49c5
 --- /dev/null
 +++ b/docs/private-media-and-two-chip-delivery.md
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,68 @@
 +# Midia privada e ingestao entre dois chips
 +
-+O ID de uma mensagem WhatsApp pode ser observado na saida de uma conexao e na
-+entrada de outra conexao da mesma empresa. A migration 0044 preserva as primeiras
-+44 migrations e muda a unicidade para empresa/chat/WAID. A ingestao resolve o
-+contato/chat correto antes de procurar duplicata e usa esse chat no fallback de
-+conflito. ACKs ficam limitados a conexao e outbound: pipeline exato tem prioridade;
-+fallback por WAID ambiguo entre chats e recusado sem alterar nenhum deles. Reentrega no
-+mesmo chat nao incrementa nao-lidas nem chama o wait duas vezes. Nenhum historico
-+ou evento antigo e reprocessado pela migration.
++O ID de uma mensagem WhatsApp pertence a conexao (conta), nao ao contato/chat.
++A mesma empresa pode observar saida de um chip e entrada de outro com o mesmo
++WAID. Migration0044 mantem as44migrations anteriores e cria unicidade por
++empresa/conexao/WAID. Na mesma conexao, PN e LID ainda nao mapeados continuam
++deduplicados: nao criam uma segunda mensagem, unread ou onInbound. Por isso
++mergeIdentity mantem os IDs e referencias existentes, sem aliases, snapshots,
++consolidacao destrutiva, mudancas de DTO, contadores ou leitura do historico.
++
++messages.connection_id e derivado no BEFORE INSERT/UPDATE de company+chat e
++validado contra a empresa da conexao. Inserts existentes podem omitir a coluna
++(default NULL antes do trigger; persistencia NOT NULL). Conexao explicita errada
++e tenant/chat incompativel sao recusados. FK composto messages(company,chat,
++connection) -> chats(company,id,connection) protege inclusive mudanca no chatpai.
++Mensagem pode mudar de chat dentro da mesma conexao (merge), nunca de conexao.
++Backfill valida todas as linhas antes de NOT NULL/FK/indice; drift aborta, sem
++atribuir dados arbitrariamente. Nenhum historico ou evento antigo e reprocessado.
++
++Lookup e conflito de ingestao usam empresa/conexao/WAID, conforme o indice.
++ACK tambem e limitado a conexao/outbound: pipeline exato tem prioridade e fallback
++por WAID nao escolhe arbitrariamente entre linhas. Reentrega local nao repete
++nao-lidas nem wait. UUIDs, pipelines, reacoes e quotes permanecem sem remapeamento.
 +
 +`blob:<sha256>` e uma referencia privada, nunca um caminho de arquivo do WSM.
 +Antes de enfileirar, o WSM consulta metadados em POST /internal/wa-media no CRM;
@@ -244,10 +257,16 @@ index 0000000000000000000000000000000000000000..0813ae6ddda0e3ea3d0de5609ab68193
 +autorizados, pagamento ficticio e uma resposta nova com chave idempotente; nunca
 +simulacao offline como prova de entrega.
 diff --git a/packages/core/src/chats/ingest/chat-ingest.db.unit.test.ts b/packages/core/src/chats/ingest/chat-ingest.db.unit.test.ts
-index f15b072bbf2c0d66223721f9815d8251a7783c12..6e96480c1ca25c5b9a281444561aa3c1b3241bb3 100644
+index f15b072bbf2c0d66223721f9815d8251a7783c12..860262b978224cf732a93faedae59cd2c0b6137e 100644
 --- a/packages/core/src/chats/ingest/chat-ingest.db.unit.test.ts
 +++ b/packages/core/src/chats/ingest/chat-ingest.db.unit.test.ts
-@@ -6,7 +6,7 @@ import type { IncomingMessage, WaEvent } from '@crm/wa-port'
+@@ -1,12 +1,12 @@
+ // Postgres real (SPEC 3.10): banco descartável; FakeWaGateway e publisher em memória.
+ import { randomBytes } from 'node:crypto'
+-import { auditLogs, chats, companies, connections, contacts, createDb, messages, type Database } from '@crm/db'
++import { auditLogs, chats, companies, connections, contacts, createDb, messageReactions, messageSchedules, messages, users, type Database } from '@crm/db'
+ import { createTempDatabase, type TempDatabase } from '@crm/db/testing'
+ import type { IncomingMessage, WaEvent } from '@crm/wa-port'
  import { FakeWaGateway } from '@crm/wa-port/testing'
  import { and, eq } from 'drizzle-orm'
  import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -256,7 +275,7 @@ index f15b072bbf2c0d66223721f9815d8251a7783c12..6e96480c1ca25c5b9a281444561aa3c1
  
  let temp: TempDatabase
  let db: Database
-@@ -54,7 +54,87 @@ async function setup(settings: Record<string, unknown> = {}) {
+@@ -54,7 +54,110 @@ async function setup(settings: Record<string, unknown> = {}) {
    return { companyId, connectionId, sessionId, gw, published, inbound, ingest, msg, chatOf }
  }
  
@@ -266,41 +285,64 @@ index f15b072bbf2c0d66223721f9815d8251a7783c12..6e96480c1ca25c5b9a281444561aa3c1
 +}
 +
  describe('ChatIngest', () => {
-+  it('same connection: two identities keep their own chat/WAID, duplicate result and inbound counters', async () => {
-+    const s = await setup(), id = 'WA-same-connection-' + randomBytes(4).toString('hex')
-+    const a = s.msg({ id, from: '5511999990001@s.whatsapp.net', text: 'fixture A' })
-+    const b = s.msg({ id, from: '5511988887777@s.whatsapp.net', text: 'fixture B' })
-+    const firstA = single(await s.ingest.handle(a)), firstB = single(await s.ingest.handle(b))
-+    if (firstA.status !== 'stored' || firstB.status !== 'stored') throw new Error('Expected both chats stored')
-+    expect(firstA.chatId).not.toBe(firstB.chatId)
-+    expect(firstA.messageId).not.toBe(firstB.messageId)
-+    for (const [event, first] of [[a, firstA], [b, firstB]] as const) {
-+      const repeats = await Promise.all([s.ingest.handle(event), s.ingest.handle(event)])
-+      for (const repeat of repeats) expect(single(repeat)).toMatchObject({ status: 'duplicate', chatId: first.chatId, messageId: first.messageId })
-+      const [chat] = await db.select().from(chats).where(eq(chats.id, first.chatId))
-+      expect(chat!.unreadCount).toBe(1)
-+    }
++  it.each([0, 1, 2])('PN/LID dedup stays local through repeated/concurrent merge with %i chats already read', async alreadyRead => {
++    const s = await setup(), wa = 'WA-identity-' + randomBytes(4).toString('hex')
++    const pnEvent = s.msg({ id: wa, from: '5511999990001@s.whatsapp.net' })
++    const lidEvent = s.msg({ id: wa + '-lid', from: '111222333444555@lid' })
++    const pn = single(await s.ingest.handle(pnEvent)), lid = single(await s.ingest.handle(lidEvent))
++    if (pn.status !== 'stored' || lid.status !== 'stored') throw new Error('Expected two identity fixtures')
++    const duplicate = s.msg({ id: wa, from: '111222333444555@lid' })
++    expect(single(await s.ingest.handle(duplicate))).toMatchObject({ status: 'duplicate', chatId: pn.chatId, messageId: pn.messageId })
++    if (alreadyRead > 0) await db.update(chats).set({ unreadCount: 0 }).where(eq(chats.id, pn.chatId))
++    if (alreadyRead > 1) await db.update(chats).set({ unreadCount: 0 }).where(eq(chats.id, lid.chatId))
++    const [reaction] = await db.insert(messageReactions).values({ companyId: s.companyId, messageId: lid.messageId, actorType: 'contact', emoji: '👍' }).returning()
++    const pipeline = 'pipeline-merge-' + randomBytes(5).toString('hex'), outWa = wa + '-out'
++    const [quoted] = await db.insert(messages).values({ companyId: s.companyId, chatId: lid.chatId, direction: 'outbound', senderType: 'user', type: 'text', body: 'quoted fixture', quotedWaMessageId: wa, status: 'sent', waMessageId: outWa, pipelineMessageId: pipeline }).returning()
++    const [user] = await db.insert(users).values({ name: 'Schedule fixture', email: randomBytes(8).toString('hex') + '@example.test', passwordHash: 'synthetic-not-login' }).returning()
++    const [schedule] = await db.insert(messageSchedules).values({ companyId: s.companyId, chatId: pn.chatId, kind: 'message', text: 'not executed', runAt: new Date('2030-01-01'), status: 'sent', createdByUserId: user!.id, lastMessageId: pn.messageId }).returning()
++    const mapping = { v: 1, type: 'contact.lid_mapping', session_id: s.sessionId, at: AT, lid: '111222333444555@lid', pn: '5511999990001@s.whatsapp.net' } as WaEvent
++    await Promise.all([s.ingest.handle(mapping), s.ingest.handle(mapping)])
++    await s.ingest.handle(mapping)
++    const rows = await db.select().from(chats).where(eq(chats.companyId, s.companyId))
++    expect(rows).toHaveLength(1)
++    expect(rows[0]!.unreadCount).toBe(2 - alreadyRead)
++    expect(single(await s.ingest.handle(duplicate))).toMatchObject({ status: 'duplicate', chatId: rows[0]!.id, messageId: pn.messageId })
 +    expect(s.inbound).toHaveLength(2)
-+    expect(new Set(s.inbound.map(e => e.chat_id))).toEqual(new Set([firstA.chatId, firstB.chatId]))
-+    expect(await db.select().from(messages).where(and(eq(messages.companyId, s.companyId), eq(messages.waMessageId, id)))).toHaveLength(2)
++    const history = await db.select().from(messages).where(eq(messages.companyId, s.companyId))
++    expect(history.map(m => m.id).sort()).toEqual([pn.messageId, lid.messageId, quoted!.id].sort())
++    expect(history.every(m => m.chatId === rows[0]!.id && m.connectionId === s.connectionId)).toBe(true)
++    expect(history.find(m => m.id === quoted!.id)).toMatchObject({ pipelineMessageId: pipeline, quotedWaMessageId: wa, waMessageId: outWa })
++    expect((await db.select().from(messageReactions).where(eq(messageReactions.id, reaction!.id)))[0]!.messageId).toBe(lid.messageId)
++    expect((await db.select().from(messageSchedules).where(eq(messageSchedules.id, schedule!.id)))[0]!.lastMessageId).toBe(pn.messageId)
++    for (const [messageId, status] of [[pipeline, 'delivered'], ['fallback-unmatched', 'read']] as const) {
++      expect(single(await s.ingest.handle({ v: 1, type: 'message.status', session_id: s.sessionId, at: AT, message_id: messageId, transport_message_id: outWa, status })).status).toBe('updated')
++    }
++    expect((await db.select().from(messages).where(eq(messages.id, quoted!.id)))[0]!.status).toBe('read')
 +  })
 +
-+  it('ambiguous same-connection WAID fallback changes no chat; exact pipeline updates only its outbound', async () => {
-+    const s = await setup(), id = 'WA-ambiguous-' + randomBytes(4).toString('hex')
-+    const sent: Array<{ id: string; pipeline: string }> = []
-+    for (let i = 0; i < 2; i++) {
-+      const [contact] = await db.insert(contacts).values({ companyId: s.companyId, name: 'ACK fixture ' + i }).returning()
-+      const [chat] = await db.insert(chats).values({ companyId: s.companyId, connectionId: s.connectionId, contactId: contact!.id }).returning()
-+      const pipeline = 'exact-' + randomBytes(6).toString('hex')
-+      const [message] = await db.insert(messages).values({ companyId: s.companyId, chatId: chat!.id, direction: 'outbound', senderType: 'user', type: 'text', status: 'sent', waMessageId: id, pipelineMessageId: pipeline }).returning()
-+      sent.push({ id: message!.id, pipeline })
++  it('derived connection keeps omitted-column inserts compatible and rejects foreign/moved message identity', async () => {
++    const s = await setup(), foreign = await setup(), first = single(await s.ingest.handle(s.msg()))
++    if (first.status !== 'stored') throw new Error('Expected stored fixture')
++    const [other] = await db.insert(connections).values({ companyId: s.companyId, sessionId: 'other-' + randomBytes(5).toString('hex'), name: 'Other' }).returning()
++    const [contact] = await db.insert(contacts).values({ companyId: s.companyId, name: 'Other' }).returning()
++    const [sameChat] = await db.insert(chats).values({ companyId: s.companyId, connectionId: s.connectionId, contactId: contact!.id }).returning()
++    const [otherChat] = await db.insert(chats).values({ companyId: s.companyId, connectionId: other!.id, contactId: contact!.id }).returning()
++    const f = single(await foreign.ingest.handle(foreign.msg()))
++    if (f.status !== 'stored') throw new Error('Expected foreign fixture')
++    const values = { companyId: s.companyId, chatId: first.chatId, direction: 'outbound' as const, senderType: 'user' as const, type: 'text', status: 'sent' as const, waMessageId: 'WA-guard-' + randomBytes(4).toString('hex') }
++    const [message] = await db.insert(messages).values(values).returning()
++    expect(message!.connectionId).toBe(s.connectionId)
++    const code = (err: unknown): string | undefined => { const e = err as { code?: string; cause?: { code?: string } }; return e.cause?.code ?? e.code }
++    await expect(db.insert(messages).values({ ...values, chatId: sameChat!.id })).rejects.toSatisfy((e: unknown) => code(e) === '23505')
++    for (const value of [{ ...values, connectionId: other!.id }, { ...values, connectionId: foreign.connectionId }, { ...values, chatId: f.chatId }, { ...values, companyId: foreign.companyId }]) {
++      await expect(db.insert(messages).values(value)).rejects.toSatisfy((e: unknown) => code(e) === '23503')
 +    }
-+    const status = (pipeline: string) => s.ingest.handle({ v: 1, type: 'message.status', session_id: s.sessionId, at: AT, message_id: pipeline, transport_message_id: id, status: 'delivered' })
-+    expect(single(await status('unknown-pipeline')).status).toBe('ignored')
-+    for (const row of sent) expect((await db.select().from(messages).where(eq(messages.id, row.id)))[0]!.status).toBe('sent')
-+    expect(single(await status(sent[1]!.pipeline)).status).toBe('updated')
-+    expect((await db.select().from(messages).where(eq(messages.id, sent[0]!.id)))[0]!.status).toBe('sent')
-+    expect((await db.select().from(messages).where(eq(messages.id, sent[1]!.id)))[0]!.status).toBe('delivered')
++    for (const value of [{ connectionId: other!.id }, { chatId: otherChat!.id }, { companyId: foreign.companyId, chatId: f.chatId, connectionId: foreign.connectionId }]) {
++      await expect(db.update(messages).set(value).where(eq(messages.id, message!.id))).rejects.toSatisfy((e: unknown) => code(e) === '23503')
++    }
++    await expect(db.update(chats).set({ connectionId: other!.id }).where(eq(chats.id, first.chatId))).rejects.toSatisfy((e: unknown) => code(e) === '23503')
++    await db.update(messages).set({ chatId: sameChat!.id }).where(eq(messages.id, message!.id))
++    expect((await db.select().from(messages).where(eq(messages.id, message!.id)))[0]).toMatchObject({ chatId: sameChat!.id, connectionId: s.connectionId })
 +  })
 +
 +  it('same company: sender outbound must not suppress inbound on the other chip or its wait notification', async () => {
@@ -345,63 +387,54 @@ index f15b072bbf2c0d66223721f9815d8251a7783c12..6e96480c1ca25c5b9a281444561aa3c1
      const s = await setup()
      const ev = s.msg({ push_name: 'Ana' })
 diff --git a/packages/core/src/chats/ingest/chat-ingest.ts b/packages/core/src/chats/ingest/chat-ingest.ts
-index 52179708e2f54465292838964cabe3d3564da4de..f2ec866c18aae113364c54559b6c07ead06520e1 100644
+index 52179708e2f54465292838964cabe3d3564da4de..02d0297a131357757b7abb23815a9c561559735d 100644
 --- a/packages/core/src/chats/ingest/chat-ingest.ts
 +++ b/packages/core/src/chats/ingest/chat-ingest.ts
 @@ -1,6 +1,6 @@
  import { OffersService } from '../../offers/service'
  // Ingestão dos eventos WhatsApp (WaEvent v1) em contatos, chats e mensagens do CRM (SPEC T33; 03-chats).
 -// Idempotente: a mensagem é única por (empresa, wa_message_id), então reentregas não duplicam nem recontam.
-+// Idempotente por empresa/chat/wa_message_id; chips da mesma empresa podem observar a mesma mensagem.
++// Idempotente por empresa/conexao/wa_message_id; chips da mesma empresa podem observar a mesma mensagem.
  // Mensagens de grupo, status e canais são ignoradas (SPEC 3.8). Opt-out por palavra-chave bloqueia na hora (1.4 nº 3).
  // Revisão 3 (rastreamento Meta): mensagem ao vivo com referral de anúncio (`ctwa_clid`) grava o toque de atribuição;
  // mensagem com código de link rastreável (`(ref XXXXXX)`) liga o clique ao contato e é gravada sem o código. Nos dois
-@@ -129,14 +129,17 @@ export class ChatIngest {
+@@ -129,7 +129,8 @@ export class ChatIngest {
      if (!conn) return { status: 'ignored', reason: 'unknown_session' }
      const companyId = conn.companyId
  
 -    const exists = await this.findByWaId(companyId, m.id)
--    if (exists) return { status: 'duplicate', chatId: exists.chatId, messageId: exists.id }
--
-     const identity = identityOf(m.from, m.alt_jid)
-     if (!identity.phone && !identity.lid) return { status: 'ignored', reason: 'no_identity' }
-     const upserted = await this.upsertContact(companyId, identity, m)
-     if (!upserted) return { status: 'ignored', reason: 'invalid_identity' }
-     const { contact, created: contactCreated } = upserted
-+    // O indice e por chat: primeiro resolver a identidade e o chat desta conexao.
-+    // Um WAID observado em outro chat nao identifica esta mensagem.
-+    const [existingChat] = await this.db.select({ id: chats.id }).from(chats)
-+      .where(and(eq(chats.companyId, companyId), eq(chats.connectionId, conn.connectionId), eq(chats.contactId, contact.id))).limit(1)
-+    const exists = existingChat && await this.findByWaId(companyId, existingChat.id, m.id)
-+    if (exists) return { status: 'duplicate', chatId: exists.chatId, messageId: exists.id }
++    // A identidade e da conta WhatsApp, nao do chat PN/LID ainda nao mapeado.
++    const exists = await this.findByWaId(companyId, conn.connectionId, m.id)
+     if (exists) return { status: 'duplicate', chatId: exists.chatId, messageId: exists.id }
  
-     const fromContact = !m.from_me
-     const live = fromContact && !historical
-@@ -205,7 +208,7 @@ export class ChatIngest {
+     const identity = identityOf(m.from, m.alt_jid)
+@@ -205,7 +206,7 @@ export class ChatIngest {
            waTimestamp: Number.isFinite(at.getTime()) ? at : null,
            ...(fromContact ? {} : { sentAt: at }),
          })
 -        .onConflictDoNothing({ target: [messages.companyId, messages.waMessageId], where: sql`${messages.waMessageId} is not null` })
-+        .onConflictDoNothing({ target: [messages.companyId, messages.chatId, messages.waMessageId], where: sql`${messages.waMessageId} is not null` })
++        .onConflictDoNothing({ target: [messages.companyId, messages.connectionId, messages.waMessageId], where: sql`${messages.waMessageId} is not null` })
          .returning()
        if (!message) return { duplicate: true as const, chatId: chat!.id }
  
-@@ -232,7 +235,7 @@ export class ChatIngest {
+@@ -232,8 +233,8 @@ export class ChatIngest {
      })
  
      if (r.duplicate) {
 -      const dup = await this.findByWaId(companyId, m.id)
-+      const dup = await this.findByWaId(companyId, r.chatId, m.id)
-       return { status: 'duplicate', chatId: r.chatId, messageId: dup?.id ?? '' }
+-      return { status: 'duplicate', chatId: r.chatId, messageId: dup?.id ?? '' }
++      const dup = await this.findByWaId(companyId, conn.connectionId, m.id)
++      return { status: 'duplicate', chatId: dup?.chatId ?? r.chatId, messageId: dup?.id ?? '' }
      }
  
-@@ -318,18 +321,25 @@ export class ChatIngest {
+     // Link rastreável sem código (opcional): 1º contato novo da conexão logo depois de um clique → ligação "provável".
+@@ -318,18 +319,25 @@ export class ChatIngest {
      const conn = await this.resolve(event.session_id)
      if (!conn) return { status: 'ignored', reason: 'unknown_session' }
      const next = event.status as CrmMessageStatus
 +    // Um mesmo ID WhatsApp existe na saida de um chip e na entrada do outro.
 +    // Status do pipeline pertence somente a saida da conexao que publicou o evento.
-+    const connectionScope = sql`exists (select 1 from ${chats} where ${chats.id} = ${messages.chatId} and ${chats.companyId} = ${conn.companyId} and ${chats.connectionId} = ${conn.connectionId})`
++    const connectionScope = eq(messages.connectionId, conn.connectionId)
      const row = await this.db.transaction(async (tx) => {
        let [msg] = await tx
          .select()
@@ -418,23 +451,23 @@ index 52179708e2f54465292838964cabe3d3564da4de..f2ec866c18aae113364c54559b6c07ea
 +          .where(and(eq(messages.companyId, conn.companyId), connectionScope, eq(messages.direction, 'outbound'), eq(messages.waMessageId, event.transport_message_id)))
 +          .limit(2)
            .for('update')
-+        // Sem pipeline exato, o WAID sozinho nao escolhe entre chats distintos.
++        // O indice garante unicidade local; a cardinalidade tambem e validada aqui.
 +        if (candidates.length !== 1) return null
 +        msg = candidates[0]
        }
        if (!msg || !canAdvanceStatus(msg.status, next)) return null
        const at = new Date(event.at)
-@@ -394,11 +404,11 @@ export class ChatIngest {
+@@ -394,11 +402,11 @@ export class ChatIngest {
  
    // ---- internos ---------------------------------------------------------------------------------------------
  
 -  private async findByWaId(companyId: string, waMessageId: string): Promise<{ id: string; chatId: string } | undefined> {
-+  private async findByWaId(companyId: string, chatId: string, waMessageId: string): Promise<{ id: string; chatId: string } | undefined> {
++  private async findByWaId(companyId: string, connectionId: string, waMessageId: string): Promise<{ id: string; chatId: string } | undefined> {
      const [row] = await this.db
        .select({ id: messages.id, chatId: messages.chatId })
        .from(messages)
 -      .where(and(eq(messages.companyId, companyId), eq(messages.waMessageId, waMessageId)))
-+      .where(and(eq(messages.companyId, companyId), eq(messages.chatId, chatId), eq(messages.waMessageId, waMessageId)))
++      .where(and(eq(messages.companyId, companyId), eq(messages.connectionId, connectionId), eq(messages.waMessageId, waMessageId)))
      return row
    }
  
@@ -509,15 +542,53 @@ index f462bc497b3a47d85a2efde669a07fc20f64bfaf..b394e993a66c90961af6bb8196eb1a4f
    /** Bytes da mídia, só se o id foi emitido para esta empresa; senão `not_found`. */
 diff --git a/packages/db/drizzle/crm/0044_chat_wa_identity.sql b/packages/db/drizzle/crm/0044_chat_wa_identity.sql
 new file mode 100644
-index 0000000000000000000000000000000000000000..27a3bc946ff9dafdb6ed61877fd7a24cc8ca86e1
+index 0000000000000000000000000000000000000000..f49435e8a09b0c8a44ad8c1457cf69b02f5ca7cf
 --- /dev/null
 +++ b/packages/db/drizzle/crm/0044_chat_wa_identity.sql
-@@ -0,0 +1,7 @@
-+-- Chips da mesma empresa observam o mesmo ID WhatsApp em chats distintos.
-+-- Preserva a deduplicacao local sem suprimir a entrada no chip destinatario.
-+CREATE UNIQUE INDEX messages_company_chat_wa_id_uq
-+  ON crm.messages (company_id, chat_id, wa_message_id)
-+  WHERE wa_message_id IS NOT NULL;
+@@ -0,0 +1,45 @@
++-- O mesmo ID WhatsApp pode existir na saida de um chip e entrada de outro.
++-- Dentro de uma conexao continua unico, inclusive antes/depois de mapear PN/LID.
++ALTER TABLE crm.messages ADD COLUMN connection_id uuid;
++--> statement-breakpoint
++UPDATE crm.messages AS m SET connection_id = c.connection_id
++FROM crm.chats AS c JOIN crm.connections AS co ON co.id = c.connection_id AND co.company_id = c.company_id
++WHERE c.id = m.chat_id AND c.company_id = m.company_id;
++--> statement-breakpoint
++DO $$ BEGIN
++  IF EXISTS (SELECT 1 FROM crm.messages WHERE connection_id IS NULL) THEN
++    RAISE EXCEPTION 'message company/chat identity drift; migration aborted';
++  END IF;
++END $$;
++--> statement-breakpoint
++ALTER TABLE crm.messages ALTER COLUMN connection_id SET NOT NULL;
++--> statement-breakpoint
++CREATE UNIQUE INDEX chats_company_id_connection_uq ON crm.chats(company_id,id,connection_id);
++--> statement-breakpoint
++ALTER TABLE crm.messages ADD CONSTRAINT messages_chat_connection_fk
++  FOREIGN KEY(company_id,chat_id,connection_id) REFERENCES crm.chats(company_id,id,connection_id) ON DELETE CASCADE;
++--> statement-breakpoint
++CREATE FUNCTION crm.bind_message_connection() RETURNS trigger LANGUAGE plpgsql AS $$
++DECLARE expected uuid;
++BEGIN
++  SELECT c.connection_id INTO expected FROM crm.chats AS c
++    JOIN crm.connections AS co ON co.id = c.connection_id AND co.company_id = c.company_id
++    WHERE c.company_id = NEW.company_id AND c.id = NEW.chat_id;
++  IF NOT FOUND THEN RAISE EXCEPTION 'message company/chat identity mismatch' USING ERRCODE='23503'; END IF;
++  IF NEW.connection_id IS NOT NULL AND NEW.connection_id IS DISTINCT FROM expected THEN
++    RAISE EXCEPTION 'message connection mismatch' USING ERRCODE='23503';
++  END IF;
++  IF TG_OP = 'UPDATE' AND expected IS DISTINCT FROM OLD.connection_id THEN
++    RAISE EXCEPTION 'message cannot change connection' USING ERRCODE='23503';
++  END IF;
++  NEW.connection_id := expected;
++  RETURN NEW;
++END $$;
++--> statement-breakpoint
++CREATE TRIGGER bind_message_connection BEFORE INSERT OR UPDATE OF company_id,chat_id,connection_id
++  ON crm.messages FOR EACH ROW EXECUTE FUNCTION crm.bind_message_connection();
++--> statement-breakpoint
++CREATE UNIQUE INDEX messages_company_connection_wa_id_uq
++  ON crm.messages(company_id,connection_id,wa_message_id) WHERE wa_message_id IS NOT NULL;
 +--> statement-breakpoint
 +DROP INDEX crm.messages_company_wa_id_uq;
 diff --git a/packages/db/drizzle/crm/meta/_journal.json b/packages/db/drizzle/crm/meta/_journal.json
@@ -539,15 +610,40 @@ index 6b5eb6d652375ba310b6e2cb2792a0c3c4b8b95c..42ec540e3ed608698c016fb3c9c68661
    ]
  }
 diff --git a/packages/db/src/schema/crm/chats.ts b/packages/db/src/schema/crm/chats.ts
-index 2c1f8a49867fb7f827f315af82533a17b796df72..a59ef06c90cb0aeedef34178415e1d5603b1ee91 100644
+index 2c1f8a49867fb7f827f315af82533a17b796df72..8a861d2b0ce023afceaabca9ba7d59386b5b64aa 100644
 --- a/packages/db/src/schema/crm/chats.ts
 +++ b/packages/db/src/schema/crm/chats.ts
-@@ -103,7 +103,7 @@ export const messages = crm.table(
+@@ -1,5 +1,5 @@
+ import { sql } from 'drizzle-orm'
+-import { boolean, index, integer, jsonb, primaryKey, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core'
++import { boolean, foreignKey, index, integer, jsonb, primaryKey, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core'
+ import { companies, users } from './base.js'
+ import { aiAgents } from './ai-agents.js'
+ import { connections } from './connections.js'
+@@ -59,6 +59,7 @@ export const chats = crm.table(
+   },
+   (t) => [
+     uniqueIndex('chats_company_connection_contact_uq').on(t.companyId, t.connectionId, t.contactId),
++    uniqueIndex('chats_company_id_connection_uq').on(t.companyId, t.id, t.connectionId),
+     index('chats_company_status_last_idx').on(t.companyId, t.status, t.lastMessageAt),
+     index('chats_company_contact_idx').on(t.companyId, t.contactId),
+   ],
+@@ -74,6 +75,8 @@ export const messages = crm.table(
+     chatId: uuid('chat_id')
+       .notNull()
+       .references(() => chats.id, { onDelete: 'cascade' }),
++    /** Derivada/validada pelo BEFORE trigger; omissao usa NULL antes do INSERT. */
++    connectionId: uuid('connection_id').notNull().default(sql`NULL`),
+     direction: text('direction').$type<CrmMessageDirection>().notNull(),
+     senderType: text('sender_type').$type<MessageSenderType>().notNull(),
+     senderUserId: uuid('sender_user_id').references(() => users.id, { onDelete: 'set null' }),
+@@ -103,7 +106,8 @@ export const messages = crm.table(
      updatedAt: updatedAt(),
    },
    (t) => [
 -    uniqueIndex('messages_company_wa_id_uq').on(t.companyId, t.waMessageId).where(sql`${t.waMessageId} is not null`),
-+    uniqueIndex('messages_company_chat_wa_id_uq').on(t.companyId, t.chatId, t.waMessageId).where(sql`${t.waMessageId} is not null`),
++    uniqueIndex('messages_company_connection_wa_id_uq').on(t.companyId, t.connectionId, t.waMessageId).where(sql`${t.waMessageId} is not null`),
++    foreignKey({ name: 'messages_chat_connection_fk', columns: [t.companyId, t.chatId, t.connectionId], foreignColumns: [chats.companyId, chats.id, chats.connectionId] }).onDelete('cascade'),
      uniqueIndex('messages_company_pipeline_id_uq').on(t.companyId, t.pipelineMessageId).where(sql`${t.pipelineMessageId} is not null`),
      index('messages_chat_created_idx').on(t.chatId, t.createdAt),
    ],
