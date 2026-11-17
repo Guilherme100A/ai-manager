@@ -1,4 +1,4 @@
-// Login do administrador (AC-T18-01): usuário e senha → POST /api/auth/login; token em memória + sessionStorage.
+// Login do administrador: memoria/sessionStorage por padrao, persistencia apenas com opt-in.
 import { useState, type FormEvent } from 'react'
 import { api } from '../lib/api'
 import { setToken } from '../lib/auth'
@@ -10,6 +10,7 @@ import { ThemeToggle } from '../components/Layout'
 export function Login() {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [remember, setRemember] = useState(false)
   const [error, setError] = useState<string>()
   const [busy, setBusy] = useState(false)
 
@@ -20,8 +21,9 @@ export function Login() {
     setBusy(true)
     setError(undefined)
     try {
-      const res = await api.login(user, password)
-      setToken(res.token)
+      const res = await api.login(user, password, remember)
+      setToken(res.token, remember ? { remember: true, expiresAt: res.expiresAt } : {})
+      setPassword('')
       navigate({ name: 'home' })
     } catch (err) {
       setError(loginErrorMessage(err))
@@ -56,6 +58,10 @@ export function Login() {
           value={password}
           onChange={(e) => setPassword(e.target.value)}
         />
+        <label className="remember-login" htmlFor="login-remember">
+          <input id="login-remember" data-testid="login-remember" type="checkbox" checked={remember} onChange={e => setRemember(e.target.checked)} />
+          <span>Manter conectado neste dispositivo por 30 dias</span>
+        </label>
         <button type="submit" data-testid="login-submit" disabled={busy}>
           Entrar
         </button>

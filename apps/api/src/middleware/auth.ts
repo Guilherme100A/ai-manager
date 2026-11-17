@@ -3,6 +3,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto'
 import type { MiddlewareHandler } from 'hono'
 import { authServiceFor, isLoginToken } from '../auth'
+import { rememberedLoginActive } from '../auth/remembered'
 import { ApiError } from '../errors'
 import type { AppDeps, AppEnv } from '../types'
 
@@ -30,7 +31,7 @@ export function isPublicApiRoute(method: string, path: string): boolean {
  * Token de login do painel (T17). Registrado antes do `bearerAuth`: com um token de login válido, define o actor
  * (usuário) e o `bearerAuth` deixa passar. Token de login inválido, expirado ou revogado → 401.
  */
-export function loginTokenAuth(deps: Pick<AppDeps, 'auth' | 'logger'>): MiddlewareHandler<AppEnv> {
+export function loginTokenAuth(deps: Pick<AppDeps, 'auth' | 'logger' | 'db'>): MiddlewareHandler<AppEnv> {
   const auth = authServiceFor(deps)
   return async (c, next) => {
     if (isPublicApiRoute(c.req.method, c.req.path)) {
@@ -41,6 +42,7 @@ export function loginTokenAuth(deps: Pick<AppDeps, 'auth' | 'logger'>): Middlewa
     if (token && isLoginToken(token)) {
       const claims = auth.verify(token)
       if (!claims) throw new ApiError('UNAUTHORIZED', 'invalid or expired session token')
+      if (claims.remember && !(await rememberedLoginActive(deps.db, token, claims))) throw new ApiError('UNAUTHORIZED', 'invalid or revoked remembered session')
       c.set('actor', claims.sub)
     }
     await next()

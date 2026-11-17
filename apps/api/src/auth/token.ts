@@ -14,6 +14,8 @@ export interface TokenClaims {
   exp: number
   /** Id único do token (revogação). */
   jti: string
+  /** Remembered sessions require a live database record on every authenticated request. */
+  remember?: true
 }
 
 const b64url = (buf: Buffer | string) => Buffer.from(buf).toString('base64url')
@@ -44,6 +46,7 @@ export function verifySignature(secret: string, token: string): TokenClaims | un
     if (typeof claims.sub !== 'string' || claims.role !== 'admin' || typeof claims.exp !== 'number' || typeof claims.jti !== 'string') {
       return undefined
     }
+    if (claims.remember !== undefined && claims.remember !== true) return undefined
     return claims as TokenClaims
   } catch {
     return undefined

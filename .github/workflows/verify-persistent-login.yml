@@ -1,0 +1,25 @@
+name: Verify live persistent login
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Prepare separate browser on GitHub only
+        run: |
+          mkdir -p "$RUNNER_TEMP/login-browser"
+          npm install --prefix "$RUNNER_TEMP/login-browser" --no-audit --no-fund playwright@1.63.0
+          "$RUNNER_TEMP/login-browser/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Verify restored login, SSO, three sessions and isolated logout
+        env:
+          LOGIN_SMOKE_SESSIONS: ${{ secrets.LOGIN_SMOKE_SESSIONS }}
+          PLAYWRIGHT_MODULE: ${{ runner.temp }}/login-browser/node_modules/playwright/index.mjs
+          NODE_TLS_REJECT_UNAUTHORIZED: '1'
+        run: node scripts/auth/verify-live-persistent-login.mjs

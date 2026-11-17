@@ -1,5 +1,5 @@
 // Tema claro/escuro (T21): <html data-theme>. Sem escolha salva, segue prefers-color-scheme.
-// Só a preferência visual vai para o localStorage ('wsm.theme'); o token nunca (AC-T18-01).
+// Preferencia visual no localStorage ('wsm.theme'), independente da opcao de lembrar login.
 export type Theme = 'light' | 'dark'
 
 export const THEME_KEY = 'wsm.theme'

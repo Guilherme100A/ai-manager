@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { api, ApiRequestError, request, setFetch } from './api'
-import { clearToken, getToken, setToken, TOKEN_KEY } from './auth'
+import { clearToken, getToken, setToken, TOKEN_KEY, REMEMBERED_TOKEN_KEY } from './auth'
 
 class MemoryStorage {
   data = new Map<string, string>()
@@ -55,6 +55,23 @@ describe('token (AC-T12-01)', () => {
 })
 
 describe('cliente da API', () => {
+  it('remember opt-in is sent explicitly while legacy login stays compatible', async () => {
+    responder = () => new Response(JSON.stringify({ token: 'synthetic-token', expiresAt: new Date(Date.now() + 86400000).toISOString() }), { status: 200 })
+    await api.login('admin', 'synthetic-password', true)
+    expect(JSON.parse(String(calls.at(-1)!.init?.body))).toEqual({ username: 'admin', password: 'synthetic-password', remember: true })
+    expect(local.getItem(REMEMBERED_TOKEN_KEY)).toBeNull()
+  })
+  it('an old request returning 401 does not erase a newer remembered login', async () => {
+    let release!: (response: Response) => void
+    setFetch(() => new Promise<Response>(resolve => { release = resolve }))
+    setToken('old-synthetic-token')
+    const pending = request('/api/auth/me')
+    setToken('new-synthetic-token', { remember: true, expiresAt: new Date(Date.now() + 86400000).toISOString() })
+    release(new Response(JSON.stringify({ error: { code: 'UNAUTHORIZED' } }), { status: 401 }))
+    await expect(pending).rejects.toMatchObject({ status: 401 })
+    expect(getToken()).toBe('new-synthetic-token')
+    expect(local.getItem(REMEMBERED_TOKEN_KEY)).not.toBeNull()
+  })
   it('usa caminho relativo e Bearer token', async () => {
     setToken('t0k')
     await api.sessions()

@@ -6,6 +6,7 @@ import { signToken, verifySignature, type TokenClaims } from './token'
 export const DEFAULT_ADMIN_USERNAME = 'admin'
 export const DEFAULT_ADMIN_PASSWORD = 'nimda'
 export const DEFAULT_SESSION_TTL_MS = 12 * 60 * 60 * 1000
+export const REMEMBERED_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000
 export const DEFAULT_LOGIN_MAX_FAILURES = 5
 export const DEFAULT_LOGIN_WINDOW_MS = 15 * 60 * 1000
 
@@ -101,7 +102,7 @@ export class AuthService {
   }
 
   /** Confere usuário e senha (tempo constante; mesma resposta para usuário ou senha errados). */
-  login(username: string, password: string, ip: string): LoginOutcome {
+  login(username: string, password: string, ip: string, remember = false): LoginOutcome {
     const nowMs = this.now().getTime()
     if (this.recentFailures(ip, nowMs) >= this.config.loginMaxFailures) return { ok: false, reason: 'rate_limited' }
     // Avalia os dois sempre (sem curto-circuito) para não vazar qual campo errou pelo tempo.
@@ -112,8 +113,8 @@ export class AuthService {
       return { ok: false, reason: 'invalid_credentials' }
     }
     this.failures.delete(ip)
-    const exp = nowMs + this.config.sessionTtlMs
-    const token = signToken(this.config.secret, { sub: this.config.username, role: 'admin', iat: nowMs, exp })
+    const exp = nowMs + (remember ? REMEMBERED_SESSION_TTL_MS : this.config.sessionTtlMs)
+    const token = signToken(this.config.secret, { sub: this.config.username, role: 'admin', iat: nowMs, exp, ...(remember ? { remember: true as const } : {}) })
     return { ok: true, result: { token, expiresAt: new Date(exp).toISOString(), user: { username: this.config.username, role: 'admin' } } }
   }
 
@@ -123,6 +124,7 @@ export class AuthService {
     if (!claims) return undefined
     const nowMs = this.now().getTime()
     if (claims.exp <= nowMs) return undefined
+    if (claims.remember && (claims.sub !== this.config.username || !Number.isFinite(claims.iat) || claims.exp <= claims.iat || claims.exp - claims.iat > REMEMBERED_SESSION_TTL_MS)) return undefined
     if (this.revoked.has(claims.jti)) return undefined
     return claims
   }
