@@ -151,10 +151,10 @@ index 0000000..3fe35b8
 +]
 diff --git a/packages/core/src/mcp/tools/offers.unit.test.ts b/packages/core/src/mcp/tools/offers.unit.test.ts
 new file mode 100644
-index 0000000..6c7e07e
+index 0000000..4e23a02
 --- /dev/null
 +++ b/packages/core/src/mcp/tools/offers.unit.test.ts
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,93 @@
 +import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 +import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 +import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
@@ -173,9 +173,9 @@ index 0000000..6c7e07e
 +async function connect(access: 'read' | 'write' = 'write', perms: PermissionKey[] = ['settings.products.view', 'settings.products.edit', 'chat.view'], reply = { status: 200, body: { ok: true } as unknown }) {
 +  const calls: { method: string; path: string; req?: McpApiRequest }[] = []
 +  const server = new McpServer({ name: 'test', version: '1' })
-+  registerApiTools(server, { access, perms: new Set(perms), api: { request: async (method, path, req) => { calls.push({ method, path, req }); return reply } } }, offersTools)
++  const names = registerApiTools(server, { access, perms: new Set(perms), api: { request: async (method, path, req) => { calls.push({ method, path, req }); return reply } } }, offersTools)
 +  const client = await link(server)
-+  return { client, calls, call: (name: string, args: Record<string, unknown> = {}) => client.callTool({ name, arguments: args }) }
++  return { client, calls, names, call: (name: string, args: Record<string, unknown> = {}) => client.callTool({ name, arguments: args }) }
 +}
 +async function link(server: McpServer) {
 +  const client = new Client({ name: 'client', version: '1' }), [a, b] = InMemoryTransport.createLinkedPair()
@@ -214,7 +214,9 @@ index 0000000..6c7e07e
 +    const { client } = await connect('write', ['chat.view'])
 +    expect((await client.listTools()).tools.map(t => t.name)).toEqual(['list_conversation_offer_opportunities'])
 +    const none = await connect('write', [])
-+    expect((await none.client.listTools()).tools).toEqual([])
++    expect(none.names).toEqual([])
++    expect(none.client.getServerCapabilities()?.tools).toBeUndefined()
++    await expect(none.client.listTools()).rejects.toMatchObject({ code: -32601 })
 +  })
 +  it.each([
 +    ['get_offer', { id: '../other' }],
@@ -263,10 +265,10 @@ index 90552ef..36aba48 100644
      return offerRows<OfferRow>(this.db, sql`select * from crm.offers where company_id=${company} order by created_at`)
 diff --git a/tests/acceptance/T125/mcp-offers.test.ts b/tests/acceptance/T125/mcp-offers.test.ts
 new file mode 100644
-index 0000000..eed49bd
+index 0000000..7608757
 --- /dev/null
 +++ b/tests/acceptance/T125/mcp-offers.test.ts
-@@ -0,0 +1,115 @@
+@@ -0,0 +1,118 @@
 +// Disposable PostgreSQL/Redis and fake providers, executed on CI only.
 +import { randomUUID } from 'node:crypto'
 +import { afterAll, beforeAll, expect, it } from 'vitest'
@@ -318,6 +320,9 @@ index 0000000..eed49bd
 +  expect(resources.data.connections.map((x: any) => x.id)).toContain(t.connectionId)
 +  expect(JSON.stringify(resources.data)).not.toContain('synthetic-never-contact-provider')
 +  expect(Object.keys(resources.data.integrations[0]).sort()).toEqual(['id', 'name'])
++  // Three independent callers can use the same credential concurrently.
++  const simultaneous = await Promise.all([invoke(reader, 'get_offer_resources'), invoke(reader, 'list_offers'), invoke(reader, 'get_offer_results')])
++  expect(simultaneous.every(result => result.status === 200 && !result.error)).toBe(true)
 +})
 +it('creates an inactive offer, reads it and updates with an explicit active flag through the real API', async () => {
 +  const created = await invoke(writer, 'create_offer', { name: 'MCP offer', config })

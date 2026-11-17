@@ -50,6 +50,7 @@ export function deploy(options, run = command) {
     const env = json(run, 'env-' + name, 'docker', ['inspect', '--format', '{{json .Config.Env}}', ids[name]])
     const actual = Object.fromEntries(env.map(x => { const i = x.indexOf('='); return [x.slice(0, i), x.slice(i + 1)] }))
     requireThat((actual.SHARED_OFFERS_COMPANY_ID ?? '') === company && (before.services[name].environment.SHARED_OFFERS_COMPANY_ID ?? '') === company, 'Company gate drift in running or configured services')
+    if (installed) requireThat(json(run, 'installed-image-' + name, 'docker', ['inspect', '--format', '{{json .Image}}', ids[name]]) === installed.image_id, 'Installed CRM image drift')
     for (const key of secrets) requireThat(actual[key] && actual[key] === before.services[name].environment[key], 'Running/configured credential drift')
   }
   const mounts = json(run, 'storage-mount', 'docker', ['inspect', '--format', '{{json .Mounts}}', ids['crm-api']])

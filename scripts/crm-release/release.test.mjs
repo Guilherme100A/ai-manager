@@ -95,6 +95,7 @@ function installedFixture(t) {
   fs.writeFileSync(path.join(f.state, 'active.json'), JSON.stringify(old))
   fs.writeFileSync(path.join(dir, 'override.yml'), override(old))
   for (const model of [f.before, f.after]) for (const name of ['crm-api', 'crm-worker']) model.services[name].environment.SHARED_OFFERS_COMPANY_ID = company
+  for (const name of ['crm-api', 'crm-worker']) f.responses.set('installed-image-' + name, () => JSON.stringify(old.image_id))
   return { ...f, company, old }
 }
 test('upgrading an activated historical release preserves company, storage and prior state backup', t => {
@@ -107,13 +108,15 @@ test('upgrading an activated historical release preserves company, storage and p
   assert.equal(f.calls.filter(c => c.label === 'journal-43').length, 3)
   assert.equal(fs.existsSync(path.join(f.state, 'maintenance.json')), false)
 })
-for (const mismatch of ['api-running', 'worker-config', 'candidate', 'persisted-tree', 'persisted-uuid']) test('upgrade refuses activation/state drift before stopping CRM: ' + mismatch, t => {
+for (const mismatch of ['api-running', 'worker-config', 'candidate', 'persisted-tree', 'persisted-uuid', 'api-image', 'worker-image']) test('upgrade refuses activation/state drift before stopping CRM: ' + mismatch, t => {
   const f = installedFixture(t)
   if (mismatch === 'api-running') f.responses.set('env-crm-api', () => JSON.stringify(Object.entries(f.before.services['crm-api'].environment).map(([k,v]) => k + '=' + (k === 'SHARED_OFFERS_COMPANY_ID' ? '' : v))))
   if (mismatch === 'worker-config') f.before.services['crm-worker'] = { environment: { ...f.before.services['crm-worker'].environment, SHARED_OFFERS_COMPANY_ID: '' } }
   if (mismatch === 'candidate') f.after.services['crm-api'].environment.SHARED_OFFERS_COMPANY_ID = ''
   if (mismatch === 'persisted-tree') fs.writeFileSync(path.join(f.state, 'active.json'), JSON.stringify({ ...f.old, source_tree: 'f'.repeat(40) }))
   if (mismatch === 'persisted-uuid') fs.writeFileSync(path.join(f.state, 'active.json'), JSON.stringify({ ...f.old, company_id: 'invalid' }))
+  if (mismatch === 'api-image') f.responses.set('installed-image-crm-api', () => JSON.stringify(image))
+  if (mismatch === 'worker-image') f.responses.set('installed-image-crm-worker', () => JSON.stringify(image))
   assert.throws(() => deploy(f.options, f.run))
   assert.ok(!f.calls.some(c => c.label === 'stop-only-crm'))
 })
