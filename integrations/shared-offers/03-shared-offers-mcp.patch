@@ -1,0 +1,382 @@
+diff --git a/apps/api/src/routes/offers/index.ts b/apps/api/src/routes/offers/index.ts
+index 2d3fa83..44e5715 100644
+--- a/apps/api/src/routes/offers/index.ts
++++ b/apps/api/src/routes/offers/index.ts
+@@ -55,6 +55,11 @@ export function offersRoutes(deps: ResolvedDeps) {
+   app.get('/api/offers', requirePerm('settings.products.view'), async (c) =>
+     c.json({ items: await service.list(getCompanyCtx(c).companyId) }),
+   )
++  app.get('/api/offers/:id', requirePerm('settings.products.view'), validate('param', z.object({ id: z.uuid() })), async (c) => {
++    const offer = await service.get(getCompanyCtx(c).companyId, c.req.param('id'))
++    if (!offer) throw new ApiError('NOT_FOUND', 'Oferta não encontrada')
++    return c.json({ offer })
++  })
+   app.post('/api/offers', requirePerm('settings.products.edit'), validate('json', body), async (c) => {
+     const offer = await service.save(
+       getCompanyCtx(c).companyId,
+diff --git a/docs/mcp-shared-offers.md b/docs/mcp-shared-offers.md
+new file mode 100644
+index 0000000..971cb70
+--- /dev/null
++++ b/docs/mcp-shared-offers.md
+@@ -0,0 +1,15 @@
++# MCP de Ofertas compartilhadas
++
++O mesmo servidor MCP do CRM expõe Ofertas para a empresa habilitada no servidor. As três pessoas continuam usando a mesma conta administradora; o MCP não cria novos usuários. Cada cliente pode autorizar sua própria sessão OAuth no mesmo conector.
++
++Em Configurações → MCP, crie um conector OAuth chamado **Ofertas compartilhadas**. Use acesso de escrita para configurar ofertas ou leitura para consultas. Copie a URL específica `/api/mcp/<id>` para o cliente de IA e entre com a conta do painel via SSO. Tokens, senhas e chaves não devem ser incluídos em conversas ou URLs.
++
++Ferramentas de consulta: `list_offers`, `get_offer`, `get_offer_resources`, `get_offer_results` e `list_conversation_offer_opportunities`. As ofertas do CRM são diferentes das capturadas pela Sonda (`list_spy_offers`).
++
++Ferramentas de configuração: `create_offer`, `update_offer` e `set_offer_connection_mode`. Consulte os recursos reais antes de criar e leia a oferta antes de editar. Uma oferta nova fica inativa quando `active` é omitido. A atualização exige a configuração completa e `active` explícito. Custos estão em centavos e exigem identificação; relatórios mantêm moedas distintas separadas.
++
++Ativar uma oferta ou a modalidade do chip muda o tratamento de novas mensagens: faça apenas por pedido explícito. Essas ferramentas não iniciam fluxos, não selecionam manualmente uma oferta para uma conversa, não pareiam chips e não enviam mensagens ou cobranças por si só.
++
++O catálogo respeita o nível da credencial e as permissões atuais do dono. Fora da empresa habilitada, com gate vazio/inválido ou sem vínculo do dono, as ferramentas de Ofertas não aparecem. Cada chamada continua passando pela API autenticada, com validação, isolamento da empresa e auditoria. Revogar o conector bloqueia o acesso; sair de uma sessão do navegador não revoga as outras pessoas.
++
++Para conferir a conexão: inicialize o MCP, execute `tools/list`, consulte `get_offer_resources` e `list_offers`. Não ative automações nem crie cobranças para testar acesso. A credencial de teste deve ser revogada ao final.
+diff --git a/packages/core/src/mcp/server.ts b/packages/core/src/mcp/server.ts
+index 5ab2ce6..05761b8 100644
+--- a/packages/core/src/mcp/server.ts
++++ b/packages/core/src/mcp/server.ts
+@@ -9,6 +9,7 @@ import { z } from 'zod'
+ import { CHAT_STATUSES, chats, connections, contacts, FLOW_STATUSES, flows, type Database } from '@crm/db'
+ import { registerAllApiTools } from './tools/index'
+ import type { McpApiContext } from './tools/shared'
++import { isSharedOffersCompany } from '../offers/policy'
+ 
+ export const MCP_SERVER_INFO = { name: 'leonas-crm', version: '1.0.0' } as const
+ /** Ferramentas da T94 (todas `readOnlyHint`), sempre presentes. */
+@@ -36,7 +37,10 @@ export function createMcpServer(ctx: McpContext): McpServer {
+     : ctx.api.access === 'write'
+       ? 'CRM da empresa: contatos, conversas, fluxos (criar, editar, validar, simular, ativar), funil, vendas, pixels da Meta, integrações de pagamento (XPag) e métricas. Ações rodam com as permissões do usuário dono da credencial. Antes de editar um fluxo, leia-o com get_flow e consulte get_flow_block_catalog; valide antes de ativar.'
+       : 'Leitura do CRM da empresa: contatos, conversas, fluxos, funil, vendas, pixels, integrações de pagamento e métricas, com as permissões do usuário dono da credencial. Credencial só leitura: nada é alterado.'
+-  const server = new McpServer(MCP_SERVER_INFO, { instructions })
++  const offersInstruction = ctx.api && isSharedOffersCompany(companyId)
++    ? ' Ofertas compartilhadas: consulte get_offer_resources e leia get_offer antes de configurar. Ofertas do CRM são diferentes da Sonda. Escrita depende da credencial e permissões. Ativar oferta ou modalidade de chip exige pedido explícito; não faça disparos ou cobranças para testar.'
++    : ''
++  const server = new McpServer(MCP_SERVER_INFO, { instructions: instructions + offersInstruction })
+ 
+   server.registerTool(
+     'list_contacts',
+@@ -149,7 +153,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
+     },
+   )
+ 
+-  if (ctx.api) registerAllApiTools(server, ctx.api)
++  if (ctx.api) registerAllApiTools(server, ctx.api, isSharedOffersCompany(companyId))
+   return server
+ }
+ 
+diff --git a/packages/core/src/mcp/tools/index.ts b/packages/core/src/mcp/tools/index.ts
+index c400f8a..41afe79 100644
+--- a/packages/core/src/mcp/tools/index.ts
++++ b/packages/core/src/mcp/tools/index.ts
+@@ -8,12 +8,13 @@ import { mediaTools } from './media'
+ import { insightsTools } from './insights'
+ import { paymentsTools } from './payments'
+ import { pixelsTools } from './pixels'
++import { offersTools } from './offers'
+ import { registerApiTools, type McpApiContext } from './shared'
+ 
+ export const MCP_API_TOOLS = [...conversationsTools, ...flowsTools, ...spyTools, ...audioTools, ...mediaTools, ...insightsTools, ...pixelsTools, ...paymentsTools] as const
+ 
+-export function registerAllApiTools(server: McpServer, ctx: McpApiContext): string[] {
+-  return registerApiTools(server, ctx, MCP_API_TOOLS)
++export function registerAllApiTools(server: McpServer, ctx: McpApiContext, sharedOffers = false): string[] {
++  return registerApiTools(server, ctx, sharedOffers ? [...MCP_API_TOOLS, ...offersTools] : MCP_API_TOOLS)
+ }
+ 
+ export type { HttpMethod, McpApi, McpApiContext, McpApiRequest, McpApiResponse } from './shared'
+diff --git a/packages/core/src/mcp/tools/offers.ts b/packages/core/src/mcp/tools/offers.ts
+new file mode 100644
+index 0000000..3fe35b8
+--- /dev/null
++++ b/packages/core/src/mcp/tools/offers.ts
+@@ -0,0 +1,55 @@
++// Reuse the authenticated API: tenant gate, permissions, validation and audit remain authoritative.
++import { z } from 'zod'
++import { compact, fromApi, tool, UUID, type ToolSpec } from './shared'
++import type { ZodRawShape } from 'zod'
++
++const VIEW = 'settings.products.view' as const
++const EDIT = 'settings.products.edit' as const
++const config = z.object({
++  owner_user_id: UUID.describe('Responsável cadastrado na empresa; use get_offer_resources.'),
++  product_id: UUID,
++  currency: z.string().regex(/^[A-Z]{3}$/).describe('Moeda ISO do produto, por exemplo BRL.'),
++  flow_id: UUID.describe('Fluxo ativo com versão publicada.'),
++  connection_ids: z.array(UUID).min(1).describe('Chips permitidos; o mesmo chip pode atender diversas ofertas.'),
++  integration_id: UUID.describe('Integração XPag cadastrada, sem informar segredos.'),
++  ad_account_id: UUID,
++  pixel_id: UUID,
++  origins: z.array(z.object({ type: z.enum(['source_id', 'link']), value: z.string().trim().min(1).max(200) })),
++  cost_cents: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable().optional(),
++  cost_label: z.string().optional().describe('Identificação obrigatória quando informar custo.'),
++}).strict()
++const offer = {
++  name: z.string().trim().min(1).max(120),
++  active: z.boolean().optional().describe('Ativação explícita. Omitido cria ou mantém a oferta inativa nesta gravação.'),
++  config,
++}
++
++export const offersTools: readonly ToolSpec<ZodRawShape>[] = [
++  tool({ name: 'list_offers', title: 'Listar ofertas compartilhadas', perm: VIEW,
++    description: 'Ofertas comerciais do CRM da empresa habilitada, com configuração e versão. Não são ofertas capturadas pela Sonda.',
++    run: async (_, api) => fromApi(await api.request('GET', '/api/offers')) }),
++  tool({ name: 'get_offer', title: 'Consultar oferta compartilhada', perm: VIEW,
++    description: 'Leia a configuração atual antes de editar uma oferta. Retorna apenas oferta desta empresa.', input: { id: UUID },
++    run: async ({ id }, api) => fromApi(await api.request('GET', `/api/offers/${id}`)) }),
++  tool({ name: 'get_offer_resources', title: 'Consultar recursos de Ofertas', perm: VIEW,
++    description: 'IDs reais de responsáveis, produtos, fluxos publicados, chips, integrações XPag, contas, pixels e links da empresa. Sem tokens ou senhas. Use estes IDs ao configurar ofertas.',
++    run: async (_, api) => fromApi(await api.request('GET', '/api/offers/resources')) }),
++  tool({ name: 'get_offer_results', title: 'Consultar resultados de Ofertas', perm: VIEW,
++    description: 'Vendas, receita e lucro estimado por oferta, responsável histórico e moeda. Custos incompletos continuam indicados; não soma moedas distintas.',
++    input: { owner_user_id: UUID.optional(), offer_id: UUID.optional() },
++    run: async ({ owner_user_id, offer_id }, api) => fromApi(await api.request('GET', '/api/offers/results', { query: compact({ owner: owner_user_id, offer: offer_id }) })) }),
++  tool({ name: 'create_offer', title: 'Criar oferta compartilhada', perm: EDIT, kind: 'write',
++    description: 'Cria uma oferta comercial. Consulte get_offer_resources antes. Inativa por padrão; active=true habilita sua resolução em chips já geridos. Não inicia execução ou envia mensagem nesta chamada.', input: offer,
++    run: async (args, api) => fromApi(await api.request('POST', '/api/offers', { body: { ...args, active: args.active ?? false } })) }),
++  tool({ name: 'update_offer', title: 'Atualizar oferta compartilhada', perm: EDIT, kind: 'write',
++    description: 'Substitui a configuração inteira e incrementa a versão. Leia get_offer antes e informe todos os recursos, origens e active explicitamente. Não modifica snapshots de oportunidades anteriores.',
++    input: { id: UUID, ...offer, active: z.boolean() },
++    run: async ({ id, ...args }, api) => fromApi(await api.request('PUT', `/api/offers/${id}`, { body: args })) }),
++  tool({ name: 'set_offer_connection_mode', title: 'Configurar modalidade de ofertas do chip', perm: EDIT, kind: 'write',
++    description: 'Ativa ou desativa a modalidade de ofertas em um chip desta empresa. Ativar altera o tratamento de novas mensagens e suprime gatilhos legados; exige pedido explícito. Não pareia, reinicia ou envia mensagem pelo chip.',
++    input: { connection_id: UUID, enabled: z.boolean() },
++    run: async ({ connection_id, enabled }, api) => fromApi(await api.request('PUT', `/api/offers/chips/${connection_id}`, { body: { enabled } })) }),
++  tool({ name: 'list_conversation_offer_opportunities', title: 'Consultar ofertas da conversa', perm: 'chat.view',
++    description: 'Histórico de oportunidades e evidências congeladas desta conversa. Consulta apenas; não seleciona oferta nem inicia fluxo.', input: { conversation_id: UUID },
++    run: async ({ conversation_id }, api) => fromApi(await api.request('GET', `/api/chats/${conversation_id}/offers`)) }),
++]
+diff --git a/packages/core/src/mcp/tools/offers.unit.test.ts b/packages/core/src/mcp/tools/offers.unit.test.ts
+new file mode 100644
+index 0000000..6c7e07e
+--- /dev/null
++++ b/packages/core/src/mcp/tools/offers.unit.test.ts
+@@ -0,0 +1,91 @@
++import { Client } from '@modelcontextprotocol/sdk/client/index.js'
++import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
++import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import type { PermissionKey } from '@crm/shared'
++import type { Database } from '@crm/db'
++import { createMcpServer } from '../server'
++import { offersTools } from './offers'
++import { registerApiTools, type McpApiRequest } from './shared'
++
++const ID = '3f1b2c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d'
++const OTHER = '4f1b2c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d'
++const config = { owner_user_id: ID, product_id: ID, currency: 'BRL', flow_id: ID, connection_ids: [ID], integration_id: ID, ad_account_id: ID, pixel_id: ID, origins: [{ type: 'source_id', value: 'AD-A' }] }
++const closers: (() => Promise<void>)[] = []
++afterEach(async () => { await Promise.all(closers.splice(0).map(close => close())); vi.unstubAllEnvs() })
++async function connect(access: 'read' | 'write' = 'write', perms: PermissionKey[] = ['settings.products.view', 'settings.products.edit', 'chat.view'], reply = { status: 200, body: { ok: true } as unknown }) {
++  const calls: { method: string; path: string; req?: McpApiRequest }[] = []
++  const server = new McpServer({ name: 'test', version: '1' })
++  registerApiTools(server, { access, perms: new Set(perms), api: { request: async (method, path, req) => { calls.push({ method, path, req }); return reply } } }, offersTools)
++  const client = await link(server)
++  return { client, calls, call: (name: string, args: Record<string, unknown> = {}) => client.callTool({ name, arguments: args }) }
++}
++async function link(server: McpServer) {
++  const client = new Client({ name: 'client', version: '1' }), [a, b] = InMemoryTransport.createLinkedPair()
++  await Promise.all([server.connect(a), client.connect(b)])
++  closers.push(async () => { await client.close(); await server.close() })
++  return client
++}
++describe('shared Offers MCP', () => {
++  it('maps all eight tools to authenticated routes with the exact body/query', async () => {
++    const { call, calls } = await connect()
++    await call('list_offers'); await call('get_offer', { id: ID }); await call('get_offer_resources')
++    await call('get_offer_results', { owner_user_id: ID, offer_id: OTHER })
++    await call('create_offer', { name: 'Oferta', config })
++    await call('update_offer', { id: ID, name: 'Oferta nova', active: true, config })
++    await call('set_offer_connection_mode', { connection_id: ID, enabled: false })
++    await call('list_conversation_offer_opportunities', { conversation_id: ID })
++    expect(calls.map(c => [c.method, c.path])).toEqual([
++      ['GET', '/api/offers'], ['GET', `/api/offers/${ID}`], ['GET', '/api/offers/resources'], ['GET', '/api/offers/results'],
++      ['POST', '/api/offers'], ['PUT', `/api/offers/${ID}`], ['PUT', `/api/offers/chips/${ID}`], ['GET', `/api/chats/${ID}/offers`],
++    ])
++    expect(calls[3]!.req).toEqual({ query: { owner: ID, offer: OTHER }, write: false })
++    expect(calls[4]!.req).toEqual({ body: { name: 'Oferta', config, active: false }, write: true })
++    expect(calls[5]!.req).toEqual({ body: { name: 'Oferta nova', config, active: true }, write: true })
++    expect(calls[6]!.req).toEqual({ body: { enabled: false }, write: true })
++    expect(calls.filter(c => c.req?.write).length).toBe(3)
++  })
++  it('read credentials expose five reads and cannot call writes', async () => {
++    const { client, call, calls } = await connect('read')
++    const tools = (await client.listTools()).tools
++    expect(tools.map(t => t.name).sort()).toEqual(['get_offer', 'get_offer_resources', 'get_offer_results', 'list_conversation_offer_opportunities', 'list_offers'])
++    expect(tools.every(t => t.annotations?.readOnlyHint === true)).toBe(true)
++    expect((await call('set_offer_connection_mode', { connection_id: ID, enabled: true })).isError).toBe(true)
++    expect(calls).toHaveLength(0)
++  })
++  it('permissions filter product reads, writes and conversation history separately', async () => {
++    const { client } = await connect('write', ['chat.view'])
++    expect((await client.listTools()).tools.map(t => t.name)).toEqual(['list_conversation_offer_opportunities'])
++    const none = await connect('write', [])
++    expect((await none.client.listTools()).tools).toEqual([])
++  })
++  it.each([
++    ['get_offer', { id: '../other' }],
++    ['create_offer', { name: 'O', config: { ...config, connection_ids: [] } }],
++    ['create_offer', { name: 'O', config: { ...config, currency: 'brl' } }],
++    ['create_offer', { name: 'O', config: { ...config, access_token: 'do-not-store' } }],
++    ['update_offer', { id: ID, name: 'O', config }],
++    ['set_offer_connection_mode', { connection_id: ID, enabled: 'true' }],
++  ])('rejects invalid input for %s before calling the API', async (name, args) => {
++    const { call, calls } = await connect()
++    expect((await call(name as string, args as Record<string, unknown>)).isError).toBe(true)
++    expect(calls).toHaveLength(0)
++  })
++  it('preserves API denial instead of presenting success', async () => {
++    const { call } = await connect('write', ['settings.products.view'], { status: 404, body: { error: { code: 'NOT_FOUND', message: 'Recurso não encontrado' } } })
++    const result = await call('list_offers')
++    expect(result.isError).toBe(true)
++    expect(JSON.parse((result.content as { text: string }[])[0]!.text)).toMatchObject({ status: 404, error: { code: 'NOT_FOUND' } })
++  })
++  it('actual server catalog hides Offers outside the pinned company, with empty/invalid gate or without an actor', async () => {
++    const api = { access: 'write' as const, perms: new Set<PermissionKey>(['settings.products.view', 'settings.products.edit']), api: { request: async () => ({ status: 200, body: {} }) } }
++    for (const gate of ['', 'invalid', OTHER, ID]) {
++      vi.stubEnv('SHARED_OFFERS_COMPANY_ID', gate)
++      const client = await link(createMcpServer({ db: {} as Database, companyId: ID, api }))
++      expect((await client.listTools()).tools.some(t => t.name === 'list_offers')).toBe(gate === ID)
++    }
++    vi.stubEnv('SHARED_OFFERS_COMPANY_ID', ID)
++    const client = await link(createMcpServer({ db: {} as Database, companyId: ID }))
++    expect((await client.listTools()).tools.some(t => t.name === 'list_offers')).toBe(false)
++  })
++})
+diff --git a/packages/core/src/offers/service.ts b/packages/core/src/offers/service.ts
+index 90552ef..36aba48 100644
+--- a/packages/core/src/offers/service.ts
++++ b/packages/core/src/offers/service.ts
+@@ -60,6 +60,10 @@ const json = (v: unknown) => JSON.stringify(v)
+ 
+ export class OffersService {
+   constructor(readonly db: Database) {}
++  async get(company: string, id: string) {
++    requireSharedOffersCompany(company)
++    return (await offerRows<OfferRow>(this.db, sql`select * from crm.offers where company_id=${company} and id=${id} limit 1`))[0] ?? null
++  }
+   list(company: string) {
+     requireSharedOffersCompany(company)
+     return offerRows<OfferRow>(this.db, sql`select * from crm.offers where company_id=${company} order by created_at`)
+diff --git a/tests/acceptance/T125/mcp-offers.test.ts b/tests/acceptance/T125/mcp-offers.test.ts
+new file mode 100644
+index 0000000..e108102
+--- /dev/null
++++ b/tests/acceptance/T125/mcp-offers.test.ts
+@@ -0,0 +1,113 @@
++// Disposable PostgreSQL/Redis and fake providers, executed on CI only.
++import { randomUUID } from 'node:crypto'
++import { afterAll, beforeAll, expect, it } from 'vitest'
++import { connectMeta, salesPixel, startSystem, tenant, type System, type Tenant } from './setup'
++let sys: System, t: Tenant, other: Tenant, writer: string, reader: string, credentialId: string, config: Record<string, unknown>, offer: any
++const priorGate = process.env.SHARED_OFFERS_COMPANY_ID
++let sequence = 0
++async function rpc(token: string, method: string, params: Record<string, unknown> = {}) {
++  const response = await sys.app.request('/api/mcp', { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-06-18' }, body: JSON.stringify({ jsonrpc: '2.0', id: ++sequence, method, params }) })
++  return { status: response.status, body: await response.json() as any }
++}
++async function invoke(token: string, name: string, args: Record<string, unknown> = {}) {
++  const response = await rpc(token, 'tools/call', { name, arguments: args })
++  const result = response.body.result
++  return { ...response, error: Boolean(response.body.error || result?.isError), data: result?.content?.[0]?.text ? JSON.parse(result.content[0].text) : null }
++}
++const names = async (token: string) => (await rpc(token, 'tools/list')).body.result.tools.map((tool: any) => tool.name)
++beforeAll(async () => {
++  sys = await startSystem(); t = await tenant(sys); other = await tenant(sys)
++  process.env.SHARED_OFFERS_COMPANY_ID = t.companyId
++  const account = (await connectMeta(sys, t, 1))[0]!.localId, pixel = await salesPixel(sys, t)
++  const product = await t.c.post('/api/products', { name: 'MCP product', currency: 'BRL', price_min_cents: 100, price_max_cents: 100, price_fallback_cents: 100 })
++  expect(product.status).toBe(201)
++  const integration = await t.c.post('/api/payment-integrations', { label: 'MCP fake XPag', gateway: 'xpag', client_id: 'fake-mcp-offers', client_secret: 'synthetic-never-contact-provider' })
++  expect(integration.status).toBe(201)
++  // Resource fixture only: no run is ever started by these tests.
++  const [flow] = await sys.q("insert into crm.flows(company_id,name,status,published_version) values($1,'MCP fixture published flow','active',1) returning id", [t.companyId])
++  const userId = (await t.c.get('/api/auth/profile')).body.user.id
++  config = { owner_user_id: userId, product_id: product.body.product.id, currency: 'BRL', flow_id: flow.id, connection_ids: [t.connectionId], integration_id: integration.body.integration.id, ad_account_id: account, pixel_id: pixel.id, origins: [] }
++  const write = await t.c.post('/api/mcp_credentials', { name: 'MCP Offers writer', access: 'write' })
++  const read = await t.c.post('/api/mcp_credentials', { name: 'MCP Offers reader', access: 'read' })
++  expect(write.status).toBe(201); expect(read.status).toBe(201)
++  writer = write.body.token; reader = read.body.token; credentialId = write.body.mcp_credential.id
++}, 180_000)
++afterAll(async () => {
++  if (priorGate === undefined) delete process.env.SHARED_OFFERS_COMPANY_ID
++  else process.env.SHARED_OFFERS_COMPANY_ID = priorGate
++  await sys?.close()
++}, 120_000)
++
++it('connects through MCP and lists permitted resources without secrets', async () => {
++  expect((await rpc(reader, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'offers-test', version: '1' } })).status).toBe(200)
++  expect(await names(reader)).toContain('list_offers')
++  expect(await names(reader)).not.toContain('create_offer')
++  const resources = await invoke(reader, 'get_offer_resources')
++  expect(resources.error).toBe(false)
++  expect(resources.data.connections.map((x: any) => x.id)).toContain(t.connectionId)
++  expect(JSON.stringify(resources.data)).not.toContain('synthetic-never-contact-provider')
++  expect(Object.keys(resources.data.integrations[0]).sort()).toEqual(['id', 'name'])
++})
++it('creates an inactive offer, reads it and updates with an explicit active flag through the real API', async () => {
++  const created = await invoke(writer, 'create_offer', { name: 'MCP offer', config })
++  expect(created.error, JSON.stringify(created.data)).toBe(false)
++  offer = created.data.offer
++  expect(offer).toMatchObject({ active: false, company_id: t.companyId, version: 1 })
++  expect((await invoke(reader, 'get_offer', { id: offer.id })).data.offer).toEqual(offer)
++  const updated = await invoke(writer, 'update_offer', { id: offer.id, name: 'MCP edited', active: false, config })
++  expect(updated.error, JSON.stringify(updated.data)).toBe(false)
++  expect(updated.data.offer).toMatchObject({ id: offer.id, name: 'MCP edited', active: false, version: 2 })
++  expect((await invoke(reader, 'list_offers')).data.items.map((x: any) => x.id)).toContain(offer.id)
++  const audits = await sys.q("select detail from crm.audit_logs where company_id=$1 and action in ('offers.create','offers.update')", [t.companyId])
++  expect(audits.some((x: any) => x.detail?.mcp_credential_id === credentialId)).toBe(true)
++})
++it('read token cannot change a chip or create offers', async () => {
++  expect((await invoke(reader, 'create_offer', { name: 'forbidden', config })).error).toBe(true)
++  expect((await invoke(reader, 'set_offer_connection_mode', { connection_id: t.connectionId, enabled: true })).error).toBe(true)
++  expect((await sys.q('select * from crm.offer_connections where company_id=$1', [t.companyId]))).toHaveLength(0)
++})
++it('manages the same chip explicitly without starting a flow or payment', async () => {
++  expect((await invoke(writer, 'set_offer_connection_mode', { connection_id: t.connectionId, enabled: true })).error).toBe(false)
++  expect((await invoke(reader, 'get_offer_resources')).data.managed_connections).toContain(t.connectionId)
++  expect((await invoke(writer, 'set_offer_connection_mode', { connection_id: t.connectionId, enabled: false })).error).toBe(false)
++  expect((await invoke(reader, 'get_offer_resources')).data.managed_connections).not.toContain(t.connectionId)
++  expect((await sys.q('select id from crm.flow_runs where company_id=$1', [t.companyId]))).toHaveLength(0)
++  expect((await sys.q('select id from crm.payment_charges where company_id=$1', [t.companyId]))).toHaveLength(0)
++})
++it('rejects foreign resources and unavailable offers while keeping results empty', async () => {
++  const denied = await invoke(writer, 'create_offer', { name: 'foreign', config: { ...config, connection_ids: [other.connectionId] } })
++  expect(denied.error).toBe(true); expect(denied.data.status).toBe(422)
++  const missing = await invoke(reader, 'get_offer', { id: randomUUID() })
++  expect(missing.error).toBe(true); expect(missing.data.status).toBe(404)
++  expect((await invoke(reader, 'get_offer_results', { owner_user_id: config.owner_user_id, offer_id: offer.id })).data.items).toEqual([])
++})
++it('hides tools from another company and enforces the gate again after catalog discovery', async () => {
++  const foreign = await other.c.post('/api/mcp_credentials', { name: 'Foreign MCP', access: 'write' })
++  expect(await names(foreign.body.token)).not.toContain('list_offers')
++  expect((await invoke(foreign.body.token, 'get_offer', { id: offer.id })).error).toBe(true)
++  for (const gate of ['', 'invalid', other.companyId]) {
++    process.env.SHARED_OFFERS_COMPANY_ID = gate
++    expect(await names(writer)).not.toContain('list_offers')
++    expect((await invoke(writer, 'list_offers')).error).toBe(true)
++    expect((await t.c.get('/api/offers/' + offer.id)).status).toBe(404)
++  }
++  process.env.SHARED_OFFERS_COMPANY_ID = t.companyId
++})
++it('rechecks owner permissions and membership for every MCP call', async () => {
++  const userId = config.owner_user_id
++  await sys.q("update crm.company_members set role='member',permission_keys=ARRAY[]::text[] where company_id=$1 and user_id=$2", [t.companyId, userId])
++  expect(await names(writer)).not.toContain('create_offer')
++  expect((await invoke(writer, 'create_offer', { name: 'forbidden role', config })).error).toBe(true)
++  await sys.q("update crm.company_members set role='owner' where company_id=$1 and user_id=$2", [t.companyId, userId])
++  expect(await names(writer)).toContain('create_offer')
++  await sys.q('delete from crm.company_members where company_id=$1 and user_id=$2', [t.companyId, userId])
++  expect(await names(writer)).not.toContain('list_offers')
++  expect((await invoke(writer, 'list_offers')).error).toBe(true)
++})
++it('revoked MCP credentials are refused immediately', async () => {
++  // A separate reader retains its owner; writer lost membership in the preceding case.
++  const made = await other.c.post('/api/mcp_credentials', { name: 'revocation', access: 'read' })
++  expect((await rpc(made.body.token, 'tools/list')).status).toBe(200)
++  expect((await other.c.delete('/api/mcp_credentials/' + made.body.mcp_credential.id)).status).toBe(200)
++  expect((await rpc(made.body.token, 'tools/list')).status).toBe(401)
++})
