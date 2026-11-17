@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/Guilherme100A/crm-copy.git",
   "base_sha": "acf78e2da49865afa06fe6a4cee77bcf0e888152",
-  "expected_tree": "fe543ce1868ca62adcbd037de0358cb7f99fc558",
+  "expected_tree": "6844b56c32af325ff203014afa0a2bcdc5ea9688",
   "sanitization": {
     "excluded_files": [
       "scripts/elevenlabs-account-diagnose.ts",
@@ -28,7 +28,7 @@
     ],
     "reason": "Exclude unrelated operator scripts/private deployment context and audit-only harnesses; replace operational hosts in documentation and URL fixtures with reserved example.test hosts. Original local source preserved.",
     "baseline_tree": "539e4a6dac07e50188e418d0e1a3d669e5f6d687",
-    "final_tree": "fe543ce1868ca62adcbd037de0358cb7f99fc558"
+    "final_tree": "6844b56c32af325ff203014afa0a2bcdc5ea9688"
   },
   "test_only_changes": [
     {
@@ -227,8 +227,8 @@
     {
       "file": "04-mcp-chip-pairing.patch",
       "description": "Frozen Dev chip MCP component plus integrated tool registration: explicit panel chip import, safe QR pairing, encrypted proxy, permissions and tests. No migrations or operational chip changes.",
-      "sha256": "3233beb02bf9abd3cb59bf9a95942909640a5d00519d56f734c80904a866c1b8",
-      "bytes": 52457,
+      "sha256": "e0e9dd18df15908126cda7e224c6905b6b3af9ef8dd52bf7692a3d7bbcbe5223",
+      "bytes": 52889,
       "files": [
         "apps/api/src/routes/connections/index.ts",
         "apps/api/src/routes/mcp/mcp-chip-pairing.db.unit.test.ts",

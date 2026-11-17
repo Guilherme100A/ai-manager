@@ -676,10 +676,18 @@ index b75a381..b04bcd5 100644
      list: () => invoke<SessionView[]>('sessions.list', []),
      get: (id) => invoke<SessionView>('sessions.get', [id]),
 diff --git a/packages/wa-gateway-rpc/src/gateway.unit.test.ts b/packages/wa-gateway-rpc/src/gateway.unit.test.ts
-index e55e64e..c87dd06 100644
+index e55e64e..5ee80f2 100644
 --- a/packages/wa-gateway-rpc/src/gateway.unit.test.ts
 +++ b/packages/wa-gateway-rpc/src/gateway.unit.test.ts
-@@ -38,6 +38,16 @@ afterEach(async () => {
+@@ -8,6 +8,7 @@ import { CapabilityNotSupportedError, RemoteRpcError, WorkerUnavailableError } f
+ import { createRpcGateway } from './gateway'
+ import { crmProfile, registerGatewayProfile, resolveGatewayProfile, UnknownGatewayProfileError, type GatewayProfile } from './profiles'
+ import type { FetchLike } from './rpc-client'
++import { aiManagerProfile } from './profiles/ai-manager/profile'
+ 
+ interface Call {
+   url: string
+@@ -38,6 +39,16 @@ afterEach(async () => {
  })
  
  describe('RPC: formato da chamada e perfil crm', () => {
@@ -688,7 +696,7 @@ index e55e64e..c87dd06 100644
 +    const legacy = gw(f.fn)
 +    expect(legacy.sessions.preparePairing).toBeUndefined()
 +    expect(f.calls).toHaveLength(0)
-+    const current = gw(f.fn, { profile: 'ai-manager' })
++    const current = gw(f.fn, { profile: aiManagerProfile })
 +    const proxy = { protocol: 'socks5' as const, host: 'proxy.test', port: 1080, username: 'operator', password: 'private' }
 +    expect(await current.sessions.preparePairing!('chip-a', { proxy })).toEqual({ id: 'chip-a', status: 'NEW' })
 +    expect(f.calls[0]!.body).toEqual({ target: 'sessions', method: 'preparePairing', args: ['chip-a', { proxy }] })
