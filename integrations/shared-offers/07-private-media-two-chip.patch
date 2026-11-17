@@ -242,12 +242,27 @@ index 0000000000000000000000000000000000000000..aadb8298de4e42d3204e8cae240138f7
 +autorizados, pagamento ficticio e uma resposta nova com chave idempotente; nunca
 +simulacao offline como prova de entrega.
 diff --git a/packages/core/src/chats/ingest/chat-ingest.db.unit.test.ts b/packages/core/src/chats/ingest/chat-ingest.db.unit.test.ts
-index f15b072bbf2c0d66223721f9815d8251a7783c12..3df5690a1c89eb06186933d0b0e088f671e49e87 100644
+index f15b072bbf2c0d66223721f9815d8251a7783c12..326d53a89ccb856b7823545191373f7266c4c966 100644
 --- a/packages/core/src/chats/ingest/chat-ingest.db.unit.test.ts
 +++ b/packages/core/src/chats/ingest/chat-ingest.db.unit.test.ts
-@@ -55,6 +55,43 @@ async function setup(settings: Record<string, unknown> = {}) {
+@@ -6,7 +6,7 @@ import type { IncomingMessage, WaEvent } from '@crm/wa-port'
+ import { FakeWaGateway } from '@crm/wa-port/testing'
+ import { and, eq } from 'drizzle-orm'
+ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+-import { ChatIngest, type CrmInboundEvent } from './chat-ingest'
++import { ChatIngest, type CrmInboundEvent, type IngestOutcome } from './chat-ingest'
+ 
+ let temp: TempDatabase
+ let db: Database
+@@ -54,7 +54,50 @@ async function setup(settings: Record<string, unknown> = {}) {
+   return { companyId, connectionId, sessionId, gw, published, inbound, ingest, msg, chatOf }
  }
  
++function single(outcome: IngestOutcome | IngestOutcome[]): IngestOutcome {
++  if (Array.isArray(outcome)) throw new Error('Expected one event outcome, not history batch')
++  return outcome
++}
++
  describe('ChatIngest', () => {
 +  it('same company: sender outbound must not suppress inbound on the other chip or its wait notification', async () => {
 +    const s = await setup()
@@ -257,11 +272,11 @@ index f15b072bbf2c0d66223721f9815d8251a7783c12..3df5690a1c89eb06186933d0b0e088f6
 +    const id = 'WA-two-chips-' + randomBytes(4).toString('hex')
 +    await db.insert(messages).values({ companyId: s.companyId, chatId: outChat!.id, direction: 'outbound', senderType: 'user', type: 'text', status: 'delivered', waMessageId: id })
 +    const event = s.msg({ id, text: 'fixture response' })
-+    const result = await s.ingest.handle(event)
++    const result = single(await s.ingest.handle(event))
 +    expect(result.status).toBe('stored')
 +    expect(s.inbound).toHaveLength(1)
 +    expect(s.inbound[0]).toMatchObject({ connection_id: s.connectionId, wa_message_id: id, text: 'fixture response' })
-+    expect((await s.ingest.handle(event)).status).toBe('duplicate')
++    expect(single(await s.ingest.handle(event)).status).toBe('duplicate')
 +    expect(s.inbound).toHaveLength(1)
 +    const rows = await db.select().from(messages).where(and(eq(messages.companyId, s.companyId), eq(messages.waMessageId, id)))
 +    expect(rows).toHaveLength(2)
@@ -272,18 +287,19 @@ index f15b072bbf2c0d66223721f9815d8251a7783c12..3df5690a1c89eb06186933d0b0e088f6
 +
 +  it('inbound winning the race does not strand sender processing; sent/delivered stay on sender connection', async () => {
 +    const s = await setup(), id = 'WA-race-' + randomBytes(4).toString('hex')
-+    const received = await s.ingest.handle(s.msg({ id })) as { messageId: string }
++    const received = single(await s.ingest.handle(s.msg({ id })))
++    if (received.status !== 'stored') throw new Error('Expected stored inbound fixture')
 +    const [other] = await db.insert(connections).values({ companyId: s.companyId, sessionId: 'out-' + randomBytes(4).toString('hex'), name: 'Sender' }).returning()
 +    const [contact] = await db.insert(contacts).values({ companyId: s.companyId, name: 'Fixture' }).returning()
 +    const [chat] = await db.insert(chats).values({ companyId: s.companyId, connectionId: other!.id, contactId: contact!.id }).returning()
 +    const pipeline = 'pipeline-' + randomBytes(4).toString('hex')
 +    const [out] = await db.insert(messages).values({ companyId: s.companyId, chatId: chat!.id, direction: 'outbound', senderType: 'flow', type: 'text', status: 'processing', pipelineMessageId: pipeline }).returning()
 +    const sender = new ChatIngest({ db, resolveConnection: async () => ({ companyId: s.companyId, connectionId: other!.id }) })
-+    for (const status of ['sent', 'delivered'] as const) expect((await sender.handle({ v: 1, type: 'message.status', session_id: other!.sessionId, at: AT, message_id: pipeline, transport_message_id: id, status })).status).toBe('updated')
++    for (const status of ['sent', 'delivered'] as const) expect(single(await sender.handle({ v: 1, type: 'message.status', session_id: other!.sessionId, at: AT, message_id: pipeline, transport_message_id: id, status })).status).toBe('updated')
 +    expect((await db.select().from(messages).where(eq(messages.id, out!.id)))[0]).toMatchObject({ status: 'delivered', waMessageId: id })
 +    expect((await db.select().from(messages).where(eq(messages.id, received.messageId)))[0]).toMatchObject({ status: 'received', direction: 'inbound' })
 +    // Outra sessao nao pode atualizar pela chave de pipeline, nem por fallback ao ID WA.
-+    expect((await s.ingest.handle({ v: 1, type: 'message.status', session_id: s.sessionId, at: AT, message_id: pipeline, transport_message_id: id, status: 'read' })).status).toBe('ignored')
++    expect(single(await s.ingest.handle({ v: 1, type: 'message.status', session_id: s.sessionId, at: AT, message_id: pipeline, transport_message_id: id, status: 'read' })).status).toBe('ignored')
 +    expect((await db.select().from(messages).where(eq(messages.id, out!.id)))[0]!.status).toBe('delivered')
 +  })
    it('1ª mensagem cria contato (consentimento inbound), chat waiting e eventos; reentrega não duplica (AC-01/02)', async () => {

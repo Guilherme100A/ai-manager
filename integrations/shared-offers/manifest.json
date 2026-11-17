@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/Guilherme100A/crm-copy.git",
   "base_sha": "acf78e2da49865afa06fe6a4cee77bcf0e888152",
-  "expected_tree": "409dc87ef363f30342c5ee4f43fd451738cb3f22",
+  "expected_tree": "001322204b070244d937d2a12e1ba02caf1d4b18",
   "sanitization": {
     "excluded_files": [
       "scripts/elevenlabs-account-diagnose.ts",
@@ -28,7 +28,7 @@
     ],
     "reason": "Exclude unrelated operator scripts/private deployment context and audit-only harnesses; replace operational hosts in documentation and URL fixtures with reserved example.test hosts. Original local source preserved.",
     "baseline_tree": "539e4a6dac07e50188e418d0e1a3d669e5f6d687",
-    "final_tree": "409dc87ef363f30342c5ee4f43fd451738cb3f22"
+    "final_tree": "001322204b070244d937d2a12e1ba02caf1d4b18"
   },
   "test_only_changes": [
     {
@@ -306,8 +306,8 @@
     {
       "file": "07-private-media-two-chip.patch",
       "description": "Private authenticated CRM media delivery and per-chat WhatsApp identity for two chips; scoped ACKs, guarded rollout and regression tests.",
-      "sha256": "a42e169221e61c0f7717f47d77aaaa6d75d513789c746d606f6358cbc0cd020b",
-      "bytes": 30969,
+      "sha256": "0cf1def1130f18a48ecc6a4faa28c88116627b1a5798e825047159fa21f3c69d",
+      "bytes": 31791,
       "files": [
         "apps/api/src/routes/index.ts",
         "apps/api/src/routes/internal-wa-media/index.ts",

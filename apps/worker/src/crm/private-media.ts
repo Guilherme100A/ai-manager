@@ -34,9 +34,11 @@ export function privateCrmMediaResolver(opts: { baseUrl: string; token: string; 
     if (!ref) return content
     const { kind, sha, c } = ref
     const response = await fetchMedia(sessionId, sha)
+    const body = response.body
+    if (!body) throw new Error('CRM_PRIVATE_MEDIA_UNAVAILABLE')
     const length = Number(response.headers.get('content-length') ?? '0')
-    if (!Number.isFinite(length) || length > MAX_BYTES) { await response.body.cancel(); throw new Error('CRM_PRIVATE_MEDIA_TOO_LARGE') }
-    const reader = response.body.getReader(), chunks: Buffer[] = []
+    if (!Number.isFinite(length) || length > MAX_BYTES) { await body.cancel(); throw new Error('CRM_PRIVATE_MEDIA_TOO_LARGE') }
+    const reader = body.getReader(), chunks: Buffer[] = []
     let size = 0
     try {
       for (;;) {
