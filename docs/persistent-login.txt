@@ -1,0 +1,49 @@
+Login persistente do painel e entrada pelo CRM
+
+O usuario pode marcar Manter conectado neste dispositivo por 30 dias na tela
+do painel e em mcp-login.html. A opcao vem desmarcada, preservando o login atual.
+Desmarcada: token em memoria/sessionStorage e validade configurada no servidor
+(padrao 12 horas); fechar a sessao do navegador exige entrar novamente no painel.
+Marcada: token e expiresAt em localStorage, chave wsm.remembered-session, por no
+maximo 30 dias fixos. O cliente recupera a sessao ao abrir novamente e o servidor
+continua validando assinatura, prazo, conta e registro ativo em cada requisicao.
+A senha nunca e salva pelo aplicativo no storage.
+
+O armazenamento continua usando Bearer explicito, evitando introduzir
+autenticacao por cookie na API do painel. O token persistido e uma credencial
+legivel pelo JavaScript da mesma origem; usar a opcao somente no dispositivo
+escolhido pelo usuario. Nao registrar tokens em logs, capturas ou artefatos.
+Storage bloqueado nao impede a sessao atual; a persistencia depende do navegador.
+
+Migration publica 0016_dashboard_login_sessions: registra identificador, hash
+SHA256 do token, usuario, emissao, expiracao e revogacao. Nao guarda token cru,
+senha ou dados de clientes. Registro ausente, expiracao alterada ou revogacao
+recusam o acesso. Erro de banco nao habilita fallback para token lembrado.
+O logout revoga somente aquele identificador no banco, sobrevivendo ao restart
+da API; as outras sessoes da mesma conta continuam validas. AUTH_SECRET precisa
+permanecer estavel para manter assinaturas validas entre restarts. Mudar o segredo
+invalida os tokens anteriores. Nenhum usuario adicional e criado.
+
+O logout e expiracao removem a copia local. Uma resposta 401 atrasada para um
+token anterior nao apaga um login mais novo. O comportamento anterior de sair
+localmente quando a API esta indisponivel foi preservado; nesse caso nao se
+declara revogacao remota confirmada.
+
+O CRM ja usa cookie HttpOnly persistente de 30 dias com sessoes individuais e
+logout proprio. Esse contrato permanece: o checkbox controla a lembranca do
+painel, inclusive quando se entra por mcp-login. O fluxo painel -> SSO -> CRM
+continua usando JWT de uso unico e vida curta. Nenhuma credencial permanente do
+MCP e alterada; OAuth/consentimento/permissoes continuam na API existente.
+
+CRM SEM DELTA: manifesto completo reconstruido com tree
+6844b56c32af325ff203014afa0a2bcdc5ea9688. Nao atualizar imagem CRM, gate, storage,
+deps, SPA ou driver externo para esta mudanca. Publicacao do painel deve usar
+o bootstrap/wrapper externo existente e aplicar a migration publica antes da API.
+Nao editar fontes/patches congelados do MCPchip.
+
+Testes previstos: opcao marcada/desmarcada, prazo no servidor, credencial
+invalida, sessao expirada, registro ausente, tres sessoes de uma conta e logout
+isolado. Teste de integracao inicia e encerra processos Node reais sobre banco
+descartavel, comprovando credenciais validas/revogadas/expiradas apos restart.
+Playwright no CI verifica reabertura do navegador, painel -> SSO -> CRM e
+mcp-login desktop/mobile. Nao sao usados chips, mensagens ou cobrancas reais.

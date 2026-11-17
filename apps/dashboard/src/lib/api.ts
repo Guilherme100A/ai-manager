@@ -90,7 +90,7 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
   }
   if (!res.ok) {
     const err = (data as { error?: { code?: string; message?: string } } | undefined)?.error
-    if (res.status === 401 && !opts.keepTokenOn401) clearToken()
+    if (res.status === 401 && !opts.keepTokenOn401) clearToken(token ?? undefined)
     throw new ApiRequestError(res.status, err?.code ?? `HTTP_${res.status}`, err?.message ?? `HTTP ${res.status}`)
   }
   return data as T
@@ -142,8 +142,8 @@ export const api = {
     request<SessionLink>(`/api/session-links/${enc(id)}`, { method: 'PATCH', body: { enabled } }),
   deleteSessionLink: (id: string) => request<void>(`/api/session-links/${enc(id)}`, { method: 'DELETE' }),
   /** Login do administrador (AC-T18-01). Um 401 aqui não limpa o token salvo. */
-  login: (username: string, password: string) =>
-    request<LoginResult>('/api/auth/login', { body: { username, password }, keepTokenOn401: true }),
+  login: (username: string, password: string, remember = false) =>
+    request<LoginResult>('/api/auth/login', { body: { username, password, ...(remember ? { remember: true } : {}) }, keepTokenOn401: true }),
   me: () => request<{ user: AuthUser; expiresAt: string | null }>('/api/auth/me'),
   /** Revoga o token atual (204). */
   logout: () => request<void>('/api/auth/logout', { method: 'POST', keepTokenOn401: true }),

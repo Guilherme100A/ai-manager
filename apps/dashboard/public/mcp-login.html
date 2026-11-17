@@ -7,6 +7,7 @@
   <style>
     :root{color-scheme:dark;font:15px system-ui,sans-serif;background:#09090b;color:#ededf0}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px}.card{width:100%;max-width:400px;padding:28px;background:#111114;border:1px solid #27272d;border-radius:14px}h1{font-size:23px;margin:0 0 10px}p{color:#a0a0ab;line-height:1.5}label{display:block;margin-top:18px;margin-bottom:6px}input,button{width:100%;font:inherit;border-radius:8px;padding:12px}input{background:#18181c;color:inherit;border:1px solid #34343b}button{margin-top:22px;background:#8b8dff;color:#0b0b14;border:0;font-weight:600;cursor:pointer}button:disabled{opacity:.55;cursor:wait}.error{color:#fda4af}small{color:#a0a0ab}
   </style>
+  <style>.remember{display:flex;align-items:center;gap:8px;font-size:14px}.remember input{width:16px;height:16px;padding:0;margin:0;flex-shrink:0}</style>
 </head>
 <body><main class="card">
   <h1>AI Manager</h1>
@@ -14,6 +15,7 @@
   <form id="login-form">
     <label for="username">Usuário</label><input id="username" autocomplete="username" required>
     <label for="password">Senha</label><input id="password" type="password" autocomplete="current-password" required>
+    <label class="remember" for="remember"><input id="remember" type="checkbox"><span>Manter conectado neste dispositivo por 30 dias</span></label>
     <p id="error" class="error" role="alert" hidden></p>
     <button id="submit" type="submit">Entrar e continuar</button>
   </form>
@@ -26,6 +28,28 @@
   const raw=new URLSearchParams(location.search).get('redirect')||'/welcome';
   const target=/^\/(?!\/)[^\\\u0000-\u001f]*$/.test(raw)?raw:'/welcome';
   const crmTarget=target.startsWith('/crm/')?target:'/crm'+target;
+  const rememberedKey='wsm.remembered-session';
+  function savedToken(){
+    try{const token=sessionStorage.getItem('wsm.token');if(token)return token;}catch{}
+    try{
+      const raw=localStorage.getItem(rememberedKey);if(!raw)return null;
+      const value=JSON.parse(raw);
+      if(typeof value?.token==='string'&&value.token&&typeof value.expiresAt==='string'&&Date.parse(value.expiresAt)>Date.now()){
+        try{sessionStorage.setItem('wsm.token',value.token);}catch{}
+        return value.token;
+      }
+      localStorage.removeItem(rememberedKey);
+    }catch{}
+    return null;
+  }
+  function saveToken(auth,remember){
+    try{sessionStorage.setItem('wsm.token',auth.token);}catch{}
+    try{if(remember)localStorage.setItem(rememberedKey,JSON.stringify({token:auth.token,expiresAt:auth.expiresAt}));else localStorage.removeItem(rememberedKey);}catch{}
+  }
+  function clearSavedToken(token){
+    try{if(sessionStorage.getItem('wsm.token')===token)sessionStorage.removeItem('wsm.token');}catch{}
+    try{const raw=localStorage.getItem(rememberedKey);if(raw&&JSON.parse(raw).token===token)localStorage.removeItem(rememberedKey);}catch{}
+  }
   async function request(path,body,headers={}){
     const res=await fetch(path,{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json',...headers},body:JSON.stringify(body)});
     if(!res.ok){const e=new Error(res.status===401?'Usuário ou senha inválidos.':'Não foi possível conectar. Tente novamente.');e.status=res.status;throw e;}
@@ -41,13 +65,14 @@
   form.addEventListener('submit',async event=>{
     event.preventDefault();submit.disabled=true;error.hidden=true;
     try{
-      const auth=await request('/api/auth/login',{username:document.getElementById('username').value.trim(),password:document.getElementById('password').value});
+      const remember=document.getElementById('remember').checked;
+      const auth=await request('/api/auth/login',{username:document.getElementById('username').value.trim(),password:document.getElementById('password').value,...(remember?{remember:true}:{})});
       document.getElementById('password').value='';
-      try{sessionStorage.setItem('wsm.token',auth.token);}catch{}
+      saveToken(auth,remember);
       await enter(auth.token);
-    }catch(e){showError(e);}
+    }catch(e){showError(e);}finally{document.getElementById('password').value='';}
   });
-  let token;try{token=sessionStorage.getItem('wsm.token');}catch{}
-  if(token)enter(token).catch(e=>{if(e.status===401){try{sessionStorage.removeItem('wsm.token');}catch{}}showError(e);});
+  const token=savedToken();
+  if(token)enter(token).catch(e=>{if(e.status===401){clearSavedToken(token);e.message='Sua sessão expirou. Entre novamente.';}showError(e);});
 })();
 </script></body></html>

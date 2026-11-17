@@ -45,6 +45,8 @@ jobs:
           tests/acceptance/T12/sessions.test.ts
           tests/acceptance/T18/new-session.test.ts
           tests/acceptance/T12/auth.test.ts
+          tests/acceptance/T18/auth.test.ts
+          tests/acceptance/T18/persistent-login.test.ts
           --reporter=json --outputFile=qr-ui-results.json
       - uses: actions/upload-artifact@v4
         if: always()
@@ -156,10 +158,13 @@ jobs:
       - name: Fake providers, shared administrators/offers, UI, panel SSO and read-only MCP
         run: |
           cp integrations/shared-offers/tests/operational-ci.test.ts "$RUNNER_TEMP/crm-source/tests/acceptance/T125/operational-ci.test.ts"
+          cp integrations/shared-offers/tests/persistent-login-ci.test.ts "$RUNNER_TEMP/crm-source/tests/acceptance/T125/persistent-login-ci.test.ts"
           node scripts/crm-release/prepare-ci-tests.mjs prepare "$RUNNER_TEMP/crm-source"
           cd "$RUNNER_TEMP/crm-source"
           pnpm exec vitest run --config tests/acceptance/vitest.config.ts tests/acceptance/T125/shared-offers.test.ts tests/acceptance/T125/revisor-gated-ci.test.ts tests/acceptance/T125/operational-ci.test.ts --reporter=json --outputFile="$CRM_REPORT_DIR/integration.json"
           node "$GITHUB_WORKSPACE/scripts/crm-release/prepare-ci-tests.mjs" verify "$CRM_REPORT_DIR/integration.json"
+          pnpm exec vitest run --config tests/acceptance/vitest.config.ts tests/acceptance/T125/persistent-login-ci.test.ts --reporter=json --outputFile="$CRM_REPORT_DIR/persistent-login.json"
+          node -e 'const r=require(process.argv[1]); if(r.numTotalTests!==2 || r.numPassedTests!==2 || r.numPendingTests || r.numFailedTests || !r.success) process.exit(1)' "$CRM_REPORT_DIR/persistent-login.json"
           pnpm exec vitest run --config tests/acceptance/vitest.config.ts tests/acceptance/T125/mcp-offers.test.ts --reporter=json --outputFile="$CRM_REPORT_DIR/mcp-offers.json"
           node -e 'const r=require(process.argv[1]); if(r.numTotalTests!==8 || r.numPassedTests!==8 || r.numPendingTests || r.numFailedTests || !r.success) process.exit(1)' "$CRM_REPORT_DIR/mcp-offers.json"
           pnpm --filter @crm/core exec vitest run src/offers src/connections src/flows/engine src/flows/triggers src/payments/webhooks src/mcp src/mcp-oauth --maxWorkers=2 --reporter=json --outputFile="$CRM_REPORT_DIR/core.json"
@@ -168,7 +173,7 @@ jobs:
           git diff --exit-code
       - name: Build immutable Alpine/musl release (never copy runner node_modules)
         run: |
-          printf '.git\n**/node_modules\n**/dist\noutput\n.env\ntests/acceptance/T125/operational-ci.test.ts\ntests/acceptance/T125/revisor-gated-ci.test.ts\n' > "$RUNNER_TEMP/crm-source/.dockerignore"
+          printf '.git\n**/node_modules\n**/dist\noutput\n.env\ntests/acceptance/T125/operational-ci.test.ts\ntests/acceptance/T125/revisor-gated-ci.test.ts\ntests/acceptance/T125/persistent-login-ci.test.ts\n' > "$RUNNER_TEMP/crm-source/.dockerignore"
           docker build --platform linux/amd64 --build-arg SOURCE_TREE=6844b56c32af325ff203014afa0a2bcdc5ea9688 -f integrations/shared-offers/Dockerfile -t "crm-shared-offers:$GITHUB_SHA" "$RUNNER_TEMP/crm-source"
           docker run --rm --network none -w /crm/apps/api "crm-shared-offers:$GITHUB_SHA" node /crm/node_modules/tsx/dist/cli.mjs --conditions=development -e "import('@crm/core').then(()=>console.log('Alpine workspace/dependencies load'))"
           docker volume create "ci_crm_${GITHUB_RUN_ID}_deps"

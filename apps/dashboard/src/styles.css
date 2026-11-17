@@ -973,6 +973,14 @@ legend {
 .login-card .error {
   margin: 0.5rem 0 0;
 }
+.login-card .remember-login {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  font-size: 0.875rem;
+}
+.remember-login input { flex-shrink: 0; }
 
 .login-top {
   position: fixed;

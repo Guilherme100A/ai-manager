@@ -47,6 +47,7 @@ const TABLES = [
   'spy_ads',
   'spy_probes',
   'spy_media',
+  'dashboard_login_sessions',
 ]
 
 /** Quantidade de migrations declaradas no journal do drizzle (cresce a cada migration nova). */

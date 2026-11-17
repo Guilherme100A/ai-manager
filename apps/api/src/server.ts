@@ -2,7 +2,7 @@
 // T16: logger de observabilidade (T15), métricas do processo e ponte com o worker (WORKER_INTERNAL_URL).
 import { serve } from '@hono/node-server'
 import { createMetrics, sessionProxyFetch, SpyFinder, SpyHttp, SpyRunner, SpyStore } from '@wsm/core'
-import { createDb } from '@wsm/db'
+import { createDb, runMigrations } from '@wsm/db'
 import { Redis } from 'ioredis'
 import { createApp } from './app'
 import { createWorkerBridge } from './bridge/client'
@@ -13,6 +13,8 @@ import { startAutomaticSpyProbe } from './spy-auto'
 const config = loadConfig()
 const logger = createApiLogger({ level: config.LOG_LEVEL })
 const db = createDb(config.DATABASE_URL)
+// Serialize with the worker's migration lock before accepting remembered logins.
+await runMigrations(db)
 const redis = new Redis(config.REDIS_URL, { maxRetriesPerRequest: 1 })
 redis.on('error', (err) => logger.warn({ err: err.message }, 'redis error'))
 const metrics = createMetrics()
