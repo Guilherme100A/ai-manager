@@ -11,6 +11,14 @@ import { TREE, sha, hashFile, read, override, specFor, composeArgs, secrets, val
 import { pgClientPlan, pg16Versions } from './pg-client-ci.mjs'
 const here = path.dirname(fileURLToPath(import.meta.url))
 const revision = 'a'.repeat(40), image = 'sha256:' + 'b'.repeat(64)
+
+test('the committed release contract matches the reconstructable source and CI image label', () => {
+  const manifest = read(path.resolve(here, '../../integrations/shared-offers/manifest.json'))
+  const workflow = fs.readFileSync(path.resolve(here, '../../.github/workflows/ci.yml'), 'utf8')
+  assert.equal(TREE, manifest.expected_tree)
+  assert.equal(TREE, manifest.sanitization.final_tree)
+  assert.ok(workflow.includes('SOURCE_TREE=' + TREE))
+})
 test('Linux memory budget distinguishes reclaimable cache from a real shortage and falls back conservatively', () => {
   assert.equal(availableMemoryBytes('MemFree: 100000 kB\nMemAvailable: 1400000 kB\n', 100000 * 1024), 1400000 * 1024)
   assert.equal(availableMemoryBytes('MemAvailable: 100000 kB\n', 900000 * 1024), 100000 * 1024)
