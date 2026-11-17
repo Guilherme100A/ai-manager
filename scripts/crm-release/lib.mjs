@@ -2,10 +2,10 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-export const TREE = 'e39405197247f463dec69388a29d43c187a22332'
+export const TREE = '7158e6027f11a6a4e77910d5a9c536109848a6c9'
 // Historical immutable release accepted only as the currently installed source.
 // New artifacts must match TREE exactly; never accept arbitrary historical trees.
-export const INSTALLED_TREES = new Set([TREE, '6844b56c32af325ff203014afa0a2bcdc5ea9688', '24cec7d30f200818e64cd9693bfe8ff38ed1d0c3'])
+export const INSTALLED_TREES = new Set([TREE, 'e39405197247f463dec69388a29d43c187a22332', '6844b56c32af325ff203014afa0a2bcdc5ea9688', '24cec7d30f200818e64cd9693bfe8ff38ed1d0c3'])
 export const sha = b => createHash('sha256').update(b).digest('hex')
 export function hashFile(file) {
   const hash = createHash('sha256'), buffer = Buffer.alloc(1024 * 1024), fd = fs.openSync(file, 'r')

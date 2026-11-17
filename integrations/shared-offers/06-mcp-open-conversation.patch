@@ -1,0 +1,302 @@
+diff --git a/apps/api/src/routes/chats/index.ts b/apps/api/src/routes/chats/index.ts
+index cd98da274334ff88bc9a0b535c1a3d2765b53b4c..576d7d6b0b79b08ce478cd928347b6a538c60095 100644
+--- a/apps/api/src/routes/chats/index.ts
++++ b/apps/api/src/routes/chats/index.ts
+@@ -72,6 +72,7 @@ function readListQuery(c: Context<AppEnv>): ChatListQuery {
+ }
+ 
+ const openSchema = z.object({ contact_id: z.string().max(64), connection_id: z.string().max(64) })
++const openByPhoneSchema = z.object({ connection_id: uuid, phone: z.string().min(1).max(80), name: z.string().trim().min(1).max(200).optional() }).strict()
+ const assignSchema = z.object({ user_id: z.string().max(64).nullish() })
+ const patchSchema = z
+   .object({
+@@ -112,6 +113,12 @@ export function chatsRoutes(deps: ResolvedDeps) {
+     return c.json(res, res.created ? 201 : 200)
+   })
+ 
++  app.post('/api/chats/open-by-phone', view, requirePerm('contacts.edit'), validate('json', openByPhoneSchema), async (c) => {
++    const res = await domain(() => service.openByPhone(actorOf(c), c.req.valid('json')))
++    if (res.created) audit(c, 'create', res.chat_id, { connection_id: res.connection_id, contact_id: res.contact_id, contact_created: res.contact_created, source: 'open_by_phone' })
++    return c.json(res, res.created ? 201 : 200)
++  })
++
+   app.post('/api/chats/mark-all-read', view, async (c) => {
+     const updated = await domain(() => query.markAllRead(actorOf(c), readListQuery(c)))
+     setAudit(c, { action: 'chats.mark_all_read', targetType: 'chat', detail: { updated } })
+diff --git a/apps/api/src/routes/mcp/mcp-actor.db.unit.test.ts b/apps/api/src/routes/mcp/mcp-actor.db.unit.test.ts
+index d9c3e6bc4088cc3792f413b3a1e1c3f202edf7b8..0a4868c74d800fc9039f17877449b702fbf56f82 100644
+--- a/apps/api/src/routes/mcp/mcp-actor.db.unit.test.ts
++++ b/apps/api/src/routes/mcp/mcp-actor.db.unit.test.ts
+@@ -2,7 +2,7 @@
+ // MCP com escrita: a ferramenta chama a própria API como o usuário dono da credencial (permissões, auditoria e
+ // isolamento da rota valem); credencial `read` nunca grava; o ator só existe no fetch interno (não vem da rede).
+ import { randomBytes } from 'node:crypto'
+-import { auditLogs, chats, companyMembers, connections, contacts, createDb, flows, mcpCredentials, memberConnections, users, type Database } from '@crm/db'
++import { auditLogs, chatEvents, chats, companyMembers, connections, contacts, createDb, flowRuns, flows, messages, mcpCredentials, memberConnections, users, type Database } from '@crm/db'
+ import { createTempDatabase, type TempDatabase } from '@crm/db/testing'
+ import { createLogger, MemoryMailer, redisConnection } from '@crm/node-kit'
+ import { and, eq } from 'drizzle-orm'
+@@ -59,6 +59,96 @@ const actorFor = async (s: Session, credentialId: string, permsOverride?: string
+   return { user: { id: user!.id, email: user!.email, name: user!.name, systemRole: user!.systemRole, locale: user!.locale, lastCompanyId: user!.lastCompanyId }, companyId: s.companyId, member: member!, perms, credentialId }
+ }
+ 
++describe('open_conversation sem mensagem previa', () => {
++  const PHONE = '+553197302064'
++  const chip = async (s: Session) => (await db.insert(connections).values({ companyId: s.companyId, name: 'Chip escolhido', sessionId: `open-${rnd()}`, connectionState: 'open' }).returning())[0]!
++  const invoke = async (token: string, args: object) => (await rpc(token, 'tools/call', { name: 'open_conversation', arguments: args })).body.result
++
++  it('MCP normaliza e reutiliza com concorrencia, sem duplicar nem enviar ou iniciar fluxo', async () => {
++    const s = await signUp(), conn = await chip(s), writer = await credential(s, 'write')
++    const results = await Promise.all(['+55 (31) 9730-2064', PHONE, '+55 31 97302064'].map(phone => invoke(writer.token, { connection_id: conn.id, phone })))
++    results.forEach(r => expect(r.isError).not.toBe(true))
++    const rows = results.map(r => JSON.parse(r.content[0].text))
++    expect(new Set(rows.map(r => r.chat_id)).size).toBe(1)
++    expect(rows.filter(r => r.created)).toHaveLength(1)
++    expect(rows[0]).toMatchObject({ chat_id: expect.any(String), connection_id: conn.id, phone_e164: PHONE, message_sent: false, flow_started: false })
++    expect(await db.select().from(contacts).where(eq(contacts.companyId, s.companyId))).toHaveLength(1)
++    expect(await db.select().from(chats).where(eq(chats.companyId, s.companyId))).toHaveLength(1)
++    expect(await db.select().from(chatEvents).where(eq(chatEvents.chatId, rows[0].chat_id))).toHaveLength(1)
++    expect(await db.select().from(messages).where(eq(messages.companyId, s.companyId))).toHaveLength(0)
++    expect(await db.select().from(flowRuns).where(eq(flowRuns.companyId, s.companyId))).toHaveLength(0)
++    expect(await db.select().from(paymentCharges).where(eq(paymentCharges.companyId, s.companyId))).toHaveLength(0)
++    const [ct] = await db.select().from(contacts).where(eq(contacts.companyId, s.companyId))
++    expect(ct).toMatchObject({ consent: false, consentSource: null })
++    const audits = await db.select().from(auditLogs).where(eq(auditLogs.companyId, s.companyId))
++    expect(audits.some(a => a.action === 'chats.create' && a.detail?.mcp_credential_id === writer.mcp_credential.id)).toBe(true)
++  })
++
++  it('contato existente em outro chip nao muda de conexao, nome, bloqueio ou consentimento', async () => {
++    const s = await signUp(), old = await chip(s), chosen = await chip(s)
++    const [ct] = await db.insert(contacts).values({ companyId: s.companyId, name: 'Nome original', phoneE164: PHONE, optOut: true }).returning()
++    const [previous] = await db.insert(chats).values({ companyId: s.companyId, contactId: ct!.id, connectionId: old.id, status: 'resolved', blocked: true }).returning()
++    const args = { connection_id: chosen.id, phone: PHONE, name: 'Nao substituir' }
++    const first = await call(s, 'POST', '/api/chats/open-by-phone', args)
++    expect(first.status).toBe(201)
++    expect(first.body).toMatchObject({ connection_id: chosen.id, contact_id: ct!.id, contact_created: false })
++    expect(first.body.chat_id).not.toBe(previous!.id)
++    await db.update(chats).set({ blocked: true, status: 'resolved' }).where(eq(chats.id, first.body.chat_id))
++    const repeat = await call(s, 'POST', '/api/chats/open-by-phone', args)
++    expect(repeat.status).toBe(200)
++    expect(repeat.body).toMatchObject({ chat_id: first.body.chat_id, created: false })
++    expect((await db.select().from(chats).where(eq(chats.id, previous!.id)))[0]).toEqual(previous)
++    expect((await db.select().from(chats).where(eq(chats.id, first.body.chat_id)))[0]).toMatchObject({ blocked: true, status: 'resolved' })
++    expect((await db.select().from(contacts).where(eq(contacts.id, ct!.id)))[0]).toEqual(ct)
++  })
++
++  it('conexao de outra empresa, inexistente, desvinculada ou em exclusao nao cria contato', async () => {
++    const a = await signUp(), b = await signUp(), foreign = await chip(b), local = await chip(a)
++    for (const id of [foreign.id, crypto.randomUUID()]) expect((await call(a, 'POST', '/api/chats/open-by-phone', { connection_id: id, phone: PHONE })).status).toBe(422)
++    for (const patch of [{ unlinkedAt: new Date() }, { unlinkedAt: null, scheduledForDeletionAt: new Date() }]) {
++      await db.update(connections).set(patch).where(eq(connections.id, local.id))
++      expect((await call(a, 'POST', '/api/chats/open-by-phone', { connection_id: local.id, phone: PHONE })).status).toBe(422)
++    }
++    expect(await db.select().from(contacts).where(eq(contacts.companyId, a.companyId))).toHaveLength(0)
++    expect(await db.select().from(chats).where(eq(chats.companyId, b.companyId))).toHaveLength(0)
++    const ownA = await call(a, 'POST', '/api/chats/open-by-phone', { connection_id: (await chip(a)).id, phone: PHONE })
++    const ownB = await call(b, 'POST', '/api/chats/open-by-phone', { connection_id: foreign.id, phone: PHONE })
++    expect([ownA.status, ownB.status]).toEqual([201, 201])
++    expect(ownA.body.contact_id).not.toBe(ownB.body.contact_id)
++    expect(ownA.body.chat_id).not.toBe(ownB.body.chat_id)
++  })
++
++  it('numero invalido, chip ausente e tentativa de primeira mensagem sao recusados sem gravar', async () => {
++    const s = await signUp(), conn = await chip(s)
++    for (const args of [{ connection_id: conn.id, phone: '123' }, { phone: PHONE }, { connection_id: conn.id, phone: PHONE, message: 'Nao enviar' }])
++      expect((await call(s, 'POST', '/api/chats/open-by-phone', args)).status).toBe(422)
++    expect(await db.select().from(contacts).where(eq(contacts.companyId, s.companyId))).toHaveLength(0)
++  })
++
++  it('somente escrita com chat.view e contacts.edit; read nao lista nem executa', async () => {
++    const s = await signUp(), conn = await chip(s), reader = await credential(s, 'read'), writer = await credential(s, 'write')
++    const args = { connection_id: conn.id, phone: PHONE }
++    expect(await toolNames(reader.token)).not.toContain('open_conversation')
++    const denied = await rpc(reader.token, 'tools/call', { name: 'open_conversation', arguments: args })
++    expect(!!denied.body.error || !!denied.body.result?.isError).toBe(true)
++    for (const perms of [['chat.view'], ['contacts.edit']]) {
++      const api = internalApi(app, await actorFor(s, writer.mcp_credential.id, perms), 'write')
++      expect((await api.request('POST', '/api/chats/open-by-phone', { body: args, write: true })).status).toBe(403)
++    }
++    expect(await db.select().from(contacts).where(eq(contacts.companyId, s.companyId))).toHaveLength(0)
++  })
++
++  it('membro restrito a outro chip nao abre conversa nem cria contato fora do escopo', async () => {
++    const owner = await signUp(), chosen = await chip(owner), allowed = await chip(owner), u = await signUp()
++    const [member] = await db.insert(companyMembers).values({ companyId: owner.companyId, userId: u.userId, role: 'member', permissionKeys: ['chat.view', 'contacts.view', 'contacts.edit'] }).returning()
++    await db.insert(memberConnections).values({ companyId: owner.companyId, memberId: member!.id, connectionId: allowed.id })
++    const c = await credential(owner, 'write'), actor = await actorFor({ ...u, companyId: owner.companyId }, c.mcp_credential.id)
++    const res = await internalApi(app, actor, 'write').request('POST', '/api/chats/open-by-phone', { body: { connection_id: chosen.id, phone: PHONE }, write: true })
++    expect(res.status).toBe(404)
++    expect(await db.select().from(contacts).where(eq(contacts.companyId, owner.companyId))).toHaveLength(0)
++  })
++})
++
+ beforeAll(async () => {
+   temp = await createTempDatabase({ migrate: true })
+   db = createDb(temp.url, { max: 6 })
+diff --git a/docs/mcp-open-conversation.md b/docs/mcp-open-conversation.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..67bd00bf943965ab6c30a81afbc06299184b11f4
+--- /dev/null
++++ b/docs/mcp-open-conversation.md
+@@ -0,0 +1,41 @@
++# Abrir conversa pelo MCP
++
++`open_conversation` abre ou reutiliza o contato e o chat sem depender de mensagem
++recebida e sem enviar mensagem. Exige credencial MCP com escrita, `chat.view`,
++`contacts.edit` e acesso do usuario a conexao informada.
++
++Parametros: `connection_id` (UUID CRM obrigatorio), `phone` (numero internacional
++com `+DDI`, obrigatorio), `name` (opcional, somente para contato novo).
++Espacos, parenteses, pontos e hifens sao removidos; o formato E.164 exige 8 a 15
++digitos. Nao se infere pais nem se adiciona nono digito. A abertura local nao
++verifica titularidade, existencia de WhatsApp ou autorizacao para enviar.
++
++Exemplo de chamada, somente quando o usuario solicitar criar a conversa:
++
++```json
++{"connection_id":"446498a5-aab1-4e4e-a704-adec4a302b15","phone":"+553197302064"}
++```
++
++Retorno: `chat_id`, `connection_id`, `contact_id`, `phone_e164`, `created`,
++`contact_created`, `message_sent:false`, `flow_started:false`. O contato e unico
++por empresa/numero normalizado, e o chat por empresa/conexao/contato. Repeticoes
++inclusive concorrentes reutilizam os IDs, sem duplicar eventos de criacao ou
++mensagens. A transacao usa os indices unicos existentes; nao ha nova migration.
++
++Um chat antigo desse contato em outro chip permanece naquela conexao. Nao ha
++troca automatica, reabertura de resolvido, desbloqueio, alteracao de consentimento,
++opt-out, nome de contato existente ou atribuicao a area/oferta. O chip segue
++compartilhado; contexto de area deve ser explicitado na operacao de fluxo/oferta.
++Conexoes de outra empresa, fora do escopo, desvinculadas ou em exclusao sao
++recusadas antes de criar contato. Chip fechado pode ter chat preparado; isso nao
++confirma conexao nem remove os bloqueios de envio existentes.
++
++O endpoint correspondente e `POST /api/chats/open-by-phone`, com o mesmo corpo,
++permissoes e auditoria. Responde 201 para chat novo e 200 para reutilizado.
++Campos de mensagem/fluxo sao recusados. Contato novo nao recebe consentimento
++automatico, e nenhum gateway, cobranca ou fluxo e chamado.
++
++Enviar e uma operacao separada, que exige pedido explicito: `send_message` usa
++`id=chat_id`, `text` e `client_message_id` estavel para evitar envio duplicado.
++`trigger_flow` usa `chat_id` e mantem suas validacoes de fluxo, area e publicacao.
++Esta ferramenta nao ativa rascunhos, ofertas ou automacoes para contornar regras.
+diff --git a/packages/core/src/chats/lifecycle/service.ts b/packages/core/src/chats/lifecycle/service.ts
+index 5d9eb18ec984d02311b9d26602b23860d83dc58d..cda5154df9b16917854612b88bb7f87d58c276cb 100644
+--- a/packages/core/src/chats/lifecycle/service.ts
++++ b/packages/core/src/chats/lifecycle/service.ts
+@@ -1,7 +1,9 @@
+ // Ciclo de vida do chat (T48; 03 F15–F22, F52–F57): atribuir, resolver, reabrir, bloquear, transferir,
+ // notas internas (só CRM, nunca o gateway), etiquetas e linha do tempo (`chat_events`).
+-import { and, desc, eq, inArray } from 'drizzle-orm'
+-import { aiAgents, chatEvents, chatLabels, chatNotes, chats, companyMembers, contacts, departments, labels, users, type ChatStatus, type Database } from '@crm/db'
++import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm'
++import { aiAgents, chatEvents, chatLabels, chatNotes, chats, companyMembers, connections, contacts, departments, labels, users, type ChatStatus, type Database } from '@crm/db'
++import { isE164 } from '@crm/shared'
++import { actorScope, assertInScope } from '../query/context'
+ import type { ChatPublisher } from '../ingest/chat-ingest'
+ import { chatScope, type ChatRow } from '../model/dto'
+ import { ChatQueryService, type ChatListItem } from '../query/service'
+@@ -56,6 +58,38 @@ export class ChatLifecycleService {
+     this.query = new ChatQueryService(opts.db)
+   }
+ 
++  /** Resolve a identidade e abre somente o chat da conexao explicita; nunca envia ou inicia automacoes. */
++  async openByPhone(actor: ChatActor, input: { connection_id: string; phone: string; name?: string }) {
++    for (const permission of ['chat.view', 'contacts.edit'])
++      if (!actor.perms.has(permission)) throw new ChatsError('forbidden', 'Permissao insuficiente', { permission })
++    if (!UUID_RE.test(input.connection_id ?? '')) throw chatInvalid('connection_id', 'Conexao invalida')
++    // DDI explicito; formato E.164 do cadastro, sem adivinhar pais ou adicionar nono digito.
++    // Abertura local nao comprova que o numero possui WhatsApp.
++    const raw = input.phone?.trim() ?? ''
++    const phone = raw.replace(/[\s().-]/g, '')
++    if (!/^[+\d\s().-]+$/.test(raw) || !isE164(phone)) throw chatInvalid('phone', 'Informe telefone internacional com +DDI (E.164, 8 a 15 digitos)')
++    const scope = await actorScope(this.db, actor)
++    const result = await this.db.transaction(async (tx) => {
++      const [connection] = await tx.select({ id: connections.id }).from(connections)
++        .where(and(eq(connections.companyId, actor.companyId), eq(connections.id, input.connection_id), isNull(connections.unlinkedAt), isNull(connections.scheduledForDeletionAt)))
++        .limit(1).for('share')
++      if (!connection) throw chatInvalid('connection_id', 'Conexao nao encontrada ou indisponivel')
++      assertInScope(scope, { connectionId: connection.id, departmentId: null })
++      const [createdContact] = await tx.insert(contacts)
++        .values({ companyId: actor.companyId, phoneE164: phone, name: input.name?.trim() || phone, origin: 'manual' })
++        .onConflictDoNothing({ target: [contacts.companyId, contacts.phoneE164], where: sql`${contacts.phoneE164} is not null` }).returning({ id: contacts.id })
++      const contact = createdContact ?? (await tx.select({ id: contacts.id }).from(contacts)
++        .where(and(eq(contacts.companyId, actor.companyId), eq(contacts.phoneE164, phone))).limit(1))[0]!
++      // Mesmo ciclo de vida da API existente, dentro da transacao e sem realtime antes do commit.
++      const opened = await new ChatLifecycleService({ db: tx as unknown as Database }).open(actor, { contact_id: contact.id, connection_id: connection.id })
++      const [row] = await tx.select().from(chats).where(eq(chats.id, opened.chat.id))
++      return { ...opened, row: row!, contactCreated: !!createdContact }
++    })
++    if (result.created) await this.publish(result.row, 'chat.created', { chat_id: result.chat.id, chat: result.chat })
++    return { chat_id: result.chat.id, connection_id: result.chat.connection_id, contact_id: result.chat.contact.id,
++      phone_e164: phone, created: result.created, contact_created: result.contactCreated, message_sent: false, flow_started: false }
++  }
++
+   /** Abre (ou devolve) o chat do contato na conexão. */
+   async open(actor: ChatActor, input: { contact_id: string; connection_id: string }): Promise<{ chat: ChatListItem; created: boolean }> {
+     if (!UUID_RE.test(input.contact_id ?? '')) throw chatInvalid('contact_id', 'Contato inválido')
+diff --git a/packages/core/src/mcp/tools/conversations.ts b/packages/core/src/mcp/tools/conversations.ts
+index 1f04d44ee6626e9a09b75218c8a993cfafdf303a..e21fae99a453d17153a165856b290e9cd693a253 100644
+--- a/packages/core/src/mcp/tools/conversations.ts
++++ b/packages/core/src/mcp/tools/conversations.ts
+@@ -48,6 +48,20 @@ export function slimMessages(res: McpApiResponse): McpApiResponse {
+ }
+ 
+ export const conversationsTools: readonly ToolSpec<ZodRawShape>[] = [
++  tool({
++    name: 'open_conversation',
++    title: 'Abrir conversa por numero e chip',
++    description: 'Cria ou reutiliza contato pelo telefone normalizado e conversa exclusivamente no connection_id informado da empresa. ' +
++      'Nao exige mensagem previa, nao envia mensagens, nao muda conexoes de chats antigos e nao inicia nem ativa fluxos/ofertas. ' +
++      'Repetir nao duplica contato ou conversa. Retorna chat_id, connection_id, contact_id, phone_e164 e flags created/contact_created. ' +
++      'Exige escrita, chat.view, contacts.edit e acesso ao chip. name so e usado para um contato novo, sem alterar consentimento de contato existente. ' +
++      'Depois, somente se solicitado, use send_message com id=chat_id e client_message_id estavel, ou trigger_flow com chat_id. As validacoes dessas ferramentas continuam valendo.',
++    perm: 'contacts.edit',
++    kind: 'write',
++    idempotent: true,
++    input: { connection_id: UUID.describe('ID CRM explicito da conexao/chip da empresa'), phone: z.string().min(1).max(80).describe('Numero internacional com +DDI; valida formato E.164 (8 a 15 digitos), aceita espacos e parenteses, sem adicionar digitos ou confirmar conta WhatsApp'), name: z.string().trim().min(1).max(200).optional().describe('Nome somente para novo contato') },
++    run: async (a, api) => fromApi(await api.request('POST', '/api/chats/open-by-phone', { body: compact(a) })),
++  }),
+   tool({
+     name: 'list_conversations',
+     title: 'Listar conversas',
+diff --git a/packages/core/src/mcp/tools/conversations.unit.test.ts b/packages/core/src/mcp/tools/conversations.unit.test.ts
+index 1484a46dc9a088fe58cec8f5006c8e9e941d69bd..568ea1843d0016d34e7116207bd3a084b031e22e 100644
+--- a/packages/core/src/mcp/tools/conversations.unit.test.ts
++++ b/packages/core/src/mcp/tools/conversations.unit.test.ts
+@@ -43,6 +43,14 @@ async function connect(opts: { access?: 'read' | 'write'; perms?: PermissionKey[
+ }
+ 
+ describe('conversationsTools', () => {
++  it('open_conversation exige chip explicito e escrita; chama somente abertura, sem envio', async () => {
++    const { calls, call } = await connect({ perms: ['chat.view', 'contacts.edit'] })
++    expect((await call('open_conversation', { phone: '+553197302064' })).isError).toBe(true)
++    expect(calls).toHaveLength(0)
++    await call('open_conversation', { connection_id: ID, phone: '+553197302064', name: 'Teste' })
++    expect(calls).toEqual([{ method: 'POST', path: '/api/chats/open-by-phone', req: { body: { connection_id: ID, phone: '+553197302064', name: 'Teste' }, write: true } }])
++    expect(await (await connect({ access: 'read', perms: ['chat.view', 'contacts.edit'] })).names()).not.toContain('open_conversation')
++  })
+   it('lista e contadores: filtros escalares e listas em CSV', async () => {
+     const { calls, call } = await connect()
+     await call('list_conversations', { status: 'waiting', response_status: 'unanswered', label_ids: [ID, ID2], connection_ids: [ID], cursor: 'abc', limit: 50 })
+diff --git a/packages/core/src/mcp/tools/shared.ts b/packages/core/src/mcp/tools/shared.ts
+index cfd18a45dbd0e93e009641917efe2319e4e31a89..eddc70518c4fb9a543d9948de0ffd3866540ee55 100644
+--- a/packages/core/src/mcp/tools/shared.ts
++++ b/packages/core/src/mcp/tools/shared.ts
+@@ -58,6 +58,7 @@ export function fromApi(res: McpApiResponse): CallResult {
+ }
+ 
+ export interface ToolSpec<S extends ZodRawShape> {
++  idempotent?: boolean
+   areaScoped?: boolean
+   openWorld?: boolean
+   name: string
+@@ -78,7 +79,7 @@ export function registerApiTools(server: McpServer, ctx: McpApiContext, tools: r
+     if (kind !== 'read' && ctx.access !== 'write') continue
+     const perms = t.perm === undefined ? [] : typeof t.perm === 'string' ? [t.perm] : t.perm
+     if (perms.length > 0 && !perms.some((p) => ctx.perms.has(p))) continue
+-    const annotations = { ...(kind === 'read' ? READ : kind === 'write' ? WRITE : DESTRUCTIVE), openWorldHint: t.openWorld ?? false }
++    const annotations = { ...(kind === 'read' ? READ : kind === 'write' ? WRITE : DESTRUCTIVE), ...(t.idempotent === undefined ? {} : { idempotentHint: t.idempotent }), openWorldHint: t.openWorld ?? false }
+     const apiFor = (businessAreaId?: string): McpApi => ({
+       // Defesa extra: ferramenta de leitura nunca grava, mesmo que a rota aceite.
+       request: (method, path, req) => ctx.api.request(method, path, { ...req, ...(businessAreaId ? { businessAreaId } : {}), write: kind !== 'read' && (req?.write ?? true) }),

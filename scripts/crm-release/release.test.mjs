@@ -324,12 +324,12 @@ test('CI PostgreSQL utilities use same service16 container with streaming files,
   assert.throws(() => pgClientPlan('', 'pg_dump', ['-f', dump])); assert.throws(() => pgClientPlan(container, 'other', []))
 })
 
-for (const sourceTree of ['6844b56c32af325ff203014afa0a2bcdc5ea9688', TREE]) test('area release accepts only the exact installed migration prefix: '+sourceTree, t => {
+for (const sourceTree of ['6844b56c32af325ff203014afa0a2bcdc5ea9688', 'e39405197247f463dec69388a29d43c187a22332', TREE]) test('area release accepts only the exact installed migration prefix: '+sourceTree, t => {
   const f=installedFixture(t); f.old.source_tree=sourceTree;
   fs.writeFileSync(path.join(f.state,'active.json'),JSON.stringify(f.old));
   fs.writeFileSync(path.join(f.state,'releases',f.old.release,'override.yml'),override(f.old));
   deploy(f.options,f.run);
-  assert.ok(f.calls.some(c=>c.label==='journal-'+(sourceTree===TREE?44:43)));
+  assert.ok(f.calls.some(c=>c.label==='journal-'+(sourceTree==='6844b56c32af325ff203014afa0a2bcdc5ea9688'?43:44)));
   assert.equal(read(path.join(f.state,'active.json')).company_id,f.company);
 });
 test('missing business-area schema retains maintenance before any new API cutover', t => {

@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/Guilherme100A/crm-copy.git",
   "base_sha": "acf78e2da49865afa06fe6a4cee77bcf0e888152",
-  "expected_tree": "e39405197247f463dec69388a29d43c187a22332",
+  "expected_tree": "7158e6027f11a6a4e77910d5a9c536109848a6c9",
   "sanitization": {
     "excluded_files": [
       "scripts/elevenlabs-account-diagnose.ts",
@@ -28,7 +28,7 @@
     ],
     "reason": "Exclude unrelated operator scripts/private deployment context and audit-only harnesses; replace operational hosts in documentation and URL fixtures with reserved example.test hosts. Original local source preserved.",
     "baseline_tree": "539e4a6dac07e50188e418d0e1a3d669e5f6d687",
-    "final_tree": "e39405197247f463dec69388a29d43c187a22332"
+    "final_tree": "7158e6027f11a6a4e77910d5a9c536109848a6c9"
   },
   "test_only_changes": [
     {
@@ -286,6 +286,21 @@
         "packages/db/src/schema/crm/index.ts",
         "packages/db/src/schema/crm/offers.ts",
         "tests/acceptance/T125/business-areas.test.ts"
+      ]
+    },
+    {
+      "file": "06-mcp-open-conversation.patch",
+      "description": "Open conversation by explicit company connection and normalized international phone; no send or automation, tenant/scope checks and atomic natural-key idempotence.",
+      "sha256": "4afb19c0ba9fcb46d7c8826659b6ea04f3228bf66dc9ace9a1624ed484448359",
+      "bytes": 22816,
+      "files": [
+        "apps/api/src/routes/chats/index.ts",
+        "apps/api/src/routes/mcp/mcp-actor.db.unit.test.ts",
+        "docs/mcp-open-conversation.md",
+        "packages/core/src/chats/lifecycle/service.ts",
+        "packages/core/src/mcp/tools/conversations.ts",
+        "packages/core/src/mcp/tools/conversations.unit.test.ts",
+        "packages/core/src/mcp/tools/shared.ts"
       ]
     }
   ],
