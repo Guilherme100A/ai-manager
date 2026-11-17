@@ -67,7 +67,7 @@ export function deploy(options, run = command) {
     const applied = parseJSON(dc('journal-' + count, psql('BEGIN READ ONLY; SELECT coalesce(json_agg(t),\'[]\') FROM (SELECT hash,created_at FROM crm.__drizzle_migrations ORDER BY created_at) t; COMMIT;')), 'CRM journal')
     requireThat(Array.isArray(applied) && applied.length === count && applied.every((x, i) => x.hash === m.migrations[i].hash && Number(x.created_at) === m.migrations[i].when), 'CRM migration history drift')
   }
-  const beforeCount = installed ? (installed.source_tree === TREE ? 44 : 43) : 39
+  const beforeCount = installed ? (installed.source_tree === TREE || installed.source_tree === 'e39405197247f463dec69388a29d43c187a22332' ? 44 : 43) : 39
   checkJournal(beforeCount)
   fs.mkdirSync(state, { recursive: true, mode: 0o700 })
   const space = fs.statfsSync(state)
