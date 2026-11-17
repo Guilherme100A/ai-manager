@@ -1,0 +1,30 @@
+name: Verify live admin business areas
+run-name: Verify admin areas ${{ inputs.proof }}
+on:
+  workflow_dispatch:
+    inputs:
+      proof:
+        description: Operator recovery identifier
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Prepare a separate browser on GitHub
+        run: |
+          mkdir -p "$RUNNER_TEMP/area-browser"
+          npm install --prefix "$RUNNER_TEMP/area-browser" --no-audit --no-fund playwright@1.63.0
+          "$RUNNER_TEMP/area-browser/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Verify three isolated area contexts and shared admin login
+        env:
+          AREAS_SMOKE_SESSIONS: ${{ secrets.AREAS_SMOKE_SESSIONS }}
+          PLAYWRIGHT_MODULE: ${{ runner.temp }}/area-browser/node_modules/playwright/index.mjs
+        run: node scripts/auth/verify-live-business-areas.mjs

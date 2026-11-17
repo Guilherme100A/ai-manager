@@ -32,7 +32,8 @@ await admin.connect()
 try {
   const version = command => { const r = spawnSync('docker', ['exec', pgContainer, command, '--version'], { encoding: 'utf8' }); assert.equal(r.status, 0, 'CI PostgreSQL version probe failed'); return r.stdout.trim() }
   metrics.client_versions = pg16Versions(version('pg_dump'), version('pg_restore'), (await admin.query('SHOW server_version_num')).rows[0].server_version_num)
-  const a = await create(), b = await create(), c = await create()
+  const a = await create(), c = await create()
+  let b = await create()
   await migrateUrl(a.url, { set: 'wa' })
   await migrateUrl(a.url, { set: 'crm', folders: { crm: partial(39) } })
   const q = (sql, args) => a.client.query(sql, args)
@@ -66,9 +67,19 @@ try {
   const offer = (await b.client.query("INSERT INTO crm.offers(company_id,name,config) VALUES($1,'synthetic offer','{}') RETURNING id", [company])).rows[0].id
   const op = (await b.client.query("INSERT INTO crm.offer_opportunities(company_id,offer_id,contact_id,chat_id,snapshot,evidence) VALUES($1,$2,$3,$4,'{}','{}') RETURNING id", [company, offer, rows[1].contact, rows[1].chat])).rows[0].id
   await b.client.query('UPDATE crm.flow_runs SET trigger=$1 WHERE id=$2', [JSON.stringify({ opportunity_id: op }), rows[1].run])
+  await migrateUrl(b.url, { set: 'crm', folders: { crm:partial(43) } })
+  const prefix43=(await b.client.query('SELECT hash,created_at FROM crm.__drizzle_migrations ORDER BY created_at')).rows
+  assert.equal(prefix43.length,43)
+  const beforeAreas=path.join(dir,'before0043.dump')
+  utility('pg_dump',['-Fc','--no-owner','--dbname',b.url,'-f',beforeAreas]);utility('pg_restore',['--list',beforeAreas])
+  metrics.before0043_backup_bytes=fs.statSync(beforeAreas).size
+  const restored43=await create();utility('pg_restore',['--no-owner','--exit-on-error','--dbname',restored43.url,beforeAreas]);b=restored43
   await migrateUrl(b.url, { set: 'crm' })
   const journalAfter = (await b.client.query('SELECT hash,created_at FROM crm.__drizzle_migrations ORDER BY created_at')).rows
-  assert.equal(journalAfter.length, 43)
+  assert.equal(journalAfter.length, 44)
+  assert.deepEqual(journalAfter.slice(0,43),prefix43)
+  assert.equal((await b.client.query('SELECT count(*)::int n FROM crm.business_areas')).rows[0].n,0)
+  assert.equal((await b.client.query('SELECT business_area_id FROM crm.offers WHERE id=$1',[offer])).rows[0].business_area_id,null)
   await migrateUrl(b.url, { set: 'crm' }); assert.deepEqual((await b.client.query('SELECT hash,created_at FROM crm.__drizzle_migrations ORDER BY created_at')).rows, journalAfter)
   assert.equal((await b.client.query('SELECT count(*)::int n FROM crm.company_members')).rows[0].n, 3)
   assert.equal((await b.client.query('SELECT count(*)::int n FROM crm.release_fixture_link JOIN public.release_fixture_parent ON parent_id=id')).rows[0].n, 1)
@@ -79,11 +90,11 @@ try {
   await assert.rejects(b.client.query('UPDATE crm.flow_runs SET offer_scoped=true WHERE id=$1', [rows[0].run]), /invalid offer run scope/)
   await assert.rejects(b.client.query("INSERT INTO crm.flow_runs(company_id,flow_id,contact_id,chat_id,status) VALUES($1,$2,$3,$4,'running')", [company, flow, rows[0].contact, rows[0].chat]), e => e.code === '23505')
   await assert.rejects(b.client.query('DELETE FROM public.release_fixture_parent WHERE id=$1', [parent]), e => e.code === '23503')
-  const finalDump = path.join(dir, 'after0042.dump'); utility('pg_dump', ['-Fc', '--no-owner', '--dbname', b.url, '-f', finalDump]); utility('pg_restore', ['--no-owner', '--exit-on-error', '--dbname', c.url, finalDump])
+  const finalDump = path.join(dir, 'after0043.dump'); utility('pg_dump', ['-Fc', '--no-owner', '--dbname', b.url, '-f', finalDump]); utility('pg_restore', ['--no-owner', '--exit-on-error', '--dbname', c.url, finalDump])
   assert.deepEqual((await c.client.query('SELECT hash,created_at FROM crm.__drizzle_migrations ORDER BY created_at')).rows, journalAfter)
   assert.deepEqual((await c.client.query('SELECT id,offer_scoped FROM crm.flow_runs ORDER BY id')).rows, scope)
   await assert.rejects(c.client.query('UPDATE crm.flow_runs SET offer_scoped=true WHERE id=$1', [rows[0].run]), /invalid offer run scope/)
-  metrics.passed = ['backup/restore0038 with public dependency', 'one shared company and three member identities preserved', '0039->0042 valid opportunity backfill and legacy scope', '43-entry journal idempotence', 'unique indexes and scope/FK triggers', 'post0042 dump/restore', 'RPO tail-loss demonstrated without automatic production restore']
+  metrics.passed = ['backup/restore0038 with public dependency', 'one shared company and three existing member identities preserved', '0039->0042 valid opportunity backfill and legacy scope', 'backup/restore0042 then upgrade0043 without changing43-prefix or assigning existing offers', '44-entry journal idempotence', 'unique indexes and scope/FK triggers', 'post0043 dump/restore', 'RPO tail-loss demonstrated without automatic production restore']
   fs.writeFileSync(path.join(process.env.CRM_REPORT_DIR, 'migration-restore.json'), JSON.stringify(metrics, null, 2))
 } finally {
   for (const client of clients) await client.end()
