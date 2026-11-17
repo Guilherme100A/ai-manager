@@ -74,12 +74,27 @@ try {
   utility('pg_dump',['-Fc','--no-owner','--dbname',b.url,'-f',beforeAreas]);utility('pg_restore',['--list',beforeAreas])
   metrics.before0043_backup_bytes=fs.statSync(beforeAreas).size
   const restored43=await create();utility('pg_restore',['--no-owner','--exit-on-error','--dbname',restored43.url,beforeAreas]);b=restored43
+  await migrateUrl(b.url, { set: 'crm', folders: { crm: partial(44) } })
+  const prefix44 = (await b.client.query('SELECT hash,created_at FROM crm.__drizzle_migrations ORDER BY created_at')).rows
+  assert.equal(prefix44.length, 44)
+  const waId = 'WA-migration-fixture'
+  await b.client.query("INSERT INTO crm.messages(company_id,chat_id,direction,sender_type,type,status,wa_message_id) VALUES($1,$2,'outbound','user','text','delivered',$3)", [company, rows[0].chat, waId])
+  await assert.rejects(b.client.query("INSERT INTO crm.messages(company_id,chat_id,direction,sender_type,type,status,wa_message_id) VALUES($1,$2,'inbound','contact','text','received',$3)", [company, rows[1].chat, waId]), e=>e.code==='23505')
+  const beforeIdentity = path.join(dir, 'before0044.dump')
+  utility('pg_dump', ['-Fc', '--no-owner', '--dbname', b.url, '-f', beforeIdentity]); utility('pg_restore', ['--list', beforeIdentity])
+  const restored44 = await create(); utility('pg_restore', ['--no-owner', '--exit-on-error', '--dbname', restored44.url, beforeIdentity]); b = restored44
   await migrateUrl(b.url, { set: 'crm' })
   const journalAfter = (await b.client.query('SELECT hash,created_at FROM crm.__drizzle_migrations ORDER BY created_at')).rows
-  assert.equal(journalAfter.length, 44)
+  assert.equal(journalAfter.length, 45)
+  assert.deepEqual(journalAfter.slice(0,44),prefix44)
   assert.deepEqual(journalAfter.slice(0,43),prefix43)
   assert.equal((await b.client.query('SELECT count(*)::int n FROM crm.business_areas')).rows[0].n,0)
   assert.equal((await b.client.query('SELECT business_area_id FROM crm.offers WHERE id=$1',[offer])).rows[0].business_area_id,null)
+  const waIndexes = (await b.client.query("SELECT indexname FROM pg_indexes WHERE schemaname='crm' AND indexname IN ('messages_company_chat_wa_id_uq','messages_company_wa_id_uq')")).rows
+  assert.deepEqual(waIndexes.map(x=>x.indexname), ['messages_company_chat_wa_id_uq'])
+  await b.client.query("INSERT INTO crm.messages(company_id,chat_id,direction,sender_type,type,status,wa_message_id) VALUES($1,$2,'inbound','contact','text','received',$3)", [company, rows[1].chat, waId])
+  await assert.rejects(b.client.query("INSERT INTO crm.messages(company_id,chat_id,direction,sender_type,type,status,wa_message_id) VALUES($1,$2,'inbound','contact','text','received',$3)", [company, rows[1].chat, waId]), e=>e.code==='23505')
+  assert.equal((await b.client.query('SELECT count(*)::int n FROM crm.messages WHERE company_id=$1 AND wa_message_id=$2', [company,waId])).rows[0].n, 2)
   await migrateUrl(b.url, { set: 'crm' }); assert.deepEqual((await b.client.query('SELECT hash,created_at FROM crm.__drizzle_migrations ORDER BY created_at')).rows, journalAfter)
   assert.equal((await b.client.query('SELECT count(*)::int n FROM crm.company_members')).rows[0].n, 3)
   assert.equal((await b.client.query('SELECT count(*)::int n FROM crm.release_fixture_link JOIN public.release_fixture_parent ON parent_id=id')).rows[0].n, 1)
@@ -90,11 +105,12 @@ try {
   await assert.rejects(b.client.query('UPDATE crm.flow_runs SET offer_scoped=true WHERE id=$1', [rows[0].run]), /invalid offer run scope/)
   await assert.rejects(b.client.query("INSERT INTO crm.flow_runs(company_id,flow_id,contact_id,chat_id,status) VALUES($1,$2,$3,$4,'running')", [company, flow, rows[0].contact, rows[0].chat]), e => e.code === '23505')
   await assert.rejects(b.client.query('DELETE FROM public.release_fixture_parent WHERE id=$1', [parent]), e => e.code === '23503')
-  const finalDump = path.join(dir, 'after0043.dump'); utility('pg_dump', ['-Fc', '--no-owner', '--dbname', b.url, '-f', finalDump]); utility('pg_restore', ['--no-owner', '--exit-on-error', '--dbname', c.url, finalDump])
+  const finalDump = path.join(dir, 'after0044.dump'); utility('pg_dump', ['-Fc', '--no-owner', '--dbname', b.url, '-f', finalDump]); utility('pg_restore', ['--no-owner', '--exit-on-error', '--dbname', c.url, finalDump])
   assert.deepEqual((await c.client.query('SELECT hash,created_at FROM crm.__drizzle_migrations ORDER BY created_at')).rows, journalAfter)
   assert.deepEqual((await c.client.query('SELECT id,offer_scoped FROM crm.flow_runs ORDER BY id')).rows, scope)
   await assert.rejects(c.client.query('UPDATE crm.flow_runs SET offer_scoped=true WHERE id=$1', [rows[0].run]), /invalid offer run scope/)
-  metrics.passed = ['backup/restore0038 with public dependency', 'one shared company and three existing member identities preserved', '0039->0042 valid opportunity backfill and legacy scope', 'backup/restore0042 then upgrade0043 without changing43-prefix or assigning existing offers', '44-entry journal idempotence', 'unique indexes and scope/FK triggers', 'post0043 dump/restore', 'RPO tail-loss demonstrated without automatic production restore']
+  assert.equal((await c.client.query('SELECT count(*)::int n FROM crm.messages WHERE company_id=$1 AND wa_message_id=$2', [company,waId])).rows[0].n, 2)
+  metrics.passed = ['backup/restore0038 with public dependency', 'one shared company and three existing member identities preserved', '0039->0042 valid opportunity backfill and legacy scope', 'backup/restore0042 then upgrade0043 without changing43-prefix or assigning existing offers', 'backup/restore44 then upgrade45 preserving44-prefix and old outbound', 'two chats may contain same WA id, same-chat duplicate rejected', '45-entry journal idempotence', 'unique indexes and scope/FK triggers', 'post0044 dump/restore', 'RPO tail-loss demonstrated without automatic production restore']
   fs.writeFileSync(path.join(process.env.CRM_REPORT_DIR, 'migration-restore.json'), JSON.stringify(metrics, null, 2))
 } finally {
   for (const client of clients) await client.end()

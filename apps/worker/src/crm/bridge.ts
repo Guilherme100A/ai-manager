@@ -122,6 +122,7 @@ export interface CrmBridgeTargets {
 }
 
 export interface CreateCrmBridgeOptions {
+  validatePrivateMedia?: (sessionId: string, content: OutgoingContent) => Promise<void>
   db: Database
   queue: Pick<MessageQueue, 'enqueue' | 'get'>
   /** Transporte vivo da sessão; `undefined` se a sessão não estiver conectada. */
@@ -177,12 +178,18 @@ export function createCrmBridgeTargets(opts: CreateCrmBridgeOptions): CrmBridgeT
         if (typeof input.actor === 'string') req.actor = input.actor
         if (typeof input.contactId === 'string') req.contactId = input.contactId
         if (typeof input.groupId === 'string') req.groupId = input.groupId
-        return withClientId(await dedupe.run(sessionId, clientMessageId, () => pipeline.send(req), lookup), clientMessageId)
+        return withClientId(await dedupe.run(sessionId, clientMessageId, async () => {
+          await opts.validatePrivateMedia?.(sessionId, req.content)
+          return pipeline.send(req)
+        }, lookup), clientMessageId)
       },
       sendGroup: async (input) => {
         const sessionId = String(input.sessionId ?? '')
         const clientMessageId = optionalString(input.clientMessageId)
-        const send = () => pipeline.sendGroup({ sessionId, groupId: String(input.groupId ?? ''), content: input.content as OutgoingContent, actor: typeof input.actor === 'string' ? input.actor : '' })
+        const send = async () => {
+          await opts.validatePrivateMedia?.(sessionId, input.content as OutgoingContent)
+          return pipeline.sendGroup({ sessionId, groupId: String(input.groupId ?? ''), content: input.content as OutgoingContent, actor: typeof input.actor === 'string' ? input.actor : '' })
+        }
         return withClientId(await dedupe.run(sessionId, clientMessageId, send, lookup), clientMessageId)
       },
     },

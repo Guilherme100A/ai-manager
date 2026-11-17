@@ -70,6 +70,8 @@ services:
       GROUP_AUTOMATION_AUTO_ENABLE: ${GROUP_AUTOMATION_AUTO_ENABLE:-false}
       WORKER_HEALTH_PORT: '9464'
       WORKER_INTERNAL_PORT: '9465'
+      # Somente rede interna Docker; o token segue em header, nunca na referencia da midia.
+      CRM_MEDIA_INTERNAL_URL: http://crm-api:3000
     ports:
       - '127.0.0.1:${WORKER_HEALTH_HOST_PORT:-9464}:9464'
       - '127.0.0.1:${WORKER_INTERNAL_HOST_PORT:-9465}:9465'
