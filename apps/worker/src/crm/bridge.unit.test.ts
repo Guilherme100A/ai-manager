@@ -5,6 +5,7 @@ import type { Database } from '@wsm/db'
 import { bridgeHandlers, createInternalApp, type BridgeTargets } from '../boot/internal-server'
 import { assertSupportedContent, createCrmBridgeTargets } from './bridge'
 import { ClientMessageDedupe, DedupeConflictError, type DedupeRedis } from './dedupe'
+import { privateCrmMediaResolver } from './private-media'
 
 class MemoryRedis implements DedupeRedis {
   readonly data = new Map<string, string>()
@@ -82,6 +83,30 @@ const baseTargets = (): BridgeTargets => ({
 })
 
 describe('bridgeHandlers com e sem os alvos do CRM', () => {
+  it('rollout: new worker + old CRM 404 never queues; explicit later retry queues once when endpoint is ready', async () => {
+    let ready = false
+    const sha = 'a'.repeat(64), sessionId = '11111111-1111-4111-8111-111111111111'
+    const request = vi.fn(async () => ready ? Response.json({ sha256: sha, size: 10 }) : new Response('', { status: 404 }))
+    const privateMedia = privateCrmMediaResolver({ baseUrl: 'http://crm-api:3000', token: 'fixture', fetch: request as typeof fetch })
+    const pipeline = { send: vi.fn(async () => view('m1')), sendGroup: vi.fn() }
+    const crm = createCrmBridgeTargets({ db: {} as Database, queue: { enqueue: vi.fn(), get: async () => view('m1') } as never, getTransport: () => undefined, redis: new MemoryRedis(), pipeline, validatePrivateMedia: privateMedia.preflight })
+    const req = { sessionId, phone: '+12025550123', content: { image: { url: 'blob:' + sha } }, clientMessageId: 'stable-fixture' }
+    await expect(crm.messages.send(req)).rejects.toThrow('CRM_PRIVATE_MEDIA_UNAVAILABLE')
+    expect(pipeline.send).not.toHaveBeenCalled()
+    ready = true
+    await crm.messages.send(req)
+    await crm.messages.send(req)
+    expect(pipeline.send).toHaveBeenCalledTimes(1)
+    expect(request).toHaveBeenCalledTimes(2)
+  })
+
+  it('new CRM keeps the legacy worker request shape; deployment must still wait for private-reader readiness', async () => {
+    const pipeline = { send: vi.fn(async () => view('legacy')), sendGroup: vi.fn() }
+    const crm = createCrmBridgeTargets({ db: {} as Database, queue: { enqueue: vi.fn(), get: vi.fn() } as never, getTransport: () => undefined, redis: new MemoryRedis(), pipeline })
+    const content = { image: { url: 'blob:' + 'b'.repeat(64) } }
+    await crm.messages.send({ sessionId: 'fixture', phone: '+12025550123', content })
+    expect(pipeline.send).toHaveBeenCalledWith({ sessionId: 'fixture', phone: '+12025550123', content, origin: 'crm' })
+  })
   it('sem montar: nenhum alvo novo na lista; montado: aparecem só os sete', () => {
     const without = bridgeHandlers(baseTargets())
     expect(Object.keys(without).sort()).toEqual(['health', 'messages', 'sessions'])

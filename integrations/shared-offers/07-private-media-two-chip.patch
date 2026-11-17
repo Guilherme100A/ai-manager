@@ -1,0 +1,649 @@
+diff --git a/apps/api/src/routes/index.ts b/apps/api/src/routes/index.ts
+index 3d0d5fd7142eb8a8d952d82be79c03d263068a48..990f7830403b9d1667b0358eed68ae5c700d35d1 100644
+--- a/apps/api/src/routes/index.ts
++++ b/apps/api/src/routes/index.ts
+@@ -69,8 +69,10 @@ import { appConfigRoutes } from './app-config/index'
+ import { e2eRoutes, isE2eEnabled } from '../e2e/index'
+ import { flowCopilotRoutes } from './flow-copilot/index'
+ import { internalSpyImportRoutes } from './internal-spy-import/index'
++import { internalWaMediaRoutes } from './internal-wa-media/index'
+ export function registerRoutes(app: Hono<AppEnv>, deps: ResolvedDeps): void {
+   app.route('/', internalSpyImportRoutes(deps))
++  app.route('/', internalWaMediaRoutes(deps))
+   // T17: com E2E=1, primeiro de todos (põe os fakes nas deps antes das outras rotas lerem mailer/waGateway).
+   if (isE2eEnabled()) app.route('/', e2eRoutes(deps))
+   // Antes de qualquer rota: empresa ativa desativada → 403 company_inactive (T22).
+diff --git a/apps/api/src/routes/internal-wa-media/index.ts b/apps/api/src/routes/internal-wa-media/index.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d42c2c8577dc274309a241c1e1ca959f0cd4572f
+--- /dev/null
++++ b/apps/api/src/routes/internal-wa-media/index.ts
+@@ -0,0 +1,35 @@
++import { timingSafeEqual } from 'node:crypto'
++import { Hono } from 'hono'
++import { bodyLimit } from 'hono/body-limit'
++import { and, eq, isNull } from 'drizzle-orm'
++import { companies, connections } from '@crm/db'
++import { DEFAULT_MEDIA_LIMITS, mediaKindOf, ownsPrivateMedia } from '@crm/core'
++import { FsBlobStore } from '@crm/node-kit'
++import type { AppEnv, ResolvedDeps } from '../../lib/types'
++import { ApiError } from '../../lib/errors'
++
++/** Leitura privada worker -> CRM. Sem URL publica, token na query ou mount compartilhado. */
++export function internalWaMediaRoutes(deps: ResolvedDeps) {
++  const app = new Hono<AppEnv>()
++  app.post('/internal/wa-media', bodyLimit({ maxSize: 2048 }), async c => {
++    const expected = Buffer.from(process.env.INTERNAL_TOKEN?.trim() ?? '')
++    const given = Buffer.from(c.req.header('authorization')?.replace(/^Bearer\s+/i, '').trim() ?? '')
++    if (!expected.length || expected.length !== given.length || !timingSafeEqual(expected, given)) throw new ApiError('UNAUTHORIZED', 'Acesso interno necessario')
++    const input = await c.req.json<{ session_id?: unknown; sha256?: unknown; metadata_only?: unknown }>().catch(() => null)
++    if (typeof input?.session_id !== 'string' || input.session_id.length > 100 || typeof input.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(input.sha256))
++      throw new ApiError('VALIDATION_ERROR', 'Referencia de midia invalida')
++    const [conn] = await deps.db.select({ companyId: connections.companyId }).from(connections)
++      .innerJoin(companies, and(eq(companies.id, connections.companyId), eq(companies.active, true)))
++      .where(and(eq(connections.sessionId, input.session_id), isNull(connections.unlinkedAt), isNull(connections.scheduledForDeletionAt))).limit(1)
++    if (!conn || !await ownsPrivateMedia(deps.db, conn.companyId, input.sha256)) throw new ApiError('NOT_FOUND', 'Midia indisponivel para esta conexao')
++    const blobs = deps.blobStore ?? new FsBlobStore()
++    const info = await blobs.head(input.sha256)
++    const kind = info && mediaKindOf(info.mime)
++    if (!info || !kind || info.size > DEFAULT_MEDIA_LIMITS[kind]) throw new ApiError('NOT_FOUND', 'Midia indisponivel para esta conexao')
++    if (input.metadata_only === true) { c.header('cache-control', 'no-store'); return c.json({ sha256: input.sha256, size: info.size, mime: info.mime }, 200) }
++    const data = await blobs.get(input.sha256)
++    if (!data || data.length > DEFAULT_MEDIA_LIMITS[kind]) throw new ApiError('NOT_FOUND', 'Midia indisponivel para esta conexao')
++    return new Response(new Uint8Array(data), { headers: { 'content-type': info.mime, 'cache-control': 'no-store', 'x-content-sha256': input.sha256 } })
++  })
++  return app
++}
+diff --git a/apps/api/src/routes/internal-wa-media/private-media.db.unit.test.ts b/apps/api/src/routes/internal-wa-media/private-media.db.unit.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..eb1dd9be4a19272134dc7921acd3556ef6d1c2c7
+--- /dev/null
++++ b/apps/api/src/routes/internal-wa-media/private-media.db.unit.test.ts
+@@ -0,0 +1,80 @@
++import { randomUUID } from 'node:crypto'
++import { mkdtemp, rm } from 'node:fs/promises'
++import { join } from 'node:path'
++import { tmpdir } from 'node:os'
++import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
++import { auditLogs, companies, connections, createDb, type Database } from '@crm/db'
++import { createTempDatabase, type TempDatabase } from '@crm/db/testing'
++import { createLogger, FsBlobStore, MemoryMailer, redisConnection } from '@crm/node-kit'
++import { MediaService, privateMediaOwnershipRecorder } from '@crm/core'
++import { eq } from 'drizzle-orm'
++import { createApp, type RedisClient } from '../../app'
++
++let temp: TempDatabase, db: Database, redis: RedisClient, dir: string, blobs: FsBlobStore, media: MediaService, app: ReturnType<typeof createApp>
++const TOKEN = 'synthetic-internal-media-token'
++beforeAll(async () => {
++  vi.stubEnv('INTERNAL_TOKEN', TOKEN)
++  temp = await createTempDatabase({ migrate: true })
++  db = createDb(temp.url, { max: 4 })
++  redis = redisConnection({ url: process.env.REDIS_URL ?? 'redis://127.0.0.1:6379/1' })
++  dir = await mkdtemp(join(tmpdir(), 'crm-private-media-'))
++  blobs = new FsBlobStore({ dir })
++  media = new MediaService({ blobStore: blobs, signingKey: Buffer.alloc(32, 1), onStored: privateMediaOwnershipRecorder(db) })
++  app = createApp({ db, redis, blobStore: blobs, mailer: new MemoryMailer(), logger: createLogger({ level: 'silent' }) })
++}, 120000)
++afterAll(async () => { redis?.disconnect(); await db?.$client.end(); await temp?.drop(); if (dir) await rm(dir, { recursive: true, force: true }); vi.unstubAllEnvs() })
++
++async function tenant() {
++  const [company] = await db.insert(companies).values({ name: 'Media fixture', slug: randomUUID() }).returning()
++  const [connection] = await db.insert(connections).values({ companyId: company!.id, sessionId: randomUUID(), name: 'Private fixture', connectionState: 'open' }).returning()
++  return { companyId: company!.id, sessionId: connection!.sessionId, connectionId: connection!.id }
++}
++const read = (session: string, sha: string, token: string | null = TOKEN, metadata = false) => app.request('/internal/wa-media', {
++  method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { authorization: 'Bearer ' + token } : {}) },
++  body: JSON.stringify({ session_id: session, sha256: sha, ...(metadata ? { metadata_only: true } : {}) }),
++})
++
++describe('private CRM media endpoint, no public media URL', () => {
++  it.each(['image/png', 'audio/mpeg', 'application/pdf', 'video/mp4'])('%s has authenticated metadata and exact bytes for its own session', async mime => {
++    const t = await tenant(), bytes = Buffer.from('private ' + mime)
++    const asset = await media.upload(t.companyId, bytes, mime)
++    const meta = await read(t.sessionId, asset.sha256, TOKEN, true)
++    expect(meta.status).toBe(200)
++    expect(await meta.json()).toEqual({ sha256: asset.sha256, size: bytes.length, mime })
++    const response = await read(t.sessionId, asset.sha256)
++    expect(response.status).toBe(200)
++    expect(response.headers.get('cache-control')).toBe('no-store')
++    expect(response.headers.get('content-type')).toBe(mime)
++    expect(Buffer.from(await response.arrayBuffer())).toEqual(bytes)
++  })
++
++  it('foreign company/session cannot read or preflight a guessed existing hash', async () => {
++    const a = await tenant(), b = await tenant(), asset = await media.upload(a.companyId, Buffer.from('only company A'), 'image/png')
++    expect((await read(b.sessionId, asset.sha256)).status).toBe(404)
++    expect((await read(b.sessionId, asset.sha256, TOKEN, true)).status).toBe(404)
++    expect((await read(randomUUID(), asset.sha256)).status).toBe(404)
++    expect((await read(a.sessionId, asset.sha256, null)).status).toBe(401)
++    expect((await read(a.sessionId, asset.sha256, 'invalid')).status).toBe(401)
++    expect((await read(a.sessionId, '../path')).status).toBe(422)
++  })
++
++  it('unlinked, deleting and disabled-company sessions are denied without publishing bytes', async () => {
++    const t = await tenant(), asset = await media.upload(t.companyId, Buffer.from('blocked fixture'), 'application/pdf')
++    await db.update(connections).set({ unlinkedAt: new Date() }).where(eq(connections.id, t.connectionId))
++    expect((await read(t.sessionId, asset.sha256)).status).toBe(404)
++    await db.update(connections).set({ unlinkedAt: null, scheduledForDeletionAt: new Date() }).where(eq(connections.id, t.connectionId))
++    expect((await read(t.sessionId, asset.sha256)).status).toBe(404)
++    await db.update(connections).set({ scheduledForDeletionAt: null }).where(eq(connections.id, t.connectionId))
++    await db.update(companies).set({ active: false }).where(eq(companies.id, t.companyId))
++    expect((await read(t.sessionId, asset.sha256)).status).toBe(404)
++  })
++
++  it('legacy audited upload is accepted, disk presence or a flow reference alone never grant ownership', async () => {
++    const t = await tenant(), stored = await blobs.put(Buffer.from('legacy uploaded file'), 'image/png')
++    expect((await read(t.sessionId, stored.sha256)).status).toBe(404)
++    await db.insert(auditLogs).values({ companyId: t.companyId, action: 'flows.update', targetType: 'flow', targetId: stored.sha256 })
++    expect((await read(t.sessionId, stored.sha256)).status).toBe(404)
++    await db.insert(auditLogs).values({ companyId: t.companyId, action: 'media.upload', targetType: 'media', targetId: stored.sha256 })
++    expect((await read(t.sessionId, stored.sha256)).status).toBe(200)
++  })
++})
+diff --git a/apps/api/src/routes/media/index.ts b/apps/api/src/routes/media/index.ts
+index 85f71a8d1d125568646d9a2b0c534d889e71eac8..e5023c01351ae34c2c0473bb5029a787a5420833 100644
+--- a/apps/api/src/routes/media/index.ts
++++ b/apps/api/src/routes/media/index.ts
+@@ -3,7 +3,7 @@
+ import { Hono } from 'hono'
+ import { bodyLimit } from 'hono/body-limit'
+ import { z } from 'zod'
+-import { blobUrl } from '@crm/core'
++import { blobUrl, privateMediaOwnershipRecorder } from '@crm/core'
+ import { validate } from '../../lib/validate'
+ import { DEFAULT_MEDIA_LIMITS, MediaError, MediaService, mediaKindOf, type MediaKind } from '@crm/core'
+ import { FsBlobStore } from '@crm/node-kit'
+@@ -29,6 +29,7 @@ export function mediaServiceFor(deps: ResolvedDeps): MediaService {
+   let svc = services.get(deps)
+   if (!svc) {
+     svc = new MediaService({
++      onStored: privateMediaOwnershipRecorder(deps.db),
+       blobStore: deps.blobStore ?? new FsBlobStore(),
+       ...(deps.mediaSigningKey ? { signingKey: deps.mediaSigningKey } : {}),
+       ...(deps.mediaLimits ? { limits: deps.mediaLimits } : {}),
+diff --git a/apps/worker/src/boot/production.ts b/apps/worker/src/boot/production.ts
+index 0f0ade308cff241e5c8165780f02db0d4cf7418a..11ac223c75b09e51e0e71c19e47c13f96c76a51e 100644
+--- a/apps/worker/src/boot/production.ts
++++ b/apps/worker/src/boot/production.ts
+@@ -44,6 +44,7 @@ import {
+ import type { AiKeyProvider, Database } from '@crm/db'
+ import { createAiSdkProvider, FakeLlm, LLM_PROVIDERS, toPttOgg, type LlmProvider, type LlmProviderId, type LlmRequest, type LlmResult } from '@crm/ai'
+ import { FsBlobStore, type BlobStore, type Logger } from '@crm/node-kit'
++import { privateMediaOwnershipRecorder } from '@crm/core'
+ import type { WaGateway } from '@crm/wa-port'
+ import type { Redis } from 'ioredis'
+ import { configureChatsConsumer, onCrmInbound } from '../consumers/chats'
+@@ -169,7 +170,7 @@ export function configureWorkerProduction(deps: WorkerProductionDeps): WorkerPro
+   const env = deps.env ?? process.env
+   const logger = deps.logger ? { logger: deps.logger } : {}
+   const publisher = deps.publisher ?? new RealtimePublisher({ redis })
+-  const media = new MediaService({ blobStore: deps.blobStore ?? new FsBlobStore() })
++  const media = new MediaService({ blobStore: deps.blobStore ?? new FsBlobStore(), onStored: privateMediaOwnershipRecorder(db) })
+   const files = deps.files ?? new FsExportFileStore()
+   const resolveSession = crmConnectionSessionResolver(db)
+   const pttConverter = (data: Uint8Array) => toPttOgg(data)
+diff --git a/docs/private-media-and-two-chip-delivery.md b/docs/private-media-and-two-chip-delivery.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..c145cc2776c1e1865ab684f536e98d30870e49c5
+--- /dev/null
++++ b/docs/private-media-and-two-chip-delivery.md
+@@ -0,0 +1,68 @@
++# Midia privada e ingestao entre dois chips
++
++O ID de uma mensagem WhatsApp pertence a conexao (conta), nao ao contato/chat.
++A mesma empresa pode observar saida de um chip e entrada de outro com o mesmo
++WAID. Migration0044 mantem as44migrations anteriores e cria unicidade por
++empresa/conexao/WAID. Na mesma conexao, PN e LID ainda nao mapeados continuam
++deduplicados: nao criam uma segunda mensagem, unread ou onInbound. Por isso
++mergeIdentity mantem os IDs e referencias existentes, sem aliases, snapshots,
++consolidacao destrutiva, mudancas de DTO, contadores ou leitura do historico.
++
++messages.connection_id e derivado no BEFORE INSERT/UPDATE de company+chat e
++validado contra a empresa da conexao. Inserts existentes podem omitir a coluna
++(default NULL antes do trigger; persistencia NOT NULL). Conexao explicita errada
++e tenant/chat incompativel sao recusados. FK composto messages(company,chat,
++connection) -> chats(company,id,connection) protege inclusive mudanca no chatpai.
++Mensagem pode mudar de chat dentro da mesma conexao (merge), nunca de conexao.
++Backfill valida todas as linhas antes de NOT NULL/FK/indice; drift aborta, sem
++atribuir dados arbitrariamente. Nenhum historico ou evento antigo e reprocessado.
++
++Lookup e conflito de ingestao usam empresa/conexao/WAID, conforme o indice.
++ACK tambem e limitado a conexao/outbound: pipeline exato tem prioridade e fallback
++por WAID nao escolhe arbitrariamente entre linhas. Reentrega local nao repete
++nao-lidas nem wait. UUIDs, pipelines, reacoes e quotes permanecem sem remapeamento.
++
++`blob:<sha256>` e uma referencia privada, nunca um caminho de arquivo do WSM.
++Antes de enfileirar, o WSM consulta metadados em POST /internal/wa-media no CRM;
++no ponto de entrega, consulta os bytes e verifica SHA256 antes do socket. A fila
++persiste apenas a referencia. Imagem/audio/PDF/video/sticker conservam MIME,
++legenda, nome e PTT; o transporte recebe Buffer sem alterar o registro da fila.
++Nao ha URL publica, token na query, copia permanente de bytes no WSM ou mount
++novo. O token interno existente segue somente em header para origem configurada
++em CRM_MEDIA_INTERNAL_URL; redirects sao recusados e tamanho/timeout limitados.
++
++O CRM deriva a empresa da sessao, recusa conexao desvinculada/em exclusao ou
++empresa inativa, e exige prova persistida de que a empresa gravou aquela midia.
++Uploads antigos auditados como media.upload ou ai_voices.generate continuam
++validos. Novas gravacoes, inclusive PTT e importacao interna, gravam a prova
++media.private_store. Presenca do arquivo, hash em um fluxo ou nome de empresa
++na requisicao nao concede acesso. Blobs antigos sem prova exigem reimportacao
++autorizada; nao se assume propriedade para permitir leitura. O endpoint nao
++retorna dados para credenciais publicas do painel ou MCP.
++
++Nó done significa envio aceito/enfileirado, nao entrega WhatsApp. O preflight
++recusa midia ausente/nao autorizada antes da fila. Falhas posteriores de rede ou
++do WhatsApp continuam sendo exibidas no status real da mensagem; confirmar a
++entrega requer correlacionar pipeline, WAID/ACK e inbound da outra sessao.
++
++Rollout: worker novo + CRM antigo recusa midia privada antes de enfileirar
++(endpoint ausente/404), sem fallback, reenvio ou acesso publico. CRM novo + worker
++antigo aceita o contrato anterior, mas o leitor blob antigo continua incapaz de
++enviar esses arquivos; manter o teste pausado. Somente a combinacao final,
++validada com consulta privada autenticada e hash, libera a retomada coordenada.
++O wrapper sobe WSM antes do upgrade CRM; health geral sozinho nao prova que a
++ponte de midia esta pronta.
++
++Antes de merge/deploy, confirmar run/fluxo pausados e que nao existem queued,
++retrying ou processing das duas sessoes alvo na fila WSM. Mensagens terminalmente
++delivered/failed nao devem ser reenviadas por startup/recovery. Processar worker
++novo reconecta sessoes e pode consumir filas: nao confundir com ausencia de
++efeitos so porque o run CRM esta pausado. Nao alterar proxy, aquecimento ou
++fingerprint para tentar resolver ingestao.
++
++Nao retomar run nem reprocessar backlog automaticamente. Status historico deve
++ser reconciliado somente por IDs e ACKs comprovados, sem novo envio. Se for
++necessario restaurar entradas antigas, combinar previamente IDs exatos e ingestao
++historica sem automacao com o coordenador. O teste real usa apenas os dois chips
++autorizados, pagamento ficticio e uma resposta nova com chave idempotente; nunca
++simulacao offline como prova de entrega.
+diff --git a/packages/core/src/chats/ingest/chat-ingest.db.unit.test.ts b/packages/core/src/chats/ingest/chat-ingest.db.unit.test.ts
+index f15b072bbf2c0d66223721f9815d8251a7783c12..860262b978224cf732a93faedae59cd2c0b6137e 100644
+--- a/packages/core/src/chats/ingest/chat-ingest.db.unit.test.ts
++++ b/packages/core/src/chats/ingest/chat-ingest.db.unit.test.ts
+@@ -1,12 +1,12 @@
+ // Postgres real (SPEC 3.10): banco descartável; FakeWaGateway e publisher em memória.
+ import { randomBytes } from 'node:crypto'
+-import { auditLogs, chats, companies, connections, contacts, createDb, messages, type Database } from '@crm/db'
++import { auditLogs, chats, companies, connections, contacts, createDb, messageReactions, messageSchedules, messages, users, type Database } from '@crm/db'
+ import { createTempDatabase, type TempDatabase } from '@crm/db/testing'
+ import type { IncomingMessage, WaEvent } from '@crm/wa-port'
+ import { FakeWaGateway } from '@crm/wa-port/testing'
+ import { and, eq } from 'drizzle-orm'
+ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+-import { ChatIngest, type CrmInboundEvent } from './chat-ingest'
++import { ChatIngest, type CrmInboundEvent, type IngestOutcome } from './chat-ingest'
+ 
+ let temp: TempDatabase
+ let db: Database
+@@ -54,7 +54,110 @@ async function setup(settings: Record<string, unknown> = {}) {
+   return { companyId, connectionId, sessionId, gw, published, inbound, ingest, msg, chatOf }
+ }
+ 
++function single(outcome: IngestOutcome | IngestOutcome[]): IngestOutcome {
++  if (Array.isArray(outcome)) throw new Error('Expected one event outcome, not history batch')
++  return outcome
++}
++
+ describe('ChatIngest', () => {
++  it.each([0, 1, 2])('PN/LID dedup stays local through repeated/concurrent merge with %i chats already read', async alreadyRead => {
++    const s = await setup(), wa = 'WA-identity-' + randomBytes(4).toString('hex')
++    const pnEvent = s.msg({ id: wa, from: '5511999990001@s.whatsapp.net' })
++    const lidEvent = s.msg({ id: wa + '-lid', from: '111222333444555@lid' })
++    const pn = single(await s.ingest.handle(pnEvent)), lid = single(await s.ingest.handle(lidEvent))
++    if (pn.status !== 'stored' || lid.status !== 'stored') throw new Error('Expected two identity fixtures')
++    const duplicate = s.msg({ id: wa, from: '111222333444555@lid' })
++    expect(single(await s.ingest.handle(duplicate))).toMatchObject({ status: 'duplicate', chatId: pn.chatId, messageId: pn.messageId })
++    if (alreadyRead > 0) await db.update(chats).set({ unreadCount: 0 }).where(eq(chats.id, pn.chatId))
++    if (alreadyRead > 1) await db.update(chats).set({ unreadCount: 0 }).where(eq(chats.id, lid.chatId))
++    const [reaction] = await db.insert(messageReactions).values({ companyId: s.companyId, messageId: lid.messageId, actorType: 'contact', emoji: '👍' }).returning()
++    const pipeline = 'pipeline-merge-' + randomBytes(5).toString('hex'), outWa = wa + '-out'
++    const [quoted] = await db.insert(messages).values({ companyId: s.companyId, chatId: lid.chatId, direction: 'outbound', senderType: 'user', type: 'text', body: 'quoted fixture', quotedWaMessageId: wa, status: 'sent', waMessageId: outWa, pipelineMessageId: pipeline }).returning()
++    const [user] = await db.insert(users).values({ name: 'Schedule fixture', email: randomBytes(8).toString('hex') + '@example.test', passwordHash: 'synthetic-not-login' }).returning()
++    const [schedule] = await db.insert(messageSchedules).values({ companyId: s.companyId, chatId: pn.chatId, kind: 'message', text: 'not executed', runAt: new Date('2030-01-01'), status: 'sent', createdByUserId: user!.id, lastMessageId: pn.messageId }).returning()
++    const mapping = { v: 1, type: 'contact.lid_mapping', session_id: s.sessionId, at: AT, lid: '111222333444555@lid', pn: '5511999990001@s.whatsapp.net' } as WaEvent
++    await Promise.all([s.ingest.handle(mapping), s.ingest.handle(mapping)])
++    await s.ingest.handle(mapping)
++    const rows = await db.select().from(chats).where(eq(chats.companyId, s.companyId))
++    expect(rows).toHaveLength(1)
++    expect(rows[0]!.unreadCount).toBe(2 - alreadyRead)
++    expect(single(await s.ingest.handle(duplicate))).toMatchObject({ status: 'duplicate', chatId: rows[0]!.id, messageId: pn.messageId })
++    expect(s.inbound).toHaveLength(2)
++    const history = await db.select().from(messages).where(eq(messages.companyId, s.companyId))
++    expect(history.map(m => m.id).sort()).toEqual([pn.messageId, lid.messageId, quoted!.id].sort())
++    expect(history.every(m => m.chatId === rows[0]!.id && m.connectionId === s.connectionId)).toBe(true)
++    expect(history.find(m => m.id === quoted!.id)).toMatchObject({ pipelineMessageId: pipeline, quotedWaMessageId: wa, waMessageId: outWa })
++    expect((await db.select().from(messageReactions).where(eq(messageReactions.id, reaction!.id)))[0]!.messageId).toBe(lid.messageId)
++    expect((await db.select().from(messageSchedules).where(eq(messageSchedules.id, schedule!.id)))[0]!.lastMessageId).toBe(pn.messageId)
++    for (const [messageId, status] of [[pipeline, 'delivered'], ['fallback-unmatched', 'read']] as const) {
++      expect(single(await s.ingest.handle({ v: 1, type: 'message.status', session_id: s.sessionId, at: AT, message_id: messageId, transport_message_id: outWa, status })).status).toBe('updated')
++    }
++    expect((await db.select().from(messages).where(eq(messages.id, quoted!.id)))[0]!.status).toBe('read')
++  })
++
++  it('derived connection keeps omitted-column inserts compatible and rejects foreign/moved message identity', async () => {
++    const s = await setup(), foreign = await setup(), first = single(await s.ingest.handle(s.msg()))
++    if (first.status !== 'stored') throw new Error('Expected stored fixture')
++    const [other] = await db.insert(connections).values({ companyId: s.companyId, sessionId: 'other-' + randomBytes(5).toString('hex'), name: 'Other' }).returning()
++    const [contact] = await db.insert(contacts).values({ companyId: s.companyId, name: 'Other' }).returning()
++    const [sameChat] = await db.insert(chats).values({ companyId: s.companyId, connectionId: s.connectionId, contactId: contact!.id }).returning()
++    const [otherChat] = await db.insert(chats).values({ companyId: s.companyId, connectionId: other!.id, contactId: contact!.id }).returning()
++    const f = single(await foreign.ingest.handle(foreign.msg()))
++    if (f.status !== 'stored') throw new Error('Expected foreign fixture')
++    const values = { companyId: s.companyId, chatId: first.chatId, direction: 'outbound' as const, senderType: 'user' as const, type: 'text', status: 'sent' as const, waMessageId: 'WA-guard-' + randomBytes(4).toString('hex') }
++    const [message] = await db.insert(messages).values(values).returning()
++    expect(message!.connectionId).toBe(s.connectionId)
++    const code = (err: unknown): string | undefined => { const e = err as { code?: string; cause?: { code?: string } }; return e.cause?.code ?? e.code }
++    await expect(db.insert(messages).values({ ...values, chatId: sameChat!.id })).rejects.toSatisfy((e: unknown) => code(e) === '23505')
++    for (const value of [{ ...values, connectionId: other!.id }, { ...values, connectionId: foreign.connectionId }, { ...values, chatId: f.chatId }, { ...values, companyId: foreign.companyId }]) {
++      await expect(db.insert(messages).values(value)).rejects.toSatisfy((e: unknown) => code(e) === '23503')
++    }
++    for (const value of [{ connectionId: other!.id }, { chatId: otherChat!.id }, { companyId: foreign.companyId, chatId: f.chatId, connectionId: foreign.connectionId }]) {
++      await expect(db.update(messages).set(value).where(eq(messages.id, message!.id))).rejects.toSatisfy((e: unknown) => code(e) === '23503')
++    }
++    await expect(db.update(chats).set({ connectionId: other!.id }).where(eq(chats.id, first.chatId))).rejects.toSatisfy((e: unknown) => code(e) === '23503')
++    await db.update(messages).set({ chatId: sameChat!.id }).where(eq(messages.id, message!.id))
++    expect((await db.select().from(messages).where(eq(messages.id, message!.id)))[0]).toMatchObject({ chatId: sameChat!.id, connectionId: s.connectionId })
++  })
++
++  it('same company: sender outbound must not suppress inbound on the other chip or its wait notification', async () => {
++    const s = await setup()
++    const [other] = await db.insert(connections).values({ companyId: s.companyId, sessionId: 'sender-' + randomBytes(4).toString('hex'), name: 'Other chip' }).returning()
++    const [contact] = await db.insert(contacts).values({ companyId: s.companyId, name: 'Fixture seller' }).returning()
++    const [outChat] = await db.insert(chats).values({ companyId: s.companyId, connectionId: other!.id, contactId: contact!.id }).returning()
++    const id = 'WA-two-chips-' + randomBytes(4).toString('hex')
++    await db.insert(messages).values({ companyId: s.companyId, chatId: outChat!.id, direction: 'outbound', senderType: 'user', type: 'text', status: 'delivered', waMessageId: id })
++    const event = s.msg({ id, text: 'fixture response' })
++    const result = single(await s.ingest.handle(event))
++    expect(result.status).toBe('stored')
++    expect(s.inbound).toHaveLength(1)
++    expect(s.inbound[0]).toMatchObject({ connection_id: s.connectionId, wa_message_id: id, text: 'fixture response' })
++    expect(single(await s.ingest.handle(event)).status).toBe('duplicate')
++    expect(s.inbound).toHaveLength(1)
++    const rows = await db.select().from(messages).where(and(eq(messages.companyId, s.companyId), eq(messages.waMessageId, id)))
++    expect(rows).toHaveLength(2)
++    expect(rows.map(r => r.direction).sort()).toEqual(['inbound', 'outbound'])
++    const [inChat] = await db.select().from(chats).where(eq(chats.id, s.inbound[0]!.chat_id))
++    expect(inChat!.unreadCount).toBe(1)
++  })
++
++  it('inbound winning the race does not strand sender processing; sent/delivered stay on sender connection', async () => {
++    const s = await setup(), id = 'WA-race-' + randomBytes(4).toString('hex')
++    const received = single(await s.ingest.handle(s.msg({ id })))
++    if (received.status !== 'stored') throw new Error('Expected stored inbound fixture')
++    const [other] = await db.insert(connections).values({ companyId: s.companyId, sessionId: 'out-' + randomBytes(4).toString('hex'), name: 'Sender' }).returning()
++    const [contact] = await db.insert(contacts).values({ companyId: s.companyId, name: 'Fixture' }).returning()
++    const [chat] = await db.insert(chats).values({ companyId: s.companyId, connectionId: other!.id, contactId: contact!.id }).returning()
++    const pipeline = 'pipeline-' + randomBytes(4).toString('hex')
++    const [out] = await db.insert(messages).values({ companyId: s.companyId, chatId: chat!.id, direction: 'outbound', senderType: 'flow', type: 'text', status: 'processing', pipelineMessageId: pipeline }).returning()
++    const sender = new ChatIngest({ db, resolveConnection: async () => ({ companyId: s.companyId, connectionId: other!.id }) })
++    for (const status of ['sent', 'delivered'] as const) expect(single(await sender.handle({ v: 1, type: 'message.status', session_id: other!.sessionId, at: AT, message_id: pipeline, transport_message_id: id, status })).status).toBe('updated')
++    expect((await db.select().from(messages).where(eq(messages.id, out!.id)))[0]).toMatchObject({ status: 'delivered', waMessageId: id })
++    expect((await db.select().from(messages).where(eq(messages.id, received.messageId)))[0]).toMatchObject({ status: 'received', direction: 'inbound' })
++    // Outra sessao nao pode atualizar pela chave de pipeline, nem por fallback ao ID WA.
++    expect(single(await s.ingest.handle({ v: 1, type: 'message.status', session_id: s.sessionId, at: AT, message_id: pipeline, transport_message_id: id, status: 'read' })).status).toBe('ignored')
++    expect((await db.select().from(messages).where(eq(messages.id, out!.id)))[0]!.status).toBe('delivered')
++  })
+   it('1ª mensagem cria contato (consentimento inbound), chat waiting e eventos; reentrega não duplica (AC-01/02)', async () => {
+     const s = await setup()
+     const ev = s.msg({ push_name: 'Ana' })
+diff --git a/packages/core/src/chats/ingest/chat-ingest.ts b/packages/core/src/chats/ingest/chat-ingest.ts
+index 52179708e2f54465292838964cabe3d3564da4de..02d0297a131357757b7abb23815a9c561559735d 100644
+--- a/packages/core/src/chats/ingest/chat-ingest.ts
++++ b/packages/core/src/chats/ingest/chat-ingest.ts
+@@ -1,6 +1,6 @@
+ import { OffersService } from '../../offers/service'
+ // Ingestão dos eventos WhatsApp (WaEvent v1) em contatos, chats e mensagens do CRM (SPEC T33; 03-chats).
+-// Idempotente: a mensagem é única por (empresa, wa_message_id), então reentregas não duplicam nem recontam.
++// Idempotente por empresa/conexao/wa_message_id; chips da mesma empresa podem observar a mesma mensagem.
+ // Mensagens de grupo, status e canais são ignoradas (SPEC 3.8). Opt-out por palavra-chave bloqueia na hora (1.4 nº 3).
+ // Revisão 3 (rastreamento Meta): mensagem ao vivo com referral de anúncio (`ctwa_clid`) grava o toque de atribuição;
+ // mensagem com código de link rastreável (`(ref XXXXXX)`) liga o clique ao contato e é gravada sem o código. Nos dois
+@@ -129,7 +129,8 @@ export class ChatIngest {
+     if (!conn) return { status: 'ignored', reason: 'unknown_session' }
+     const companyId = conn.companyId
+ 
+-    const exists = await this.findByWaId(companyId, m.id)
++    // A identidade e da conta WhatsApp, nao do chat PN/LID ainda nao mapeado.
++    const exists = await this.findByWaId(companyId, conn.connectionId, m.id)
+     if (exists) return { status: 'duplicate', chatId: exists.chatId, messageId: exists.id }
+ 
+     const identity = identityOf(m.from, m.alt_jid)
+@@ -205,7 +206,7 @@ export class ChatIngest {
+           waTimestamp: Number.isFinite(at.getTime()) ? at : null,
+           ...(fromContact ? {} : { sentAt: at }),
+         })
+-        .onConflictDoNothing({ target: [messages.companyId, messages.waMessageId], where: sql`${messages.waMessageId} is not null` })
++        .onConflictDoNothing({ target: [messages.companyId, messages.connectionId, messages.waMessageId], where: sql`${messages.waMessageId} is not null` })
+         .returning()
+       if (!message) return { duplicate: true as const, chatId: chat!.id }
+ 
+@@ -232,8 +233,8 @@ export class ChatIngest {
+     })
+ 
+     if (r.duplicate) {
+-      const dup = await this.findByWaId(companyId, m.id)
+-      return { status: 'duplicate', chatId: r.chatId, messageId: dup?.id ?? '' }
++      const dup = await this.findByWaId(companyId, conn.connectionId, m.id)
++      return { status: 'duplicate', chatId: dup?.chatId ?? r.chatId, messageId: dup?.id ?? '' }
+     }
+ 
+     // Link rastreável sem código (opcional): 1º contato novo da conexão logo depois de um clique → ligação "provável".
+@@ -318,18 +319,25 @@ export class ChatIngest {
+     const conn = await this.resolve(event.session_id)
+     if (!conn) return { status: 'ignored', reason: 'unknown_session' }
+     const next = event.status as CrmMessageStatus
++    // Um mesmo ID WhatsApp existe na saida de um chip e na entrada do outro.
++    // Status do pipeline pertence somente a saida da conexao que publicou o evento.
++    const connectionScope = eq(messages.connectionId, conn.connectionId)
+     const row = await this.db.transaction(async (tx) => {
+       let [msg] = await tx
+         .select()
+         .from(messages)
+-        .where(and(eq(messages.companyId, conn.companyId), eq(messages.pipelineMessageId, event.message_id)))
++        .where(and(eq(messages.companyId, conn.companyId), connectionScope, eq(messages.direction, 'outbound'), eq(messages.pipelineMessageId, event.message_id)))
+         .for('update')
+       if (!msg && event.transport_message_id) {
+-        ;[msg] = await tx
++        const candidates = await tx
+           .select()
+           .from(messages)
+-          .where(and(eq(messages.companyId, conn.companyId), eq(messages.waMessageId, event.transport_message_id)))
++          .where(and(eq(messages.companyId, conn.companyId), connectionScope, eq(messages.direction, 'outbound'), eq(messages.waMessageId, event.transport_message_id)))
++          .limit(2)
+           .for('update')
++        // O indice garante unicidade local; a cardinalidade tambem e validada aqui.
++        if (candidates.length !== 1) return null
++        msg = candidates[0]
+       }
+       if (!msg || !canAdvanceStatus(msg.status, next)) return null
+       const at = new Date(event.at)
+@@ -394,11 +402,11 @@ export class ChatIngest {
+ 
+   // ---- internos ---------------------------------------------------------------------------------------------
+ 
+-  private async findByWaId(companyId: string, waMessageId: string): Promise<{ id: string; chatId: string } | undefined> {
++  private async findByWaId(companyId: string, connectionId: string, waMessageId: string): Promise<{ id: string; chatId: string } | undefined> {
+     const [row] = await this.db
+       .select({ id: messages.id, chatId: messages.chatId })
+       .from(messages)
+-      .where(and(eq(messages.companyId, companyId), eq(messages.waMessageId, waMessageId)))
++      .where(and(eq(messages.companyId, companyId), eq(messages.connectionId, connectionId), eq(messages.waMessageId, waMessageId)))
+     return row
+   }
+ 
+diff --git a/packages/core/src/media/index.ts b/packages/core/src/media/index.ts
+index 5dfee262ccd9763d0bc5baad89a1e2c9565d3a49..d5be5fd322898dc8364652d23ad34ef70ac4b49a 100644
+--- a/packages/core/src/media/index.ts
++++ b/packages/core/src/media/index.ts
+@@ -1,2 +1,3 @@
+ // Mídia do CRM (SPEC T49): upload, limites por tipo e leitura restrita à empresa.
+ export * from './service'
++export * from './private-ownership'
+diff --git a/packages/core/src/media/private-ownership.ts b/packages/core/src/media/private-ownership.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..ed81acce3023ce21f612fbd73b5329b0fd5dee93
+--- /dev/null
++++ b/packages/core/src/media/private-ownership.ts
+@@ -0,0 +1,18 @@
++// Prova persistente de que o blob privado foi gravado para a empresa.
++// Nunca autoriza pela mera presenca de um hash em texto de fluxo/chat.
++import { and, eq, inArray } from 'drizzle-orm'
++import { auditLogs, type Database } from '@crm/db'
++
++const ACTIONS = ['media.upload', 'ai_voices.generate', 'media.private_store']
++export async function ownsPrivateMedia(db: Database, companyId: string, sha256: string): Promise<boolean> {
++  const [row] = await db.select({ id: auditLogs.id }).from(auditLogs)
++    .where(and(eq(auditLogs.companyId, companyId), eq(auditLogs.targetType, 'media'), eq(auditLogs.targetId, sha256), inArray(auditLogs.action, ACTIONS))).limit(1)
++  return !!row
++}
++
++export function privateMediaOwnershipRecorder(db: Database) {
++  return async (companyId: string, media: { sha256: string }) => {
++    if (await ownsPrivateMedia(db, companyId, media.sha256)) return
++    await db.insert(auditLogs).values({ companyId, action: 'media.private_store', targetType: 'media', targetId: media.sha256 })
++  }
++}
+diff --git a/packages/core/src/media/service.ts b/packages/core/src/media/service.ts
+index f462bc497b3a47d85a2efde669a07fc20f64bfaf..b394e993a66c90961af6bb8196eb1a4f36bb280e 100644
+--- a/packages/core/src/media/service.ts
++++ b/packages/core/src/media/service.ts
+@@ -100,6 +100,7 @@ export function defaultMediaSigningKey(): Buffer {
+ }
+ 
+ export interface MediaServiceOptions {
++  onStored?: (companyId: string, media: MediaInfo) => Promise<void>
+   blobStore: BlobStore
+   /** Chave do HMAC dos ids. Padrão: derivada de `CREDENTIALS_KEY`. */
+   signingKey?: Buffer
+@@ -107,11 +108,13 @@ export interface MediaServiceOptions {
+ }
+ 
+ export class MediaService {
++  private readonly onStored?: MediaServiceOptions['onStored']
+   private readonly blobs: BlobStore
+   private readonly key: Buffer
+   readonly limits: Readonly<Record<MediaKind, number>>
+ 
+   constructor(opts: MediaServiceOptions) {
++    this.onStored = opts.onStored
+     this.blobs = opts.blobStore
+     this.key = opts.signingKey ?? defaultMediaSigningKey()
+     this.limits = { ...DEFAULT_MEDIA_LIMITS, ...opts.limits }
+@@ -129,7 +132,9 @@ export class MediaService {
+   /** Grava sem validar limites (ex.: áudio convertido para PTT). */
+   async store(companyId: string, data: Uint8Array, mime: string, fileName: string | null = null): Promise<MediaInfo> {
+     const info = await this.blobs.put(Buffer.from(data.buffer, data.byteOffset, data.byteLength), mime)
+-    return this.describe(companyId, info.key, mime, data.byteLength, fileName)
++    const media = this.describe(companyId, info.key, mime, data.byteLength, fileName)
++    await this.onStored?.(companyId, media)
++    return media
+   }
+ 
+   /** Bytes da mídia, só se o id foi emitido para esta empresa; senão `not_found`. */
+diff --git a/packages/db/drizzle/crm/0044_chat_wa_identity.sql b/packages/db/drizzle/crm/0044_chat_wa_identity.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..f49435e8a09b0c8a44ad8c1457cf69b02f5ca7cf
+--- /dev/null
++++ b/packages/db/drizzle/crm/0044_chat_wa_identity.sql
+@@ -0,0 +1,45 @@
++-- O mesmo ID WhatsApp pode existir na saida de um chip e entrada de outro.
++-- Dentro de uma conexao continua unico, inclusive antes/depois de mapear PN/LID.
++ALTER TABLE crm.messages ADD COLUMN connection_id uuid;
++--> statement-breakpoint
++UPDATE crm.messages AS m SET connection_id = c.connection_id
++FROM crm.chats AS c JOIN crm.connections AS co ON co.id = c.connection_id AND co.company_id = c.company_id
++WHERE c.id = m.chat_id AND c.company_id = m.company_id;
++--> statement-breakpoint
++DO $$ BEGIN
++  IF EXISTS (SELECT 1 FROM crm.messages WHERE connection_id IS NULL) THEN
++    RAISE EXCEPTION 'message company/chat identity drift; migration aborted';
++  END IF;
++END $$;
++--> statement-breakpoint
++ALTER TABLE crm.messages ALTER COLUMN connection_id SET NOT NULL;
++--> statement-breakpoint
++CREATE UNIQUE INDEX chats_company_id_connection_uq ON crm.chats(company_id,id,connection_id);
++--> statement-breakpoint
++ALTER TABLE crm.messages ADD CONSTRAINT messages_chat_connection_fk
++  FOREIGN KEY(company_id,chat_id,connection_id) REFERENCES crm.chats(company_id,id,connection_id) ON DELETE CASCADE;
++--> statement-breakpoint
++CREATE FUNCTION crm.bind_message_connection() RETURNS trigger LANGUAGE plpgsql AS $$
++DECLARE expected uuid;
++BEGIN
++  SELECT c.connection_id INTO expected FROM crm.chats AS c
++    JOIN crm.connections AS co ON co.id = c.connection_id AND co.company_id = c.company_id
++    WHERE c.company_id = NEW.company_id AND c.id = NEW.chat_id;
++  IF NOT FOUND THEN RAISE EXCEPTION 'message company/chat identity mismatch' USING ERRCODE='23503'; END IF;
++  IF NEW.connection_id IS NOT NULL AND NEW.connection_id IS DISTINCT FROM expected THEN
++    RAISE EXCEPTION 'message connection mismatch' USING ERRCODE='23503';
++  END IF;
++  IF TG_OP = 'UPDATE' AND expected IS DISTINCT FROM OLD.connection_id THEN
++    RAISE EXCEPTION 'message cannot change connection' USING ERRCODE='23503';
++  END IF;
++  NEW.connection_id := expected;
++  RETURN NEW;
++END $$;
++--> statement-breakpoint
++CREATE TRIGGER bind_message_connection BEFORE INSERT OR UPDATE OF company_id,chat_id,connection_id
++  ON crm.messages FOR EACH ROW EXECUTE FUNCTION crm.bind_message_connection();
++--> statement-breakpoint
++CREATE UNIQUE INDEX messages_company_connection_wa_id_uq
++  ON crm.messages(company_id,connection_id,wa_message_id) WHERE wa_message_id IS NOT NULL;
++--> statement-breakpoint
++DROP INDEX crm.messages_company_wa_id_uq;
+diff --git a/packages/db/drizzle/crm/meta/_journal.json b/packages/db/drizzle/crm/meta/_journal.json
+index 6b5eb6d652375ba310b6e2cb2792a0c3c4b8b95c..42ec540e3ed608698c016fb3c9c68661bda93477 100644
+--- a/packages/db/drizzle/crm/meta/_journal.json
++++ b/packages/db/drizzle/crm/meta/_journal.json
+@@ -309,6 +309,13 @@
+       "when": 1794938000000,
+       "tag": "0043_business_areas",
+       "breakpoints": true
++    },
++    {
++      "idx": 44,
++      "version": "7",
++      "when": 1794954000000,
++      "tag": "0044_chat_wa_identity",
++      "breakpoints": true
+     }
+   ]
+ }
+diff --git a/packages/db/src/schema/crm/chats.ts b/packages/db/src/schema/crm/chats.ts
+index 2c1f8a49867fb7f827f315af82533a17b796df72..8a861d2b0ce023afceaabca9ba7d59386b5b64aa 100644
+--- a/packages/db/src/schema/crm/chats.ts
++++ b/packages/db/src/schema/crm/chats.ts
+@@ -1,5 +1,5 @@
+ import { sql } from 'drizzle-orm'
+-import { boolean, index, integer, jsonb, primaryKey, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core'
++import { boolean, foreignKey, index, integer, jsonb, primaryKey, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core'
+ import { companies, users } from './base.js'
+ import { aiAgents } from './ai-agents.js'
+ import { connections } from './connections.js'
+@@ -59,6 +59,7 @@ export const chats = crm.table(
+   },
+   (t) => [
+     uniqueIndex('chats_company_connection_contact_uq').on(t.companyId, t.connectionId, t.contactId),
++    uniqueIndex('chats_company_id_connection_uq').on(t.companyId, t.id, t.connectionId),
+     index('chats_company_status_last_idx').on(t.companyId, t.status, t.lastMessageAt),
+     index('chats_company_contact_idx').on(t.companyId, t.contactId),
+   ],
+@@ -74,6 +75,8 @@ export const messages = crm.table(
+     chatId: uuid('chat_id')
+       .notNull()
+       .references(() => chats.id, { onDelete: 'cascade' }),
++    /** Derivada/validada pelo BEFORE trigger; omissao usa NULL antes do INSERT. */
++    connectionId: uuid('connection_id').notNull().default(sql`NULL`),
+     direction: text('direction').$type<CrmMessageDirection>().notNull(),
+     senderType: text('sender_type').$type<MessageSenderType>().notNull(),
+     senderUserId: uuid('sender_user_id').references(() => users.id, { onDelete: 'set null' }),
+@@ -103,7 +106,8 @@ export const messages = crm.table(
+     updatedAt: updatedAt(),
+   },
+   (t) => [
+-    uniqueIndex('messages_company_wa_id_uq').on(t.companyId, t.waMessageId).where(sql`${t.waMessageId} is not null`),
++    uniqueIndex('messages_company_connection_wa_id_uq').on(t.companyId, t.connectionId, t.waMessageId).where(sql`${t.waMessageId} is not null`),
++    foreignKey({ name: 'messages_chat_connection_fk', columns: [t.companyId, t.chatId, t.connectionId], foreignColumns: [chats.companyId, chats.id, chats.connectionId] }).onDelete('cascade'),
+     uniqueIndex('messages_company_pipeline_id_uq').on(t.companyId, t.pipelineMessageId).where(sql`${t.pipelineMessageId} is not null`),
+     index('messages_chat_created_idx').on(t.chatId, t.createdAt),
+   ],

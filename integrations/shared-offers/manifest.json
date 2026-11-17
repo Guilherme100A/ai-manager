@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/Guilherme100A/crm-copy.git",
   "base_sha": "acf78e2da49865afa06fe6a4cee77bcf0e888152",
-  "expected_tree": "7158e6027f11a6a4e77910d5a9c536109848a6c9",
+  "expected_tree": "91134a774990fb63abf05764e508f315f1944664",
   "sanitization": {
     "excluded_files": [
       "scripts/elevenlabs-account-diagnose.ts",
@@ -28,7 +28,7 @@
     ],
     "reason": "Exclude unrelated operator scripts/private deployment context and audit-only harnesses; replace operational hosts in documentation and URL fixtures with reserved example.test hosts. Original local source preserved.",
     "baseline_tree": "539e4a6dac07e50188e418d0e1a3d669e5f6d687",
-    "final_tree": "7158e6027f11a6a4e77910d5a9c536109848a6c9"
+    "final_tree": "91134a774990fb63abf05764e508f315f1944664"
   },
   "test_only_changes": [
     {
@@ -301,6 +301,28 @@
         "packages/core/src/mcp/tools/conversations.ts",
         "packages/core/src/mcp/tools/conversations.unit.test.ts",
         "packages/core/src/mcp/tools/shared.ts"
+      ]
+    },
+    {
+      "file": "07-private-media-two-chip.patch",
+      "description": "Private authenticated CRM media delivery and per-connection WhatsApp identity for two chips; scoped ACKs, guarded rollout and regression tests.",
+      "sha256": "18f643a7bb5fa65a3d544346e0f9158a27f1a9a94de786e28b5a511b65584f0a",
+      "bytes": 43989,
+      "files": [
+        "apps/api/src/routes/index.ts",
+        "apps/api/src/routes/internal-wa-media/index.ts",
+        "apps/api/src/routes/internal-wa-media/private-media.db.unit.test.ts",
+        "apps/api/src/routes/media/index.ts",
+        "apps/worker/src/boot/production.ts",
+        "docs/private-media-and-two-chip-delivery.md",
+        "packages/core/src/chats/ingest/chat-ingest.db.unit.test.ts",
+        "packages/core/src/chats/ingest/chat-ingest.ts",
+        "packages/core/src/media/index.ts",
+        "packages/core/src/media/private-ownership.ts",
+        "packages/core/src/media/service.ts",
+        "packages/db/drizzle/crm/0044_chat_wa_identity.sql",
+        "packages/db/drizzle/crm/meta/_journal.json",
+        "packages/db/src/schema/crm/chats.ts"
       ]
     }
   ],

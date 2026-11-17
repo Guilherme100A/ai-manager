@@ -27,7 +27,7 @@ async function session() {
   return row!.id
 }
 
-async function message(sessionId: string, status: 'processing' | 'queued' | 'sent', transportMessageId: string | null = null) {
+async function message(sessionId: string, status: 'processing' | 'queued' | 'sent' | 'delivered' | 'read' | 'failed', transportMessageId: string | null = null) {
   const [row] = await db
     .insert(messages)
     .values({ sessionId, phone: '+5511988887777', content: { text: 'x' }, status, transportMessageId, attempts: 1 })
@@ -38,6 +38,15 @@ async function message(sessionId: string, status: 'processing' | 'queued' | 'sen
 const statusOf = async (id: string) => (await db.select().from(messages).where(eq(messages.id, id)))[0]!
 
 describe('reconcileProcessing', () => {
+  it('two-chip rollout: terminal ACKs and failed media are never requeued on startup', async () => {
+    const a = await session(), b = await session()
+    const ids = [await message(a, 'delivered', 'WA-A'), await message(b, 'read', 'WA-B'), await message(a, 'failed')]
+    const before = await Promise.all(ids.map(statusOf)), requeued: string[] = []
+    const result = await reconcileProcessing({ db, inflight: memoryInflightStore(), requeue: async (_sid, id) => void requeued.push(id) })
+    expect(result).toEqual({ sent: [], retrying: [], failed: [] })
+    expect(requeued).toEqual([])
+    expect(await Promise.all(ids.map(statusOf))).toEqual(before)
+  })
   it('com transport_message_id → sent; sem marca → retrying e requeue; com marca → failed sem requeue', async () => {
     const s1 = await session()
     const s2 = await session()

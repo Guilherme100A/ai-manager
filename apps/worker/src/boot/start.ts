@@ -3,6 +3,7 @@
 // com antiban + marca de envio) → reconciliação de `processing` → opt-out, proxies, alertas, métricas →
 // servidores (observabilidade e interno) → reconexão das sessões. Shutdown fecha tudo na ordem inversa.
 import { randomUUID } from 'node:crypto'
+import { attachPrivateCrmMedia, privateCrmMediaResolver } from '../crm/private-media'
 import { Queue } from 'bullmq'
 import { Redis } from 'ioredis'
 import {
@@ -163,12 +164,14 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     })
     // Últimas mensagens dos grupos (contexto da postagem automática): gravadas ao chegar, por sessão.
     const groupHistory = redisGroupHistory(redis, config.queuePrefix)
+    const privateMedia = config.crmBridge ? privateCrmMediaResolver({ baseUrl: env.CRM_MEDIA_INTERNAL_URL?.trim() || 'http://crm-api:3000', token: config.internalToken }) : undefined
     // Travamentos do processo: registro com a atividade anterior e modo alívio (automações não essenciais pausadas).
     const activity = createActivityLog()
     const stallMonitor = startStallMonitor({ db, logger, activity })
     onStop('stall-monitor', () => stallMonitor.stop())
     const transportFactory: TransportFactory = (sessionId) => {
       const t = baseFactory(sessionId)
+      if (privateMedia) attachPrivateCrmMedia(t, sessionId, privateMedia)
       bindTransportSession(t, sessionId)
       const chip = sessionId.slice(0, 8)
       t.on('message', (msg) => {
@@ -433,6 +436,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
         await Promise.race([outbox.flush(), new Promise((r) => setTimeout(r, 2000).unref())])
       })
       const crm = createCrmBridgeTargets({
+        validatePrivateMedia: privateMedia!.preflight,
         db,
         queue,
         limits,
