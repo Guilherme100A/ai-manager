@@ -1,8 +1,8 @@
 diff --git a/apps/api/src/middleware/business-area.ts b/apps/api/src/middleware/business-area.ts
-index 4a1e46edbd2475fb0b6285015e2af5d798c424a9..e1736ab7877faa23d053316d81f3fe5de339a9dd 100644
+index 4a1e46edbd2475fb0b6285015e2af5d798c424a9..8fbbca4f4b09ba9d22670ed2e3b28f3453e94d15 100644
 --- a/apps/api/src/middleware/business-area.ts
 +++ b/apps/api/src/middleware/business-area.ts
-@@ -1,24 +1,14 @@
+@@ -1,24 +1,16 @@
  import type { MiddlewareHandler } from 'hono'
 -import { BusinessAreasService, BusinessAreaError, isSharedOffersCompany, type AreaResourceKind } from '@crm/core'
 +import { BusinessAreasService, BusinessAreaError, isSharedOffersCompany } from '@crm/core'
@@ -23,18 +23,23 @@ index 4a1e46edbd2475fb0b6285015e2af5d798c424a9..e1736ab7877faa23d053316d81f3fe5d
 -const staticNames = new Set(['names', 'import', 'import-json'])
 -const scopedPath = (path: string) => groups.find(([re]) => re.test(path))
  class RollbackResponse extends Error {}
++const collectionActions = new Set(['names', 'import', 'import-json'])
++const flowUseActions = new Set(['validate', 'simulate', 'trigger', 'duplicate'])
  
 -/** Absent header = legacy resources that have not been assigned. Shared chips are not partitioned. */
-+/** Absent header = offers in Geral. Company resources are shared between workspaces. */
++/** Absent header selects Geral. Offers and workspace-owned flows are scoped. */
  export function businessAreaContext(deps: ResolvedDeps): MiddlewareHandler<AppEnv> {
    return async (c, next) => {
      const ctx = c.get('ctx'), company = ctx?.companyId
-@@ -37,56 +27,30 @@ export function businessAreaContext(deps: ResolvedDeps): MiddlewareHandler<AppEn
+@@ -37,56 +29,43 @@ export function businessAreaContext(deps: ResolvedDeps): MiddlewareHandler<AppEn
        const area = resolved?.id ?? null
        c.set('businessArea', area)
        setAudit(c, { detail: { business_area_id: area } })
 -      const group = scopedPath(c.req.path)
 +      const flowWrite = /^\/api\/flows(?:\/|$)/.test(c.req.path) && !['GET', 'HEAD', 'DELETE'].includes(c.req.method)
++      const flowPath = /^\/api\/flows\/([^/]+)(?:\/([^/]+))?/.exec(c.req.path)
++      const flowId = flowPath?.[1] && !collectionActions.has(flowPath[1]) ? flowPath[1] : undefined
++      const flowEdit = !['GET', 'HEAD'].includes(c.req.method) && !flowUseActions.has(flowPath?.[2] ?? '')
        const apply = async () => {
 -        const run = /^\/api\/flow-runs\/([^/]+)(?:\/|$)/.exec(c.req.path)
 -        if (run) {
@@ -60,12 +65,14 @@ index 4a1e46edbd2475fb0b6285015e2af5d798c424a9..e1736ab7877faa23d053316d81f3fe5d
 -          if (c.req.method === 'GET' && (!id || staticNames.has(id)) && Array.isArray(body.items)) {
 -            body.items = await svc.filter(company, area, kind, body.items as { id: string }[])
 -            c.res = new Response(JSON.stringify(body), c.res)
++        if (flowId && !await svc.flowAllowed(company, area, flowId, flowEdit)) throw new ApiError('NOT_FOUND', 'Fluxo não encontrado neste workspace')
++        const referencesArea = flowId && flowEdit && await svc.flowShared(company, flowId) ? null : area
 +        if (flowWrite) {
 +          const raw = await c.req.raw.clone().text()
 +          if (raw) {
 +            let body: unknown
 +            try { body = JSON.parse(raw) } catch { throw new ApiError('MALFORMED_REQUEST', 'JSON inválido') }
-+            await svc.assertReferences(company, area, body)
++            await svc.assertReferences(company, referencesArea, body)
            }
 -          if (c.req.method === 'POST' && (!id || (kind === 'flow' && (['import','import-json'].includes(id) || c.req.path.endsWith('/duplicate'))))) {
 -            const created = [body[key],...(kind==='flow' && id==='import' && Array.isArray(body.items) ? body.items.map(item=>(item as {flow:unknown}).flow) : [])]
@@ -84,27 +91,34 @@ index 4a1e46edbd2475fb0b6285015e2af5d798c424a9..e1736ab7877faa23d053316d81f3fe5d
 -          const body=await c.res.clone().json() as {items:{id:string;flow_id:string}[]}
 -          const filtered=await svc.filter(company,area,'flow',body.items.map(run=>({id:run.flow_id,run})))
 -          c.res=new Response(JSON.stringify({...body,items:filtered.map(x=>x.run)}),c.res)
--        }
++        if (flowId && !flowPath?.[2] && c.req.method === 'DELETE' && c.res.status < 400) {
++          await deps.db.execute(sql`delete from crm.business_area_resources where company_id=${company} and kind='flow' and resource_id=${flowId}`)
++        }
 +        // Imports and paste may materialize resource IDs omitted from the request body.
 +        if (!flowWrite || c.res.status >= 400 || !c.res.headers.get('content-type')?.includes('application/json')) return
 +        const path = c.req.path
 +        if (!/^\/api\/flows\/?$/.test(path) && !/\/(import|import-json|duplicate|paste-nodes)$/.test(path)) return
 +        const response = await c.res.clone().json() as { flow?: { id: string }; items?: { flow?: { id: string } }[] }
-+        const ids = [response.flow?.id, ...(response.items ?? []).map(item => item.flow?.id)]
++        const created = [response.flow?.id, ...(response.items ?? []).map(item => item.flow?.id)]
++        if (area && /^\/api\/flows(?:\/?$|\/(?:import|import-json)$|\/[^/]+\/duplicate$)/.test(path)) {
++          for (const id of created) if (id) await deps.db.execute(sql`insert into crm.business_area_resources(company_id,area_id,kind,resource_id)
++            values(${company},${area},'flow',${id})`)
+         }
++        const ids = [...created]
 +        if (path.endsWith('/paste-nodes')) ids.push(path.split('/')[3])
-+        for (const id of ids) if (id) await svc.assertFlowReferences(company, area, id)
++        for (const id of ids) if (id) await svc.assertFlowReferences(company, referencesArea, id)
        }
 -      // Hold assignment lock through the API mutation so destinations cannot change area mid-edit.
 +      // Serialize offer mutations with moves out of Geral.
        // These handlers enqueue work after their own DB commit. Never delay that commit until after enqueueing.
        const lifecycle = /\/flows\/[^/]+\/(activate|pause|archive|unarchive|trigger)$/.test(c.req.path)
 -      if ((group || c.req.path.startsWith('/api/offers')) && !lifecycle && !['GET', 'HEAD'].includes(c.req.method)) {
-+      if ((flowWrite || c.req.path.startsWith('/api/offers')) && !lifecycle && !['GET', 'HEAD'].includes(c.req.method)) {
++      if ((flowWrite || flowId || c.req.path.startsWith('/api/offers')) && !lifecycle && !['GET', 'HEAD'].includes(c.req.method)) {
          try {
            await deps.areaTransaction(async tx => {
              await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`business-areas:${company}`},0))`)
 diff --git a/apps/api/src/routes/business-areas/index.ts b/apps/api/src/routes/business-areas/index.ts
-index 3c80645a8bd24a34ea300237672db65a8b5f459c..1826da3e79287abfb39ebd93b5b60b0c8aa0e890 100644
+index 3c80645a8bd24a34ea300237672db65a8b5f459c..d382358a60151ccad157eb329de9b71f57ec53e8 100644
 --- a/apps/api/src/routes/business-areas/index.ts
 +++ b/apps/api/src/routes/business-areas/index.ts
 @@ -1,6 +1,6 @@
@@ -115,6 +129,15 @@ index 3c80645a8bd24a34ea300237672db65a8b5f459c..1826da3e79287abfb39ebd93b5b60b0c
  import type { AppEnv, ResolvedDeps } from '../../lib/types'
  import { getCompanyCtx } from '../../lib/context'
  import { ApiError } from '../../lib/errors'
+@@ -23,7 +23,7 @@ export function businessAreasRoutes(deps: ResolvedDeps) {
+   app.use('/api/business-areas/*', gate)
+   app.onError(err => areaError(err))
+   app.get('/api/business-areas', requirePerm('settings.products.view'), async c => c.json({ items: await svc.list(company(c)) }))
+-  app.get('/api/business-areas/catalog', requirePerm('settings.products.edit'), async c => c.json(await svc.catalog(company(c))))
++  app.get('/api/business-areas/catalog', requirePerm('settings.products.edit'), async c => c.json(await svc.catalog(company(c), c.get('businessArea'))))
+   app.post('/api/business-areas/initialize', requirePerm('settings.products.edit'), async c => {
+     const items = await svc.initialize(company(c))
+     setAudit(c, { action: 'business_areas.initialize', targetType: 'company', targetId: company(c) })
 @@ -35,12 +35,9 @@ export function businessAreasRoutes(deps: ResolvedDeps) {
        setAudit(c, { action: 'business_areas.update', targetType: 'business_area', targetId: area.id })
        return c.json({ area })
@@ -132,13 +155,15 @@ index 3c80645a8bd24a34ea300237672db65a8b5f459c..1826da3e79287abfb39ebd93b5b60b0c
      validate('json', z.object({ offer_id: z.uuid(), confirm: z.literal(true) })), async c => {
        const result = await svc.adoptOffer(company(c), c.req.param('id'), c.req.valid('json').offer_id)
 diff --git a/apps/api/src/routes/flow-runs/funnel.ts b/apps/api/src/routes/flow-runs/funnel.ts
-index 13db5658d659dd065169cb4c7066c8fea4f89734..cebb8ebfdabf62ab50b039331ff17d191915fbcb 100644
+index 13db5658d659dd065169cb4c7066c8fea4f89734..5ca3ebe2bfdd1e4b2a27b869b63760de06552221 100644
 --- a/apps/api/src/routes/flow-runs/funnel.ts
 +++ b/apps/api/src/routes/flow-runs/funnel.ts
-@@ -5,7 +5,17 @@ import { and, countDistinct, eq, gte, inArray, lte, sql, type SQL } from 'drizzl
+@@ -4,8 +4,19 @@
+ import { and, countDistinct, eq, gte, inArray, lte, sql, type SQL } from 'drizzle-orm'
  import { FLOW_RUN_STATUSES, chats, flowRunSteps, flowRuns, type Database, type FlowRunStatus } from '@crm/db'
  import type { FlowDefinition } from '@crm/shared/flows'
- 
++import { workspaceFlowFilter } from '@crm/core'
++
 +export function offerRunScope(area: string | null | undefined): SQL | undefined {
 +  if (area === undefined) return undefined
 +  return sql`(not ${flowRuns.offerScoped} or exists (
@@ -147,26 +172,39 @@ index 13db5658d659dd065169cb4c7066c8fea4f89734..cebb8ebfdabf62ab50b039331ff17d19
 +      and o.snapshot->>'business_area_id' is not distinct from ${area}::text
 +  ))`
 +}
-+
+ 
  export interface FlowFunnelFilter {
 +  businessArea?: string | null
    from: Date
    to: Date
    connectionId?: string
-@@ -45,7 +55,7 @@ export async function flowFunnel(db: Database, companyId: string, flowId: string
+@@ -45,7 +56,7 @@ export async function flowFunnel(db: Database, companyId: string, flowId: string
    const where: SQL[] = [eq(flowRuns.companyId, companyId), eq(flowRuns.flowId, flowId), gte(flowRuns.startedAt, f.from), lte(flowRuns.startedAt, f.to)]
    if (f.connectionId)
      where.push(inArray(flowRuns.chatId, db.select({ id: chats.id }).from(chats).where(and(eq(chats.companyId, companyId), eq(chats.connectionId, f.connectionId)))))
 -  const runs = and(...where)
-+  const runs = and(...where, offerRunScope(f.businessArea))
++  const runs = and(...where, offerRunScope(f.businessArea), workspaceFlowFilter(companyId, f.businessArea, flowRuns.flowId))
  
    const byStatus = await db.select({ status: flowRuns.status, n: sql<number>`count(*)::int` }).from(flowRuns).where(runs).groupBy(flowRuns.status)
    const stopped = await db
 diff --git a/apps/api/src/routes/flow-runs/index.ts b/apps/api/src/routes/flow-runs/index.ts
-index 5ca67a0882820f72c0553a53f2c5f3ae3eae0661..a32f0529e1738a09c30325d0b8975b20ab1f83be 100644
+index 5ca67a0882820f72c0553a53f2c5f3ae3eae0661..23f2d6494c8a580e6319a3658fa15c6458d4ef6a 100644
 --- a/apps/api/src/routes/flow-runs/index.ts
 +++ b/apps/api/src/routes/flow-runs/index.ts
-@@ -14,7 +14,7 @@ import { validate } from '../../lib/validate'
+@@ -1,11 +1,10 @@
+-import { OffersService } from '@crm/core'
+ // Execuções de fluxo (T43; 06 §5.5): disparo manual pelo chat, listagem, detalhe com passos, cancelamento e
+ // "cancelar todos" de uma conexão. Disparar/cancelar exige `flows.run`; ler, `flows.view`. Funil por bloco
+ // (`GET /api/flows/:id/funnel?from&to&connection_id`, padrão últimos 30 dias) em `funnel.ts`.
+ import { Hono, type Context } from 'hono'
+ import { and, asc, count, desc, eq, inArray, sql } from 'drizzle-orm'
+ import { z } from 'zod'
+-import { CANCELLABLE_RUN_STATUSES, FlowEngineError, FlowStore, FlowStoreError } from '@crm/core'
++import { CANCELLABLE_RUN_STATUSES, FlowEngineError, FlowStore, FlowStoreError, OffersService, workspaceFlowFilter } from '@crm/core'
+ import { FLOW_RUN_STATUSES, chats, flowRunSteps, flowRuns, flows } from '@crm/db'
+ import { buildPageMeta, pageOffset, pageQuerySchema } from '@crm/shared'
+ import { getCompanyCtx } from '../../lib/context'
+@@ -14,7 +13,7 @@ import { validate } from '../../lib/validate'
  import type { AppEnv, ResolvedDeps } from '../../lib/types'
  import { requirePerm } from '../../middleware/authorize'
  import { setAudit } from '../../middleware/audit'
@@ -175,7 +213,7 @@ index 5ca67a0882820f72c0553a53f2c5f3ae3eae0661..a32f0529e1738a09c30325d0b8975b20
  import { flowServices } from './services'
  
  export { flowServices, registerConnectionNameSource, type ConnectionNameSource, type FlowServices } from './services'
-@@ -64,9 +64,9 @@ export function flowRunsRoutes(deps: ResolvedDeps) {
+@@ -64,9 +63,9 @@ export function flowRunsRoutes(deps: ResolvedDeps) {
        .innerJoin(flows, eq(flows.id, flowRuns.flowId))
        .where(where)
  
@@ -183,20 +221,20 @@ index 5ca67a0882820f72c0553a53f2c5f3ae3eae0661..a32f0529e1738a09c30325d0b8975b20
 +  const runOf = async (companyId: string, id: string, area?: string | null) => {
      if (!UUID_RE.test(id)) throw new ApiError('NOT_FOUND', 'Execução não encontrada')
 -    const [row] = await runsWithName(and(eq(flowRuns.id, id), eq(flowRuns.companyId, companyId)))
-+    const [row] = await runsWithName(and(eq(flowRuns.id, id), eq(flowRuns.companyId, companyId), offerRunScope(area)))
++    const [row] = await runsWithName(and(eq(flowRuns.id, id), eq(flowRuns.companyId, companyId), offerRunScope(area), workspaceFlowFilter(companyId, area, flowRuns.flowId)))
      if (!row) throw new ApiError('NOT_FOUND', 'Execução não encontrada')
      return row
    }
-@@ -112,7 +112,7 @@ export function flowRunsRoutes(deps: ResolvedDeps) {
+@@ -112,7 +111,7 @@ export function flowRunsRoutes(deps: ResolvedDeps) {
      const active = await deps.db
        .select({ id: flowRuns.id })
        .from(flowRuns)
 -      .where(and(eq(flowRuns.companyId, ctx.companyId), eq(flowRuns.contactId, chat.contactId), sql`(${flowRuns.chatId}=${chat.id} or ${flowRuns.chatId} is null)`, inArray(flowRuns.status, [...CANCELLABLE_RUN_STATUSES])))
-+      .where(and(eq(flowRuns.companyId, ctx.companyId), eq(flowRuns.contactId, chat.contactId), sql`(${flowRuns.chatId}=${chat.id} or ${flowRuns.chatId} is null)`, offerRunScope(c.get('businessArea')), inArray(flowRuns.status, [...CANCELLABLE_RUN_STATUSES])))
++      .where(and(eq(flowRuns.companyId, ctx.companyId), eq(flowRuns.contactId, chat.contactId), sql`(${flowRuns.chatId}=${chat.id} or ${flowRuns.chatId} is null)`, offerRunScope(c.get('businessArea')), workspaceFlowFilter(ctx.companyId, c.get('businessArea'), flowRuns.flowId), inArray(flowRuns.status, [...CANCELLABLE_RUN_STATUSES])))
      const cancelled = await cancelRuns(ctx.companyId, active.map((r) => r.id))
  
      let runId: string
-@@ -146,7 +146,7 @@ export function flowRunsRoutes(deps: ResolvedDeps) {
+@@ -146,7 +145,7 @@ export function flowRunsRoutes(deps: ResolvedDeps) {
        throw err
      })
      const q = c.req.valid('query')
@@ -205,7 +243,7 @@ index 5ca67a0882820f72c0553a53f2c5f3ae3eae0661..a32f0529e1738a09c30325d0b8975b20
      const [total] = await deps.db.select({ n: count() }).from(flowRuns).where(where)
      const rows = await runsWithName(where).orderBy(desc(flowRuns.startedAt)).limit(q.limit).offset(pageOffset(q))
      return c.json({ items: rows.map((r) => toRunDto(r.run, r.flowName)), page: buildPageMeta(q, { total: Number(total?.n ?? 0) }) })
-@@ -166,12 +166,12 @@ export function flowRunsRoutes(deps: ResolvedDeps) {
+@@ -166,12 +165,12 @@ export function flowRunsRoutes(deps: ResolvedDeps) {
      if (to.getTime() - from.getTime() > FUNNEL_MAX_DAYS * 86_400_000)
        throw new ApiError('VALIDATION_ERROR', 'Período inválido', { fields: [{ path: 'from', message: `no máximo ${FUNNEL_MAX_DAYS} dias` }] })
      const def = await store.toDefinition(ctx, flow.id)
@@ -220,7 +258,7 @@ index 5ca67a0882820f72c0553a53f2c5f3ae3eae0661..a32f0529e1738a09c30325d0b8975b20
      const steps = await deps.db
        .select()
        .from(flowRunSteps)
-@@ -193,7 +193,7 @@ export function flowRunsRoutes(deps: ResolvedDeps) {
+@@ -193,7 +192,7 @@ export function flowRunsRoutes(deps: ResolvedDeps) {
  
    app.post('/api/flow-runs/:id/cancel', requirePerm('flows.run'), async (c) => {
      const ctx = ctxOf(c)
@@ -229,24 +267,92 @@ index 5ca67a0882820f72c0553a53f2c5f3ae3eae0661..a32f0529e1738a09c30325d0b8975b20
      const done = await cancelRuns(ctx.companyId, [run.id])
      if (!done.length) throw new ApiError('CONFLICT', 'A execução já terminou', { error_code: 'run_not_active' })
      const after = await runOf(ctx.companyId, run.id)
-@@ -209,7 +209,7 @@ export function flowRunsRoutes(deps: ResolvedDeps) {
+@@ -209,7 +208,7 @@ export function flowRunsRoutes(deps: ResolvedDeps) {
      if (!chat) throw new ApiError('NOT_FOUND', 'Chat não encontrado')
      const activeOnly = ['1', 'true'].includes(c.req.valid('query').active ?? '')
      const rows = await runsWithName(
 -      and(eq(flowRuns.companyId, ctx.companyId), eq(flowRuns.chatId, chat.id), activeOnly ? inArray(flowRuns.status, [...CANCELLABLE_RUN_STATUSES]) : undefined),
-+      and(eq(flowRuns.companyId, ctx.companyId), eq(flowRuns.chatId, chat.id), offerRunScope(c.get('businessArea')), activeOnly ? inArray(flowRuns.status, [...CANCELLABLE_RUN_STATUSES]) : undefined),
++      and(eq(flowRuns.companyId, ctx.companyId), eq(flowRuns.chatId, chat.id), offerRunScope(c.get('businessArea')), workspaceFlowFilter(ctx.companyId, c.get('businessArea'), flowRuns.flowId), activeOnly ? inArray(flowRuns.status, [...CANCELLABLE_RUN_STATUSES]) : undefined),
      ).orderBy(desc(flowRuns.startedAt))
      return c.json({ items: rows.map((r) => toRunDto(r.run, r.flowName)) })
    })
-@@ -230,7 +230,7 @@ export function flowRunsRoutes(deps: ResolvedDeps) {
+@@ -230,7 +229,7 @@ export function flowRunsRoutes(deps: ResolvedDeps) {
        .select({ id: flowRuns.id })
        .from(flowRuns)
        .innerJoin(chats, eq(chats.id, flowRuns.chatId))
 -      .where(and(eq(flowRuns.companyId, ctx.companyId), eq(chats.connectionId, connectionId), inArray(flowRuns.status, [...CANCELLABLE_RUN_STATUSES])))
-+      .where(and(eq(flowRuns.companyId, ctx.companyId), eq(chats.connectionId, connectionId), offerRunScope(c.get('businessArea')), inArray(flowRuns.status, [...CANCELLABLE_RUN_STATUSES])))
++      .where(and(eq(flowRuns.companyId, ctx.companyId), eq(chats.connectionId, connectionId), offerRunScope(c.get('businessArea')), workspaceFlowFilter(ctx.companyId, c.get('businessArea'), flowRuns.flowId), inArray(flowRuns.status, [...CANCELLABLE_RUN_STATUSES])))
      const done = await cancelRuns(ctx.companyId, runs.map((r) => r.id))
      setAudit(c, { action: 'flow_run.cancel_all', targetType: 'connection', targetId: connectionId, detail: { cancelled: done.length } })
      return c.json({ cancelled: done.length })
+diff --git a/apps/api/src/routes/flows/index.ts b/apps/api/src/routes/flows/index.ts
+index 0f0b11c0fcc31bdbe05bb29ed00e1d43f83a6e25..b932071ac0e4ed3c208d8a8fc2fd1fc5236fbe39 100644
+--- a/apps/api/src/routes/flows/index.ts
++++ b/apps/api/src/routes/flows/index.ts
+@@ -2,9 +2,9 @@
+ // publicação (activate), duplicação e impacto de exclusão. Leitura: `flows.view`; mutações: `flows.edit`;
+ // excluir fluxo/pasta: `flows.delete`. Toda mutação do grafo publica `flow.graph_updated` (com `actor_id`).
+ import { Hono, type Context } from 'hono'
+-import { and, count, eq, ilike, inArray, isNotNull, isNull } from 'drizzle-orm'
++import { and, count, eq, ilike, inArray, isNotNull, isNull, sql } from 'drizzle-orm'
+ import { z } from 'zod'
+-import { FlowStore, FlowStoreError, RealtimePublisher, type FlowCtx, type FlowFolderRow, type FlowRow } from '@crm/core'
++import { BusinessAreasService, FlowStore, FlowStoreError, RealtimePublisher, workspaceFlowFilter, type FlowCtx, type FlowFolderRow, type FlowRow } from '@crm/core'
+ import { FLOW_FOLDER_COLORS, FLOW_STATUSES, flowNodes, flows, type FlowStatus } from '@crm/db'
+ import { validate as validateFlow, type FlowDefinition } from '@crm/shared/flows'
+ import { getCompanyCtx } from '../../lib/context'
+@@ -179,6 +179,9 @@ export function flowsRoutes(deps: ResolvedDeps) {
+     const ctx = ctxOf(c)
+     const q = c.req.valid('query')
+     const where = [eq(flows.companyId, ctx.companyId)]
++    const area = c.get('businessArea')
++    const visibility = workspaceFlowFilter(ctx.companyId, area, flows.id)
++    if (visibility) where.push(visibility)
+     if (q.folder_id === 'root') where.push(isNull(flows.folderId))
+     else if (q.folder_id) where.push(eq(flows.folderId, q.folder_id))
+     if (q.status) where.push(eq(flows.status, q.status))
+@@ -190,7 +193,13 @@ export function flowsRoutes(deps: ResolvedDeps) {
+       .orderBy(flows.folderId, flows.position, flows.createdAt)
+     const counts = await nodesCount(rows.map((r) => r.id))
+     const folders = await store.listFolders(ctx, q.folder_id === undefined ? {} : { parentFolderId: q.folder_id === 'root' ? null : q.folder_id })
+-    return c.json({ items: rows.map((r) => toFlowDto(r, counts.get(r.id) ?? 0)), folders: folders.map(toFolderDto) })
++    const ownership = area === undefined ? [] : (await deps.db.execute(sql`select resource_id, area_id, shared_with_workspaces
++      from crm.business_area_resources where company_id=${ctx.companyId} and kind='flow'`)).rows as { resource_id: string; area_id: string; shared_with_workspaces: boolean }[]
++    const assignments = new Map(ownership.map(row => [row.resource_id, row]))
++    return c.json({ items: rows.map(r => {
++      const dto = toFlowDto(r, counts.get(r.id) ?? 0), workspace = assignments.get(r.id)
++      return workspace ? { ...dto, workspace_owned: workspace.area_id === area, workspace_shared: workspace.shared_with_workspaces } : dto
++    }), folders: folders.map(toFolderDto) })
+   })
+ 
+   // Antes de `/api/flows/:id`.
+@@ -198,6 +207,8 @@ export function flowsRoutes(deps: ResolvedDeps) {
+     const ctx = ctxOf(c)
+     const triggerable = ['1', 'true'].includes(c.req.valid('query').triggerable ?? '')
+     const where = [eq(flows.companyId, ctx.companyId)]
++    const visibility = workspaceFlowFilter(ctx.companyId, c.get('businessArea'), flows.id)
++    if (visibility) where.push(visibility)
+     if (triggerable) where.push(eq(flows.status, 'active'), isNotNull(flows.publishedVersion))
+     const rows = await deps.db
+       .select({ id: flows.id, name: flows.name })
+@@ -220,6 +231,17 @@ export function flowsRoutes(deps: ResolvedDeps) {
+     return c.json({ flow: await flowDto(flow) })
+   })
+ 
++  app.post('/api/flows/:id/share-workspace', requirePerm('flows.edit'), async c => {
++    const { companyId } = ctxOf(c)
++    const area = c.get('businessArea'), id = c.req.param('id')
++    if (!area) throw new ApiError('NOT_FOUND', 'Fluxo não encontrado neste workspace')
++    const svc = new BusinessAreasService(deps.db)
++    await svc.assertFlowReferences(companyId, null, id)
++    await svc.shareFlow(companyId, area, id)
++    setAudit(c, { action: 'flow.share_workspace', targetType: 'flow', targetId: id })
++    return c.json({ shared: true })
++  })
++
+   app.get('/api/flows/:id/editor-bundle', requirePerm('flows.view'), async (c) => {
+     const ctx = ctxOf(c)
+     const id = c.req.param('id')
 diff --git a/apps/api/src/routes/meta-entities/index.ts b/apps/api/src/routes/meta-entities/index.ts
 index 3858e7c8af5b2819baf618e42f720bf0ac7f3e4f..0f6e48d4a93dac83b38d6a4c3c992d6492f89694 100644
 --- a/apps/api/src/routes/meta-entities/index.ts
@@ -631,6 +737,129 @@ index 0000000000000000000000000000000000000000..c27ceaa28400dbc4507bd36aa4665394
 +    </>
 +  )
 +}
+diff --git a/apps/web/src/features/flows/api.ts b/apps/web/src/features/flows/api.ts
+index 5f364bc6e984d2baba53679efe8254a57d8123be..d79d89748eb0cc7da27c1d58bb47ce7b3476c490 100644
+--- a/apps/web/src/features/flows/api.ts
++++ b/apps/web/src/features/flows/api.ts
+@@ -20,6 +20,8 @@ export interface FlowDto {
+   nodes_count: number
+   created_at: string
+   updated_at: string
++  workspace_owned?: boolean
++  workspace_shared?: boolean
+ }
+ 
+ export interface FolderDto {
+@@ -75,6 +77,7 @@ export const flowsApi = {
+   /** `force` desvincula/desativa as configs que usam o fluxo (decisão do Orquestrador, T44). */
+   remove: (id: string, force: boolean) => api.delete(`/api/flows/${enc(id)}`, force ? { query: { force: 1 } } : {}),
+   shareCode: (id: string) => api.get<{ code: string }>(`/api/flows/${enc(id)}/share-code`).then((r) => r.code),
++  shareWithWorkspaces: (id: string) => api.post(`/api/flows/${enc(id)}/share-workspace`, {}),
+   importCodes: (codes: string[]) => api.post<ImportResult>('/api/flows/import', { codes }),
+   createFolder: (body: { name: string; color: FolderColor; parent_id: string | null }) =>
+     api.post<{ folder: FolderDto }>('/api/flow-folders', body).then((r) => r.folder),
+diff --git a/apps/web/src/features/flows/flows-page.tsx b/apps/web/src/features/flows/flows-page.tsx
+index 9284d201b15cf4dceb9b14e8e5f360ada9d6163e..273e8e47c5f853f4c7bf23f460b0323325ec9532 100644
+--- a/apps/web/src/features/flows/flows-page.tsx
++++ b/apps/web/src/features/flows/flows-page.tsx
+@@ -160,7 +160,7 @@ export function FlowsPage({ search, onSearch }: { search: FlowsSearch; onSearch:
+       return
+     }
+     const flow = flows.find((f) => f.id === source.id)
+-    if (!flow) return
++    if (!flow || flow.workspace_owned === false) return
+     if (target.kind === 'folder') {
+       if ((flow.folder_id ?? null) === target.folderId) return
+       void run(() => flowsApi.move(flow.id, target.folderId), t('dnd.flowMoved'))
+@@ -388,6 +388,10 @@ export function FlowsPage({ search, onSearch }: { search: FlowsSearch; onSearch:
+                           move: setMoving,
+                           remove: setDeleting,
+                           share: setSharing,
++                          shareWithWorkspaces: f => {
++                            if (window.confirm(`Compartilhar “${f.name}” com os outros workspaces? Alterações publicadas no fluxo também valerão para quem o usa.`))
++                              void run(() => flowsApi.shareWithWorkspaces(f.id), 'Fluxo compartilhado com os outros workspaces')
++                          },
+                           duplicate: (f) => void run(() => flowsApi.duplicate(f.id), t('menu.duplicated')),
+                           status: (f, a) => void run(() => flowsApi.setStatus(f.id, a), t(`menu.${a}Done`)),
+                           removeFromFolder: (f) =>
+@@ -565,6 +569,7 @@ interface FlowActions {
+   move: (f: FlowDto) => void
+   remove: (f: FlowDto) => void
+   share: (f: FlowDto) => void
++  shareWithWorkspaces: (f: FlowDto) => void
+   duplicate: (f: FlowDto) => void
+   status: (f: FlowDto, action: 'activate' | 'pause' | 'archive' | 'unarchive') => void
+   removeFromFolder: (f: FlowDto) => void
+@@ -724,16 +729,17 @@ function FlowItem({
+ }) {
+   const t = useT(NS)
+   const { locale } = useI18n()
+-  const { ref, handleRef, isDragging, isOver } = useDragItem({ kind: 'flow', id: flow.id }, perms.canEdit)
++  const canEdit = perms.canEdit && flow.workspace_owned !== false
++  const { ref, handleRef, isDragging, isOver } = useDragItem({ kind: 'flow', id: flow.id }, canEdit)
+   const { active } = useDndState()
+   const reorderHint = isOver && canReorder && active?.kind === 'flow' && active.id !== flow.id
+   const updated = updatedLabel(flow.updated_at, new Date(), locale)
+   const updatedText = updated.kind === 'date' ? updated.text : t(`updated.${updated.kind}`, { time: updated.text })
+-  const link = perms.canEdit
++  const link = canEdit
+     ? ({ to: '/flows/$flowId/edit', params: { flowId: flow.id } } as const)
+     : ({ to: '/flows/$flowId', params: { flowId: flow.id } } as const)
+ 
+-  const handle = perms.canEdit ? (
++  const handle = canEdit ? (
+     <button
+       ref={handleRef}
+       type="button"
+@@ -793,6 +799,7 @@ function FlowItem({
+         </td>
+         <td className="px-3 py-2">
+           <StatusBadge id={flow.id} status={flow.status} />
++          {flow.workspace_shared && <span className="text-xs text-muted-foreground">Compartilhado</span>}
+         </td>
+         <td className="px-3 py-2 tabular-nums">{blocks}</td>
+         <td data-testid={`flows-item-updated-${flow.id}`} className="px-3 py-2 whitespace-nowrap text-muted-foreground">
+@@ -822,6 +829,7 @@ function FlowItem({
+       </div>
+       <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+         <StatusBadge id={flow.id} status={flow.status} />
++        {flow.workspace_shared && <span className="text-xs text-muted-foreground">Compartilhado</span>}
+         {blocks}
+         <span aria-hidden>·</span>
+         <span data-testid={`flows-item-updated-${flow.id}`}>{updatedText}</span>
+@@ -844,9 +852,10 @@ function FlowMenu({
+   const t = useT(NS)
+   const navigate = useNavigate()
+   const id = flow.id
++  const canEdit = perms.canEdit && flow.workspace_owned !== false
+   return (
+     <ItemMenu testid={`flows-item-menu-${id}`} label={t('menu.more')}>
+-      {perms.canEdit ? (
++      {canEdit ? (
+         <>
+           <MenuItem testid={`flows-item-edit-${id}`} label={t('menu.edit')} onClick={() => void navigate(link)} />
+           <MenuItem testid={`flows-item-rename-${id}`} label={t('menu.rename')} onClick={() => actions.rename(flow)} />
+@@ -860,7 +869,10 @@ function FlowMenu({
+         <MenuItem testid={`flows-item-open-${id}`} label={t('menu.open')} onClick={() => void navigate(link)} />
+       )}
+       <MenuItem testid={`flows-item-share-${id}`} label={t('menu.share')} onClick={() => actions.share(flow)} />
+-      {perms.canEdit ? (
++      {canEdit && flow.workspace_owned === true && !flow.workspace_shared && (
++        <MenuItem testid={`flow-share-workspaces-${id}`} label="Compartilhar com outros workspaces" onClick={() => actions.shareWithWorkspaces(flow)} />
++      )}
++      {canEdit ? (
+         <>
+           {statusActions(flow.status).map((a) => (
+             <MenuItem
+@@ -880,7 +892,7 @@ function FlowMenu({
+           ) : null}
+         </>
+       ) : null}
+-      {perms.canDelete ? (
++      {perms.canDelete && flow.workspace_owned !== false ? (
+         <MenuItem
+           testid={`flows-item-delete-${id}`}
+           label={t('menu.delete')}
 diff --git a/apps/web/src/features/offers/page.tsx b/apps/web/src/features/offers/page.tsx
 index dedfb476305d5bde44f515a3a278db9367c51dfd..43aa605970e3371d55d74bcc3f8d89d069bb6938 100644
 --- a/apps/web/src/features/offers/page.tsx
@@ -705,10 +934,31 @@ index 18469b299e04c2e8fc760fa420a491cc23daaa11..3a80692850d68b443bfd37fd43b10bbd
  
  /** Para onde ir quando a sessão acabou (o main liga ao router: limpa o cache e navega ao login). */
 diff --git a/packages/core/src/business-areas/service.ts b/packages/core/src/business-areas/service.ts
-index 9bc696bfe242dd683a25d4566f0d230df0dcb08a..f1e7f50933eab4de316437115311cea9c4a64b74 100644
+index 9bc696bfe242dd683a25d4566f0d230df0dcb08a..192056a0df607e833a59b054cc4105228fb880f2 100644
 --- a/packages/core/src/business-areas/service.ts
 +++ b/packages/core/src/business-areas/service.ts
-@@ -59,22 +59,10 @@ export class BusinessAreasService {
+@@ -1,4 +1,4 @@
+-import { sql, type SQL } from 'drizzle-orm'
++import { sql, type SQL, type SQLWrapper } from 'drizzle-orm'
+ import type { Database } from '@crm/db'
+ import { isSharedOffersCompany, requireSharedOffersCompany } from '../offers/policy'
+ 
+@@ -18,6 +18,14 @@ const refs: Record<string, AreaResourceKind> = {
+   payment_integration_id: 'integration', ad_account_id: 'account', pixel_id: 'pixel', pixel_config_id: 'pixel',
+ }
+ 
++/** Flows from Geral remain available to all workspaces. Scoped flows start private. */
++export function workspaceFlowFilter(company: string, area: string | null | undefined, flowId: SQLWrapper, edit = false) {
++  if (area === undefined) return undefined
++  return sql`not exists (select 1 from crm.business_area_resources owned
++    where owned.company_id=${company} and owned.kind='flow' and owned.resource_id=${flowId}
++      and owned.area_id is distinct from ${area}::uuid ${edit ? sql`` : sql`and not owned.shared_with_workspaces`})`
++}
++
+ /** Business partitions of ONE account. They do not authenticate different people. */
+ export class BusinessAreasService {
+   constructor(readonly db: Database) {}
+@@ -59,22 +67,26 @@ export class BusinessAreasService {
        return (await rows<BusinessArea>(db, sql`update crm.business_areas set name=${input.name.trim()},bm_id=${input.bm_id} where company_id=${company} and id=${id} returning *`))[0]!
      })
    }
@@ -721,19 +971,33 @@ index 9bc696bfe242dd683a25d4566f0d230df0dcb08a..f1e7f50933eab4de316437115311cea9
      const table = AREA_RESOURCE_TABLES[kind]
 -    if (!(await rows(this.db, sql`select 1 from crm.${sql.raw(table)} where company_id=${company} and id=${id}`)).length) return false
 -    return (await this.owner(company, kind, id)) === area
--  }
++    return (await rows(this.db, sql`select 1 from crm.${sql.raw(table)} where company_id=${company} and id=${id}`)).length > 0
+   }
 -  async assertResource(company: string, area: string | null, kind: AreaResourceKind, id: string) {
 -    if (!await this.allowed(company, area, kind, id)) throw new BusinessAreaError('not_found', 'Recurso não pertence à área selecionada')
--  }
++  async flowAllowed(company: string, area: string | null, id: string, edit = false) {
++    if (!uuid(id)) return false
++    return (await rows(this.db, sql`select 1 from crm.flows f where f.company_id=${company} and f.id=${id}
++      and ${workspaceFlowFilter(company, area, sql`f.id`, edit)}`)).length === 1
+   }
 -  async filter<T extends { id: string }>(company: string, area: string | null, kind: AreaResourceKind, items: T[]) {
 -    const bindings = await rows<{ resource_id: string; area_id: string }>(this.db, sql`select resource_id,area_id from crm.business_area_resources where company_id=${company} and kind=${kind}`)
 -    const owners = new Map(bindings.map(r => [r.resource_id, r.area_id]))
 -    return items.filter(item => (owners.get(item.id) ?? null) === area)
-+    return (await rows(this.db, sql`select 1 from crm.${sql.raw(table)} where company_id=${company} and id=${id}`)).length > 0
++  async shareFlow(company: string, area: string | null, id: string) {
++    if (!area) throw new BusinessAreaError('not_found', 'Fluxo não encontrado neste workspace')
++    const [flow] = await rows(this.db, sql`update crm.business_area_resources set shared_with_workspaces=true
++      where company_id=${company} and area_id=${area} and kind='flow' and resource_id=${id}
++      returning resource_id`)
++    if (!flow) throw new BusinessAreaError('not_found', 'Fluxo não encontrado neste workspace')
++  }
++  async flowShared(company: string, id: string) {
++    return (await rows(this.db, sql`select 1 from crm.business_area_resources where company_id=${company}
++      and kind='flow' and resource_id=${id} and shared_with_workspaces`)).length === 1
    }
    async assertReferences(company: string, area: string | null, value: unknown, depth = 0): Promise<void> {
      if (depth > 30) throw new BusinessAreaError('validation', 'Configuração excede o limite de profundidade')
-@@ -84,53 +72,29 @@ export class BusinessAreasService {
+@@ -84,54 +96,30 @@ export class BusinessAreasService {
        const kind = refs[key]
        if (key === 'product_public_id' && v !== null && v !== undefined && v !== '') {
          const product = uuid(v) ? (await rows<{ id: string }>(this.db, sql`select id from crm.products where company_id=${company} and public_id=${v}`))[0] : null
@@ -745,7 +1009,7 @@ index 9bc696bfe242dd683a25d4566f0d230df0dcb08a..f1e7f50933eab4de316437115311cea9
          // Expressions may be evaluated later by a flow: never accept a dynamic payment/pixel destination in a partition.
 -        if (!uuid(v) || !await this.allowed(company, area, kind, v))
 -          throw new BusinessAreaError('validation', `Referência ${key} não pertence à área selecionada`)
-+        if (!uuid(v) || !await this.ownsResource(company, kind, v))
++        if (!uuid(v) || !await (kind === 'flow' ? this.flowAllowed(company, area, v) : this.ownsResource(company, kind, v)))
 +          throw new BusinessAreaError('validation', `Referência ${key} não pertence à empresa`)
        } else if (typeof v === 'object') await this.assertReferences(company, area, v, depth + 1)
      }
@@ -785,26 +1049,30 @@ index 9bc696bfe242dd683a25d4566f0d230df0dcb08a..f1e7f50933eab4de316437115311cea9
 +    for (const action of actions) await this.assertReferences(company,workspace,action.config)
 +    for (const version of versions) await this.assertReferences(company,workspace,version.definition)
    }
+-  async catalog(company: string) {
 +
-   async catalog(company: string) {
++  async catalog(company: string, area?: string | null) {
      requireSharedOffersCompany(company)
      const result: Record<string, unknown> = {}
      for (const [kind, table] of Object.entries(AREA_RESOURCE_TABLES)) {
        const name = kind === 'integration' ? sql.raw('r.label') : kind === 'account' ? sql.raw('coalesce(r.name,r.fb_account_id)') : sql.raw('r.name')
 -      result[kind] = await rows(this.db, sql`select r.id,${name} as name,b.area_id from crm.${sql.raw(table)} r
 -        left join crm.business_area_resources b on b.company_id=r.company_id and b.resource_id=r.id and b.kind=${kind}
+-        where r.company_id=${company} order by name`)
 +      result[kind] = await rows(this.db, sql`select r.id,${name} as name,null::uuid as area_id from crm.${sql.raw(table)} r
-         where r.company_id=${company} order by name`)
++        where r.company_id=${company} ${kind === 'flow' && area !== undefined ? sql`and ${workspaceFlowFilter(company, area, sql`r.id`)}` : sql``} order by name`)
      }
      return result
-@@ -141,19 +105,10 @@ export class BusinessAreasService {
+   }
+@@ -141,19 +129,11 @@ export class BusinessAreasService {
        await db.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`business-areas:${company}`},0))`)
        area = (await svc.get(company, area)).id
        if (!uuid(offerId)) throw new BusinessAreaError('not_found', 'Oferta não encontrada')
 -      const [offer] = await rows<{ config: Record<string, unknown>; business_area_id: string | null }>(db, sql`select config,business_area_id from crm.offers where company_id=${company} and id=${offerId} for update`)
-+      const [offer] = await rows<{ business_area_id: string | null }>(db, sql`select business_area_id from crm.offers where company_id=${company} and id=${offerId} for update`)
++      const [offer] = await rows<{ business_area_id: string | null; flow_id: string }>(db, sql`select business_area_id,config->>'flow_id' as flow_id from crm.offers where company_id=${company} and id=${offerId} for update`)
        if (!offer) throw new BusinessAreaError('not_found', 'Oferta não encontrada')
        if (offer.business_area_id && offer.business_area_id !== area) throw new BusinessAreaError('conflict', 'Oferta já atribuída a outra área')
++      if (!offer.business_area_id && !await svc.flowAllowed(company, area, offer.flow_id)) throw new BusinessAreaError('conflict', 'O fluxo da oferta não está disponível no workspace de destino')
        await db.execute(sql`update crm.offers set business_area_id=${area},version=version+1,updated_at=now() where company_id=${company} and id=${offerId} and business_area_id is null`)
 -      // Assign non-flow resources first so the existing flow's references can be checked.
 -      for (const [key, kind] of Object.entries(refs).filter(([key, kind]) => kind !== 'flow' && key !== 'pixel_config_id' && key !== 'payment_integration_id')) {
@@ -819,10 +1087,10 @@ index 9bc696bfe242dd683a25d4566f0d230df0dcb08a..f1e7f50933eab4de316437115311cea9
      })
    }
 diff --git a/packages/core/src/mcp/server.ts b/packages/core/src/mcp/server.ts
-index 7e1d3530b7d9d07a7a7db2d119268176c46ca9a8..aae6939c44eab122f8d994dab1aa041f5810e48a 100644
+index 7e1d3530b7d9d07a7a7db2d119268176c46ca9a8..2fe91827b6e07c23b2acc04c407f5ba8c67eeb0c 100644
 --- a/packages/core/src/mcp/server.ts
 +++ b/packages/core/src/mcp/server.ts
-@@ -4,7 +4,7 @@
+@@ -4,13 +4,13 @@
  // funil, vendas, conversas e métricas), que chamam a API como esse usuário; as que gravam só com `access = 'write'`.
  import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
  import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
@@ -831,16 +1099,23 @@ index 7e1d3530b7d9d07a7a7db2d119268176c46ca9a8..aae6939c44eab122f8d994dab1aa041f
  import { z } from 'zod'
  import { CHAT_STATUSES, chats, connections, contacts, FLOW_STATUSES, flows, type Database } from '@crm/db'
  import { registerAllApiTools } from './tools/index'
+ import type { McpApiContext } from './tools/shared'
+ import { isSharedOffersCompany } from '../offers/policy'
+-import { BusinessAreasService } from '../business-areas/service'
++import { BusinessAreasService, workspaceFlowFilter } from '../business-areas/service'
+ 
+ export const MCP_SERVER_INFO = { name: 'leonas-crm', version: '1.0.0' } as const
+ /** Ferramentas da T94 (todas `readOnlyHint`), sempre presentes. */
 @@ -101,7 +101,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
    server.registerTool(
      'list_flows',
      { title: 'Listar fluxos', description: 'Fluxos de automação da empresa; filtro por status e busca por nome.', inputSchema: { status: z.enum(FLOW_STATUSES).optional(), search: z.string().max(200).optional(), ...page,
 -      ...(ctx.api?.businessAreasAdmin ? { business_area_id:z.uuid().optional().describe('Área de negócio da conta admin; omitido lista somente fluxos sem área.') } : {}) }, annotations: READ_ONLY },
-+      ...(ctx.api?.businessAreasAdmin ? { business_area_id:z.uuid().optional().describe('Workspace administrativo. Os fluxos são compartilhados na empresa.') } : {}) }, annotations: READ_ONLY },
++      ...(ctx.api?.businessAreasAdmin ? { business_area_id:z.uuid().optional().describe('Workspace administrativo. Lista seus fluxos e os fluxos compartilhados.') } : {}) }, annotations: READ_ONLY },
      async (args) => {
        const { status, search, limit, offset } = args
        const where: SQL[] = [eq(flows.companyId, companyId)]
-@@ -109,9 +109,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
+@@ -109,9 +109,9 @@ export function createMcpServer(ctx: McpContext): McpServer {
        if (await areas.enabled(companyId)) {
          if (!ctx.api?.businessAreasAdmin || !ctx.api.perms.has('flows.view')) return json({flows:[]})
          const requested = 'business_area_id' in args ? args.business_area_id : undefined
@@ -848,30 +1123,37 @@ index 7e1d3530b7d9d07a7a7db2d119268176c46ca9a8..aae6939c44eab122f8d994dab1aa041f
 -        where.push(area ? sql`exists(select 1 from crm.business_area_resources b where b.company_id=${companyId} and b.kind='flow' and b.resource_id=${flows.id} and b.area_id=${area})`
 -          : sql`not exists(select 1 from crm.business_area_resources b where b.company_id=${companyId} and b.kind='flow' and b.resource_id=${flows.id})`)
 +        if (typeof requested === 'string') await areas.get(companyId, requested)
++        const filter = workspaceFlowFilter(companyId, typeof requested === 'string' ? requested : null, flows.id)
++        if (filter) where.push(filter)
        }
        if (status) where.push(eq(flows.status, status))
        if (search?.trim()) where.push(ilike(flows.name, like(search.trim())))
 diff --git a/packages/core/src/mcp/tools/business-areas.ts b/packages/core/src/mcp/tools/business-areas.ts
-index 51c4e959ef31e81f9e699c84c84668b94e0e6caf..660423179abc5492b9a7ba1d1edb23b314a527c4 100644
+index 51c4e959ef31e81f9e699c84c84668b94e0e6caf..d393b72c782a1903f3a5b6bc5548dbe31417a208 100644
 --- a/packages/core/src/mcp/tools/business-areas.ts
 +++ b/packages/core/src/mcp/tools/business-areas.ts
-@@ -3,7 +3,7 @@ import { fromApi, tool, UUID } from './shared'
+@@ -2,8 +2,12 @@ import { z } from 'zod'
+ import { fromApi, tool, UUID } from './shared'
  
  export const businessAreasTools = [
++  tool({ name: 'share_workspace_flow', title: 'Compartilhar fluxo com os outros workspaces', perm: 'flows.edit', kind: 'write', areaScoped: true, idempotent: true,
++    description: 'Permite aos outros workspaces usar um fluxo do workspace selecionado. O workspace de origem mantém a edição.',
++    input: { flow_id: UUID, confirm: z.literal(true) },
++    run: async ({ flow_id }, api) => fromApi(await api.request('POST', `/api/flows/${flow_id}/share-workspace`, { body: {} })) }),
    tool({ name: 'list_business_areas', title: 'Listar áreas Admin 1/2/3', perm: 'settings.products.view',
 -    description: 'Três áreas de negócio dentro da MESMA conta. Retorna IDs, nomes e BM declarada; não são identidades pessoais ou novos logins. Use business_area_id nas ferramentas de Ofertas, fluxos, XPag e pixels.',
 +    description: 'Três áreas de negócio dentro da MESMA conta. Retorna IDs, nomes e BM declarada; não são identidades pessoais ou novos logins. Use business_area_id nas ferramentas de ofertas; os recursos são compartilhados.',
      run: async (_, api) => fromApi(await api.request('GET', '/api/business-areas')) }),
    tool({ name: 'initialize_business_areas', title: 'Criar três áreas de negócio', perm: 'settings.products.edit', kind: 'write',
      description: 'Cria Admin 1/2/3 sem mover cadastros existentes. Idempotente; não cria usuários, chips ou credenciais externas.',
-@@ -12,15 +12,11 @@ export const businessAreasTools = [
+@@ -12,15 +16,11 @@ export const businessAreasTools = [
      description: 'Salva nome e ID numérico DECLARADO da BM. Não conecta à Meta nem comprova propriedade ou permissão da BM.',
      input: { id: UUID, name: z.string().trim().min(1).max(80), bm_id: z.string().regex(/^\d{1,32}$/).nullable() },
      run: async ({ id, ...body }, api) => fromApi(await api.request('PUT', `/api/business-areas/${id}`, { body })) }),
 -  tool({ name: 'get_business_area_resource_catalog', title: 'Recursos e suas áreas', perm: 'settings.products.edit',
 -    description: 'Catálogo administrativo para atribuição explícita de produtos, fluxos, XPag, contas de anúncio, pixels e links já cadastrados. IDs e nomes, sem segredos. Cadastros sem área permanecem sem área.',
-+  tool({ name: 'get_business_area_resource_catalog', title: 'Recursos compartilhados', perm: 'settings.products.edit',
-+    description: 'Catálogo dos recursos compartilhados. Retorna IDs e nomes.',
++  tool({ name: 'get_business_area_resource_catalog', title: 'Recursos disponíveis no workspace', perm: 'settings.products.edit', areaScoped: true,
++    description: 'Catálogo com os recursos da empresa e os fluxos disponíveis no workspace. Retorna IDs e nomes.',
      run: async (_, api) => fromApi(await api.request('GET', '/api/business-areas/catalog')) }),
 -  tool({ name: 'assign_business_area_resource', title: 'Atribuir recurso à área', perm: 'settings.products.edit', kind: 'write',
 -    description: 'Vincula um cadastro da empresa a uma área. Recusa recurso de outra área; nunca transfere silenciosamente. Para recursos de oferta existente use adopt_offer_business_area.',
@@ -884,7 +1166,7 @@ index 51c4e959ef31e81f9e699c84c84668b94e0e6caf..660423179abc5492b9a7ba1d1edb23b3
      run: async ({ id, ...body }, api) => fromApi(await api.request('POST', `/api/business-areas/${id}/adopt-offer`, { body })) }),
  ]
 diff --git a/packages/core/src/mcp/tools/shared.ts b/packages/core/src/mcp/tools/shared.ts
-index eddc70518c4fb9a543d9948de0ffd3866540ee55..97e8481492b6cb64f4104ba31afc2a7d679f0577 100644
+index eddc70518c4fb9a543d9948de0ffd3866540ee55..a5d8ac3352103641db9cab33acbfebf1a4e392c4 100644
 --- a/packages/core/src/mcp/tools/shared.ts
 +++ b/packages/core/src/mcp/tools/shared.ts
 @@ -84,7 +84,7 @@ export function registerApiTools(server: McpServer, ctx: McpApiContext, tools: r
@@ -892,15 +1174,31 @@ index eddc70518c4fb9a543d9948de0ffd3866540ee55..97e8481492b6cb64f4104ba31afc2a7d
        request: (method, path, req) => ctx.api.request(method, path, { ...req, ...(businessAreaId ? { businessAreaId } : {}), write: kind !== 'read' && (req?.write ?? true) }),
      })
 -    const inputSchema = t.areaScoped && ctx.businessAreasAdmin ? { ...t.input, business_area_id: UUID.optional().describe('Área Admin 1/2/3 obtida com list_business_areas. Informe em CADA chamada; omitido usa somente cadastros sem área após configurar as áreas.') } : t.input ?? {}
-+    const inputSchema = t.areaScoped && ctx.businessAreasAdmin ? { ...t.input, business_area_id: UUID.optional().describe('Workspace Admin 1/2/3 obtido com list_business_areas. Para ofertas e seus resultados, omitir usa Geral. O catálogo de recursos é compartilhado.') } : t.input ?? {}
++    const inputSchema = t.areaScoped && ctx.businessAreasAdmin ? { ...t.input, business_area_id: UUID.optional().describe('Workspace Admin 1/2/3 obtido com list_business_areas. Omitir usa Geral para ofertas e fluxos.') } : t.input ?? {}
      server.registerTool(t.name, { title: t.title, description: t.description, inputSchema, annotations }, ((args: Record<string, unknown>) => {
        if (t.areaScoped && args?.business_area_id && !ctx.businessAreasAdmin) return fail({ error: 'business_area_forbidden' })
        const input = { ...args }, area = t.areaScoped ? input.business_area_id as string | undefined : undefined
 diff --git a/packages/core/src/offers/service.ts b/packages/core/src/offers/service.ts
-index 8401786506f286f92a1dfe0e2a2a14c68bcfa82b..e247e74834ecfcd568c49f0a6c2bccb966490d6b 100644
+index 8401786506f286f92a1dfe0e2a2a14c68bcfa82b..82872dfa9197577ea4e1719b1b76f9070b3874a3 100644
 --- a/packages/core/src/offers/service.ts
 +++ b/packages/core/src/offers/service.ts
-@@ -91,12 +91,7 @@ export class OffersService {
+@@ -1,4 +1,4 @@
+-import { BusinessAreasService } from '../business-areas/service'
++import { BusinessAreasService, workspaceFlowFilter } from '../business-areas/service'
+ import { isSharedOffersCompany, requireSharedOffersCompany, sharedOffersCompany } from './policy'
+ import { sql, type SQL } from 'drizzle-orm'
+ import type { Database } from '@crm/db'
+@@ -77,7 +77,8 @@ export class OffersService {
+       chats: sql`select c.id,coalesce(p.name,p.phone_e164,'Contato') || ' ? ' || n.name as name from crm.chats c join crm.contacts p on p.id=c.contact_id join crm.connections n on n.id=c.connection_id where c.company_id=${company} order by c.updated_at desc limit 200`,
+       members: sql`select u.id,u.name from crm.users u join crm.company_members m on m.user_id=u.id where m.company_id=${company}`,
+       products: sql`select id,name,currency from crm.products where company_id=${company}`,
+-      flows: sql`select id,name from crm.flows where company_id=${company} and published_version is not null and status='active'`,
++      flows: sql`select f.id,f.name from crm.flows f where company_id=${company} and published_version is not null and status='active'
++        ${area !== undefined ? sql`and ${workspaceFlowFilter(company, area, sql`f.id`)}` : sql``}`,
+       connections: sql`select id,name from crm.connections where company_id=${company}`,
+       integrations: sql`select id,label as name from crm.payment_integrations where company_id=${company} and gateway='xpag'`,
+       accounts: sql`select id,coalesce(name,fb_account_id) as name,currency from crm.meta_ad_accounts where company_id=${company}`,
+@@ -91,12 +92,7 @@ export class OffersService {
          sql`select connection_id from crm.offer_connections where company_id=${company}`,
        )
      ).map((x) => x.connection_id)
@@ -914,8 +1212,53 @@ index 8401786506f286f92a1dfe0e2a2a14c68bcfa82b..e247e74834ecfcd568c49f0a6c2bccb9
      return result
    }
    async save(company: string, input: { name: string; active?: boolean; config: OfferConfig }, id?: string, area?: string | null) {
+diff --git a/packages/db/drizzle/crm/0046_workspace_flow_sharing.sql b/packages/db/drizzle/crm/0046_workspace_flow_sharing.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..da22bc12c714ea1c38acfc963b52b5135bdc57f1
+--- /dev/null
++++ b/packages/db/drizzle/crm/0046_workspace_flow_sharing.sql
+@@ -0,0 +1,2 @@
++ALTER TABLE crm.business_area_resources
++  ADD COLUMN shared_with_workspaces boolean NOT NULL DEFAULT false;
+diff --git a/packages/db/drizzle/crm/meta/_journal.json b/packages/db/drizzle/crm/meta/_journal.json
+index 0cb11c18b8d9d9fcb0e2192a480ec1f8fc67effd..920272262b69af9a5bfe478c179f4cd4cf129e1e 100644
+--- a/packages/db/drizzle/crm/meta/_journal.json
++++ b/packages/db/drizzle/crm/meta/_journal.json
+@@ -323,6 +323,13 @@
+       "when": 1794963600000,
+       "tag": "0045_pending_message_status",
+       "breakpoints": true
++    },
++    {
++      "idx": 46,
++      "version": "7",
++      "when": 1795023000000,
++      "tag": "0046_workspace_flow_sharing",
++      "breakpoints": true
+     }
+   ]
+ }
+diff --git a/packages/db/src/schema/crm/business-areas.ts b/packages/db/src/schema/crm/business-areas.ts
+index 9f55a1cea45af4b58ba0a9d4a1017501e716726c..e2edf0be283e255fb6d5ef4185fdd5dc899b6fba 100644
+--- a/packages/db/src/schema/crm/business-areas.ts
++++ b/packages/db/src/schema/crm/business-areas.ts
+@@ -1,5 +1,5 @@
+ import { sql } from 'drizzle-orm'
+-import { check, foreignKey, index, integer, primaryKey, text, unique, uuid } from 'drizzle-orm/pg-core'
++import { boolean, check, foreignKey, index, integer, primaryKey, text, unique, uuid } from 'drizzle-orm/pg-core'
+ import { crm } from './schema.js'
+ import { companies } from './base.js'
+ 
+@@ -14,6 +14,7 @@ export const businessAreas = crm.table('business_areas', {
+ ])
+ export const businessAreaResources = crm.table('business_area_resources', {
+   companyId: uuid('company_id').notNull(), areaId: uuid('area_id').notNull(), kind: text('kind').notNull(), resourceId: uuid('resource_id').notNull(),
++  sharedWithWorkspaces: boolean('shared_with_workspaces').notNull().default(false),
+ }, t => [
+   primaryKey({ columns:[t.companyId,t.kind,t.resourceId] }),
+   foreignKey({columns:[t.companyId,t.areaId],foreignColumns:[businessAreas.companyId,businessAreas.id]}),
 diff --git a/tests/acceptance/T125/business-areas.test.ts b/tests/acceptance/T125/business-areas.test.ts
-index baf66768195d3694a24418c2020c8629831287a2..11330a4d71febf2374a94ced06c77e5142841d79 100644
+index baf66768195d3694a24418c2020c8629831287a2..b00b47c7f800b4276a5f18bcf42078ac80b55377 100644
 --- a/tests/acceptance/T125/business-areas.test.ts
 +++ b/tests/acceptance/T125/business-areas.test.ts
 @@ -72,26 +72,29 @@ it('names/BMs are explicit, scoped by company, unique and validated without cont
@@ -1040,39 +1383,39 @@ index baf66768195d3694a24418c2020c8629831287a2..11330a4d71febf2374a94ced06c77e51
    expect(await sys.q('select id from crm.payment_charges')).toHaveLength(0)
  })
  it('permissions and company gate are checked on each area management call', async () => {
-@@ -198,43 +212,43 @@ it('another admin of the SAME company cannot discover area tools or read area da
+@@ -198,13 +212,26 @@ it('another admin of the SAME company cannot discover area tools or read area da
    expect(profile.companies.find((c:any)=>c.id===t.companyId)).toMatchObject({business_areas_admin:false,business_areas_enabled:true})
    await sys.q('update crm.users set last_company_id=$1 where id=$2',[t.companyId,user])
  })
 -it('MCP listing, duplicate/import/paste and run IDs keep the area context, including materialized share-code references', async () => {
-+it('MCP lists shared flows, imports reusable definitions and exposes ordinary runs across workspaces', async () => {
++it('flows start private, can be shared deliberately and keep editing in the owner workspace', async () => {
    const a=areas[0].id,b=areas[1].id
    const created=await call('POST','/api/flows',a,{name:'Scoped template A'})
    expect(created.status).toBe(201);const id=created.body.flow.id
    const listed=await tool(reader,'list_flows',{business_area_id:a})
    expect(listed.data.flows.map((f:any)=>f.id)).toContain(id)
--  expect((await tool(reader,'list_flows',{business_area_id:b})).data.flows.map((f:any)=>f.id)).not.toContain(id)
+   expect((await tool(reader,'list_flows',{business_area_id:b})).data.flows.map((f:any)=>f.id)).not.toContain(id)
++  expect((await call('GET','/api/flows/'+id,b)).status).toBe(404)
++  expect((await call('GET','/api/flows/names',b)).body.items.map((f:any)=>f.id)).not.toContain(id)
++  await sys.q("update crm.flows set status='active',published_version=1 where id=$1", [id])
++  const candidate = {name:'Offer using a workspace flow',config:{...bundles[0],flow_id:id}}
++  expect((await call('POST','/api/offers',b,candidate)).status).toBe(422)
++  expect((await call('GET','/api/offers/resources',a)).body.flows.map((f:any)=>f.id)).toContain(id)
++  expect((await call('POST','/api/flows/'+id+'/share-workspace',b,{})).status).toBe(404)
++  expect((await tool(reader,'share_workspace_flow',{flow_id:id,business_area_id:a,confirm:true})).error).toBe(true)
++  expect((await tool(writer,'share_workspace_flow',{flow_id:id,business_area_id:a,confirm:true})).error).toBe(false)
 +  expect((await tool(reader,'list_flows',{business_area_id:b})).data.flows.map((f:any)=>f.id)).toContain(id)
++  expect((await call('GET','/api/flows/'+id,b)).status).toBe(200)
++  expect((await call('PATCH','/api/flows/'+id,b,{name:'Attempt from another workspace'})).status).toBe(404)
++  expect((await call('POST','/api/offers',b,candidate)).status).toBe(201)
    const duplicated=await call('POST',`/api/flows/${id}/duplicate`,a,{})
    expect(duplicated.status).toBe(201)
--  expect((await call('GET','/api/flows/'+duplicated.body.flow.id,b)).status).toBe(404)
-+  expect((await call('GET','/api/flows/'+duplicated.body.flow.id,b)).status).toBe(200)
-   const exported=await call('GET',`/api/flows/${id}/export`,a)
-   const imported=await call('POST','/api/flows/import-json',a,exported.body)
-   expect(imported.status,JSON.stringify(imported.body)).toBe(201)
--  expect((await call('GET','/api/flows/'+imported.body.flow.id,b)).status).toBe(404)
-+  expect((await call('GET','/api/flows/'+imported.body.flow.id,b)).status).toBe(200)
-   const code=(await call('GET',`/api/flows/${id}/share-code`,a)).body.code
-   const shared=await call('POST','/api/flows/import',a,{codes:[code]})
-   expect(shared.status,JSON.stringify(shared.body)).toBe(201)
-   expect(shared.body.items).toHaveLength(1)
--  expect((await call('GET','/api/flows/'+shared.body.items[0].flow.id,b)).status).toBe(404)
-+  expect((await call('GET','/api/flows/'+shared.body.items[0].flow.id,b)).status).toBe(200)
-   const foreignFlow=await call('POST','/api/flows',b,{name:'Scoped template B'})
-   expect(foreignFlow.status).toBe(201)
+   expect((await call('GET','/api/flows/'+duplicated.body.flow.id,b)).status).toBe(404)
+@@ -222,19 +249,20 @@ it('MCP listing, duplicate/import/paste and run IDs keep the area context, inclu
    const node=await call('POST',`/api/flows/${foreignFlow.body.flow.id}/nodes`,b,{id:'pay',type:'payment',position:{x:200,y:0},actions:[{type:'create_payment_charge',config:{gateway:'xpag',method:'pix',amount:100,payment_integration_id:bundles[1].integration_id}}]})
    expect(node.status,JSON.stringify(node.body)).toBe(201)
    const foreignCode=(await call('GET',`/api/flows/${foreignFlow.body.flow.id}/share-code`,b)).body.code
++  expect((await call('POST',`/api/flows/${foreignFlow.body.flow.id}/share-workspace`,b,{})).status).toBe(200)
    const count=(await sys.q('select count(*)::int n from crm.flows where company_id=$1',[t.companyId]))[0].n
 -  const refused=await call('POST','/api/flows/import',a,{codes:[foreignCode]})
 -  expect(refused.status,JSON.stringify(refused.body)).toBe(422)
@@ -1096,7 +1439,12 @@ index baf66768195d3694a24418c2020c8629831287a2..11330a4d71febf2374a94ced06c77e51
    expect((await tool(reader,'get_conversation_flow_runs',{id:chat.id,business_area_id:b})).data.items).toHaveLength(1)
  })
  it('desktop/mobile navigation selects the actual business area, filters offers and shows its declared BM', async () => {
-@@ -265,17 +279,46 @@ it('desktop/mobile navigation selects the actual business area, filters offers a
+@@ -261,21 +289,62 @@ it('desktop/mobile navigation selects the actual business area, filters offers a
+   await new Promise<void>(r=>server.listen(0,'127.0.0.1',r)); const port=(server.address() as any).port,base='http://127.0.0.1:'+port
+   browser=await chromium.launch({headless:true})
+   for(const width of [1440,390]) {
++    const privateFlow = (await call('POST','/api/flows',areas[0].id,{name:'Browser private flow '+width})).body.flow
+     const context=await browser.newContext({viewport:{width,height:900}})
      try {
        await context.addCookies([{name:'crm_session',value:t.token,url:base,httpOnly:true,sameSite:'Lax'}])
        const page=await context.newPage(),errors:string[]=[];page.on('pageerror',e=>errors.push(e.message))
@@ -1131,12 +1479,23 @@ index baf66768195d3694a24418c2020c8629831287a2..11330a4d71febf2374a94ced06c77e51
 +      await page.getByRole('button', { name: new RegExp(offerName) }).waitFor()
 +      await page.reload()
 +      await expect.poll(()=>page.getByRole('button',{name:/Business offer 0/}).isVisible()).toBe(true)
++      await page.getByRole('navigation',{name:'Ofertas e recursos compartilhados'}).getByRole('link',{name:'Fluxos'}).click()
++      await page.getByTestId('flows-item-menu-'+privateFlow.id).click()
++      const shareResponse = page.waitForResponse(response => response.url().endsWith('/share-workspace') && response.request().method()==='POST')
++      page.once('dialog', dialog => dialog.accept())
++      await page.getByTestId('flow-share-workspaces-'+privateFlow.id).click()
++      expect((await shareResponse).status()).toBe(200)
 +      await page.getByRole('button',{name:'Trocar workspace'}).click()
 +      await page.getByTestId('workspace-enter-2').click()
        await expect.poll(()=>page.getByRole('button',{name:/Business offer 1/}).isVisible()).toBe(true)
        expect(await page.getByRole('button',{name:/Business offer 0/}).isVisible()).toBe(false)
 +      expect(await page.getByRole('button',{name:new RegExp(offerName)}).count()).toBe(0)
        expect(await page.getByTestId('business-area-bm').textContent()).toContain('222000')
++      await page.getByRole('navigation',{name:'Ofertas e recursos compartilhados'}).getByRole('link',{name:'Fluxos'}).click()
++      await page.getByTestId('flows-item-menu-'+privateFlow.id).click()
++      await page.getByTestId('flows-item-open-'+privateFlow.id).waitFor()
++      expect(await page.getByTestId('flow-share-workspaces-'+privateFlow.id).count()).toBe(0)
++      await page.keyboard.press('Escape')
 +      await page.getByRole('button',{name:'Trocar workspace'}).click()
 +      await page.getByTestId('workspace-enter-3').click()
 +      await expect.poll(()=>page.getByTestId('workspace-current').textContent()).toBe(areas[2].name)
