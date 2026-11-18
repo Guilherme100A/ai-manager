@@ -1254,7 +1254,7 @@ index 9f55a1cea45af4b58ba0a9d4a1017501e716726c..e2edf0be283e255fb6d5ef4185fdd5dc
    primaryKey({ columns:[t.companyId,t.kind,t.resourceId] }),
    foreignKey({columns:[t.companyId,t.areaId],foreignColumns:[businessAreas.companyId,businessAreas.id]}),
 diff --git a/tests/acceptance/T125/business-areas.test.ts b/tests/acceptance/T125/business-areas.test.ts
-index baf66768195d3694a24418c2020c8629831287a2..b00b47c7f800b4276a5f18bcf42078ac80b55377 100644
+index baf66768195d3694a24418c2020c8629831287a2..b97411ddd7a80982edc43387596fcde25cea0559 100644
 --- a/tests/acceptance/T125/business-areas.test.ts
 +++ b/tests/acceptance/T125/business-areas.test.ts
 @@ -72,26 +72,29 @@ it('names/BMs are explicit, scoped by company, unique and validated without cont
@@ -1311,14 +1311,13 @@ index baf66768195d3694a24418c2020c8629831287a2..b00b47c7f800b4276a5f18bcf42078ac
    expect((await call('GET', '/api/offers')).body.items.map((r: any) => r.id)).toEqual([oldOffer.id])
  })
  it('MCP carries an explicit area on each call without leaking state to the next caller, and retains read/write permissions', async () => {
-@@ -114,19 +117,19 @@ it('MCP carries an explicit area on each call without leaking state to the next
+@@ -114,19 +117,20 @@ it('MCP carries an explicit area on each call without leaking state to the next
    expect((await tool(reader, 'get_offer', { id: bundles[1].offerId, business_area_id: areas[0].id })).data.status).toBe(404)
    const flow = await tool(writer, 'create_flow', { name: 'Area MCP flow', business_area_id: areas[0].id })
    expect(flow.error, JSON.stringify(flow.data)).toBe(false)
 -  expect((await sys.q("select area_id from crm.business_area_resources where kind='flow' and resource_id=$1", [flow.data.flow.id]))[0].area_id).toBe(areas[0].id)
--  expect((await tool(reader, 'get_flow', { id: flow.data.flow.id, business_area_id: areas[1].id })).data.status).toBe(404)
-+  expect(await sys.q("select area_id from crm.business_area_resources where kind='flow' and resource_id=$1", [flow.data.flow.id])).toHaveLength(0)
-+  expect((await tool(reader, 'get_flow', { id: flow.data.flow.id, business_area_id: areas[1].id })).error).toBe(false)
++  expect(await sys.q("select area_id,shared_with_workspaces from crm.business_area_resources where kind='flow' and resource_id=$1", [flow.data.flow.id])).toEqual([{ area_id: areas[0].id, shared_with_workspaces: false }])
+   expect((await tool(reader, 'get_flow', { id: flow.data.flow.id, business_area_id: areas[1].id })).data.status).toBe(404)
  })
  it('flow editing rejects both foreign and dynamic destination references before changing the draft', async () => {
    const id = bundles[0].flow_id
@@ -1333,14 +1332,15 @@ index baf66768195d3694a24418c2020c8629831287a2..b00b47c7f800b4276a5f18bcf42078ac
  })
 -it('adoption is atomic, explicit, cannot transfer other-area assets and preserves activation/history', async () => {
 +it('adoption moves only a general offer and preserves its activation, shared resources and history', async () => {
++  const resourceBindings = await sys.q('select * from crm.business_area_resources order by kind,resource_id')
    const failed = await call('POST', `/api/business-areas/${areas[1].id}/adopt-offer`, undefined, { offer_id: bundles[0].offerId, confirm: true })
    expect(failed.status).toBe(409)
    expect((await sys.q('select business_area_id from crm.offers where id=$1', [bundles[0].offerId]))[0].business_area_id).toBe(areas[0].id)
-@@ -138,13 +141,19 @@ it('adoption is atomic, explicit, cannot transfer other-area assets and preserve
+@@ -138,13 +142,19 @@ it('adoption is atomic, explicit, cannot transfer other-area assets and preserve
    expect((await call('POST', `/api/business-areas/${areas[2].id}/adopt-offer`, undefined, { offer_id: oldOffer.id, confirm: true })).status).toBe(200)
    expect((await sys.q('select version from crm.offers where id=$1', [oldOffer.id]))[0].version).toBe(2)
    expect(await sys.q('select id from crm.flow_runs')).toHaveLength(0)
-+  expect(await sys.q('select * from crm.business_area_resources')).toHaveLength(0)
++  expect(await sys.q('select * from crm.business_area_resources order by kind,resource_id')).toEqual(resourceBindings)
    expect(await sys.q('select id from crm.payment_charges')).toHaveLength(0)
  })
 -it('simultaneous assignment cannot give the same resource to two areas', async () => {
@@ -1361,7 +1361,7 @@ index baf66768195d3694a24418c2020c8629831287a2..b00b47c7f800b4276a5f18bcf42078ac
  })
  it('the same shared chip freezes the selected business, BM and payment destination, with separated historical results', async () => {
    const { OffersService } = await import('@crm/core'), svc = new OffersService(sys.db)
-@@ -163,11 +172,16 @@ it('the same shared chip freezes the selected business, BM and payment destinati
+@@ -163,11 +173,16 @@ it('the same shared chip freezes the selected business, BM and payment destinati
    expect((await call('GET','/api/offers/results',areas[0].id)).body.items).toEqual([expect.objectContaining({offer_id:bundles[0].offerId,revenue_cents:'100'})])
    expect((await call('GET','/api/chats/'+chat.id+'/offers',areas[1].id)).body.items).toEqual([])
    expect((await call('GET','/api/chats/'+chat.id+'/offers',areas[0].id)).body.items).toHaveLength(1)
@@ -1379,7 +1379,7 @@ index baf66768195d3694a24418c2020c8629831287a2..b00b47c7f800b4276a5f18bcf42078ac
    expect(await sys.q('select id from crm.payment_charges')).toHaveLength(0)
  })
  it('permissions and company gate are checked on each area management call', async () => {
-@@ -198,13 +212,26 @@ it('another admin of the SAME company cannot discover area tools or read area da
+@@ -198,13 +213,26 @@ it('another admin of the SAME company cannot discover area tools or read area da
    expect(profile.companies.find((c:any)=>c.id===t.companyId)).toMatchObject({business_areas_admin:false,business_areas_enabled:true})
    await sys.q('update crm.users set last_company_id=$1 where id=$2',[t.companyId,user])
  })
@@ -1407,7 +1407,7 @@ index baf66768195d3694a24418c2020c8629831287a2..b00b47c7f800b4276a5f18bcf42078ac
    const duplicated=await call('POST',`/api/flows/${id}/duplicate`,a,{})
    expect(duplicated.status).toBe(201)
    expect((await call('GET','/api/flows/'+duplicated.body.flow.id,b)).status).toBe(404)
-@@ -222,19 +249,20 @@ it('MCP listing, duplicate/import/paste and run IDs keep the area context, inclu
+@@ -222,19 +250,20 @@ it('MCP listing, duplicate/import/paste and run IDs keep the area context, inclu
    const node=await call('POST',`/api/flows/${foreignFlow.body.flow.id}/nodes`,b,{id:'pay',type:'payment',position:{x:200,y:0},actions:[{type:'create_payment_charge',config:{gateway:'xpag',method:'pix',amount:100,payment_integration_id:bundles[1].integration_id}}]})
    expect(node.status,JSON.stringify(node.body)).toBe(201)
    const foreignCode=(await call('GET',`/api/flows/${foreignFlow.body.flow.id}/share-code`,b)).body.code
@@ -1435,7 +1435,7 @@ index baf66768195d3694a24418c2020c8629831287a2..b00b47c7f800b4276a5f18bcf42078ac
    expect((await tool(reader,'get_conversation_flow_runs',{id:chat.id,business_area_id:b})).data.items).toHaveLength(1)
  })
  it('desktop/mobile navigation selects the actual business area, filters offers and shows its declared BM', async () => {
-@@ -261,21 +289,62 @@ it('desktop/mobile navigation selects the actual business area, filters offers a
+@@ -261,21 +290,62 @@ it('desktop/mobile navigation selects the actual business area, filters offers a
    await new Promise<void>(r=>server.listen(0,'127.0.0.1',r)); const port=(server.address() as any).port,base='http://127.0.0.1:'+port
    browser=await chromium.launch({headless:true})
    for(const width of [1440,390]) {
