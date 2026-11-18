@@ -326,12 +326,29 @@ test('CI PostgreSQL utilities use same service16 container with streaming files,
   assert.throws(() => pgClientPlan('', 'pg_dump', ['-f', dump])); assert.throws(() => pgClientPlan(container, 'other', []))
 })
 
-for (const sourceTree of ['6844b56c32af325ff203014afa0a2bcdc5ea9688', 'e39405197247f463dec69388a29d43c187a22332', '7158e6027f11a6a4e77910d5a9c536109848a6c9', '91134a774990fb63abf05764e508f315f1944664', 'f222d1b555a0e4e92ca8f86503f35fadb3099c0e', 'fe9dbf880d74e6dc4550735b24527756cbd9afc4', TREE]) test('area release accepts only the exact installed migration prefix: '+sourceTree, t => {
+for (const [sourceTree, journalCount] of [
+  ['6844b56c32af325ff203014afa0a2bcdc5ea9688', 43],
+  ['e39405197247f463dec69388a29d43c187a22332', 44],
+  ['7158e6027f11a6a4e77910d5a9c536109848a6c9', 44],
+  ['91134a774990fb63abf05764e508f315f1944664', 45],
+  ['f222d1b555a0e4e92ca8f86503f35fadb3099c0e', 46],
+  ['fe9dbf880d74e6dc4550735b24527756cbd9afc4', 46],
+  ['d0489b7ae0b69fcd0adcb1d8db36ddcf5028bff4', 47],
+  ['62ef8c2a0223928bc41e62046de59dea708197f7', 47],
+  ['af9c8482823fb72833a14041af6183027e21a6f2', 47],
+  [TREE, 47],
+]) test('release accepts the exact installed migration prefix: '+sourceTree, t => {
   const f=installedFixture(t); f.old.source_tree=sourceTree;
   fs.writeFileSync(path.join(f.state,'active.json'),JSON.stringify(f.old));
   fs.writeFileSync(path.join(f.state,'releases',f.old.release,'override.yml'),override(f.old));
-  deploy(f.options,f.run);
-  assert.ok(f.calls.some(c=>c.label==='journal-'+(sourceTree===TREE?47:['f222d1b555a0e4e92ca8f86503f35fadb3099c0e','fe9dbf880d74e6dc4550735b24527756cbd9afc4'].includes(sourceTree)?46:sourceTree==='91134a774990fb63abf05764e508f315f1944664'?45:sourceTree==='6844b56c32af325ff203014afa0a2bcdc5ea9688'?43:44)));
+  const journal = count => JSON.stringify(f.m.migrations.slice(0, count).map(x => ({ hash: x.hash, created_at: x.when })))
+  let migrated = false
+  deploy(f.options, (label, ...args) => {
+    const reply = f.run(label, ...args)
+    if (label === 'migrate-only-crm') migrated = true
+    return label.startsWith('journal-') ? journal(migrated ? f.m.migrations.length : journalCount) : reply
+  })
+  assert.equal(f.calls.filter(c => c.label === 'journal-' + journalCount).length, journalCount === f.m.migrations.length ? 3 : 2)
   assert.equal(read(path.join(f.state,'active.json')).company_id,f.company);
 });
 test('missing business-area schema retains maintenance before any new API cutover', t => {
