@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { pathToFileURL } from 'node:url'
-import { TREE, sha, hashFile, read, parseJSON, requireThat, command, atomic, dedicatedPaths, validateManifest, specFor, override, composeArgs, validateConfig, sourceDigest, secrets, tsxCommand, availableMemoryBytes } from './lib.mjs'
+import { INSTALLED_CRM_JOURNALS, sha, hashFile, read, parseJSON, requireThat, command, atomic, dedicatedPaths, validateManifest, specFor, override, composeArgs, validateConfig, sourceDigest, secrets, metaEnvironment, tsxCommand, availableMemoryBytes } from './lib.mjs'
 const json = (run, label, cmd, args) => parseJSON(run(label, cmd, args), label)
 export function deploy(options, run = command) {
   requireThat(options.lockHeld === true, 'Shared deployment lock required')
@@ -67,7 +67,8 @@ export function deploy(options, run = command) {
     const applied = parseJSON(dc('journal-' + count, psql('BEGIN READ ONLY; SELECT coalesce(json_agg(t),\'[]\') FROM (SELECT hash,created_at FROM crm.__drizzle_migrations ORDER BY created_at) t; COMMIT;')), 'CRM journal')
     requireThat(Array.isArray(applied) && applied.length === count && applied.every((x, i) => x.hash === m.migrations[i].hash && Number(x.created_at) === m.migrations[i].when), 'CRM migration history drift')
   }
-  const beforeCount = installed ? ((installed.source_tree === TREE) ? 47 : ['f222d1b555a0e4e92ca8f86503f35fadb3099c0e','fe9dbf880d74e6dc4550735b24527756cbd9afc4'].includes(installed.source_tree) ? 46 : installed.source_tree === '91134a774990fb63abf05764e508f315f1944664' ? 45 : ['7158e6027f11a6a4e77910d5a9c536109848a6c9', 'e39405197247f463dec69388a29d43c187a22332'].includes(installed.source_tree) ? 44 : 43) : 39
+  const beforeCount = installed ? INSTALLED_CRM_JOURNALS.get(installed.source_tree) : 39
+  requireThat(Number.isInteger(beforeCount), 'Unknown installed CRM migration prefix')
   checkJournal(beforeCount)
   fs.mkdirSync(state, { recursive: true, mode: 0o700 })
   const space = fs.statfsSync(state)
@@ -83,7 +84,7 @@ export function deploy(options, run = command) {
   validateConfig(before, parseJSON(next('candidate-config', ['config', '--format', 'json']), 'candidate-config'), spec)
   run('load-audited-image', 'docker', ['load', '--input', path.join(artifact, 'images.tar.gz')])
   const image = json(run, 'image-proof', 'docker', ['image', 'inspect', m.image, '--format', '{{json .}}'])
-  requireThat(image.Id === m.image_id && image.Config?.Labels?.['crm.source-tree'] === TREE && image.Architecture === 'amd64' && image.Os === 'linux', 'Loaded image identity/platform/tree drift')
+  requireThat(image.Id === m.image_id && image.Config?.Labels?.['crm.source-tree'] === m.source_tree && image.Architecture === 'amd64' && image.Os === 'linux', 'Loaded image identity/platform/tree drift')
   for (const volume of [spec.deps, spec.spa]) {
     requireThat(run('volume-absent', 'docker', ['volume', 'ls', '--filter', `name=^${volume}$`, '--format', '{{.Name}}']) === '', 'Release volume already exists')
     run('create-release-volume', 'docker', ['volume', 'create', '--label', `crm.release=${m.release}`, volume])
@@ -127,11 +128,13 @@ export function deploy(options, run = command) {
     atomic(maintenance, { release: m.release, stage: 'migration-attempted', automatic_database_restore: false })
     migrationAttempted = true // Unknown commit state on any migration failure: never restart old binaries.
     next('migrate-only-crm', ['run', '--rm', '--no-deps', 'crm-api', ...tsxCommand('/crm/packages/db/src/migrate.ts'), '--set', 'crm'])
-    checkJournal(47)
+    checkJournal(m.migrations.length)
     const schema = parseJSON(dc('verify-offer-schema', psql("BEGIN READ ONLY; SELECT json_build_object('column',EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='crm' AND table_name='flow_runs' AND column_name='offer_scoped'),'trigger',EXISTS(SELECT 1 FROM pg_trigger WHERE tgname='validate_offer_run_scope'),'indexes',(SELECT count(*) FROM pg_indexes WHERE schemaname='crm' AND indexname IN ('flow_runs_active_contact_uq','flow_runs_active_chat_uq'))); COMMIT;")), 'schema')
     requireThat(schema.column === true && schema.trigger === true && schema.indexes === 2, 'CRM schema verification failed')
     const areas = parseJSON(dc('verify-business-area-schema', psql("BEGIN READ ONLY; SELECT json_build_object('areas',to_regclass('crm.business_areas') IS NOT NULL,'resources',to_regclass('crm.business_area_resources') IS NOT NULL,'offer_column',EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='crm' AND table_name='offers' AND column_name='business_area_id'),'flow_share_column',EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='crm' AND table_name='business_area_resources' AND column_name='shared_with_workspaces' AND is_nullable='NO' AND data_type='boolean')); COMMIT;")), 'business area schema')
     requireThat(areas.areas === true && areas.resources === true && areas.offer_column === true && areas.flow_share_column === true, 'Business area schema verification failed')
+    const meta = parseJSON(dc('verify-workspace-meta-schema', psql("BEGIN READ ONLY; SELECT json_build_object('constraints',(SELECT count(*) FROM pg_constraint WHERE connamespace='crm'::regnamespace AND convalidated AND conname IN ('meta_profiles_area_fk','meta_ad_accounts_area_profile_fk','pixel_configs_area_account_fk','pixel_configs_workspace_ck')),'indexes',(SELECT count(*) FROM pg_indexes WHERE schemaname='crm' AND indexname IN ('meta_profiles_workspace_fb_user_uq','meta_ad_accounts_workspace_identity_uq','pixel_configs_workspace_identity_uq'))); COMMIT;")), 'workspace Meta schema')
+    requireThat(meta.constraints === 4 && meta.indexes === 3, 'Workspace Meta schema verification failed')
     const identity = parseJSON(dc('verify-message-identity-schema', psql("BEGIN READ ONLY; SELECT json_build_object('scoped',to_regclass('crm.messages_company_connection_wa_id_uq') IS NOT NULL,'old_global',to_regclass('crm.messages_company_wa_id_uq') IS NOT NULL,'column',EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='crm' AND table_name='messages' AND column_name='connection_id' AND is_nullable='NO'),'trigger',EXISTS(SELECT 1 FROM pg_trigger WHERE tgname='bind_message_connection' AND tgrelid='crm.messages'::regclass AND tgenabled='O'),'fk',(SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname='messages_chat_connection_fk' AND conrelid='crm.messages'::regclass AND convalidated)); COMMIT;")), 'message identity schema')
     requireThat(identity.scoped === true && identity.old_global === false && identity.column === true && identity.trigger === true && typeof identity.fk === 'string' && identity.fk.includes('FOREIGN KEY (company_id, chat_id, connection_id)') && identity.fk.includes('REFERENCES crm.chats(company_id, id, connection_id)'), 'Message identity schema verification failed')
     const pendingStatus = parseJSON(dc('verify-pending-message-status-schema', psql("BEGIN READ ONLY; SELECT json_build_object('table',to_regclass('crm.pending_message_status') IS NOT NULL,'connection_index',to_regclass('crm.connections_company_id_uq') IS NOT NULL,'fk',(SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname='pending_message_status_connection_fk' AND conrelid='crm.pending_message_status'::regclass AND convalidated),'expiry',EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='crm' AND table_name='pending_message_status' AND column_name='expires_at' AND is_nullable='NO')); COMMIT;")), 'pending message status schema')
@@ -153,6 +156,11 @@ export function deploy(options, run = command) {
       if (name !== 'crm-web') {
         requireThat(e.includes('SHARED_OFFERS_COMPANY_ID=' + company), 'Gate changed during cutover')
         for (const key of secrets) requireThat(e.includes(key + '=' + before.services[name].environment[key]), 'Credential changed during cutover')
+        for (const key of metaEnvironment) {
+          const value = before.services[name].environment[key] ?? ''
+          const actual = e.find(entry => entry.startsWith(key + '='))?.slice(key.length + 1) ?? ''
+          requireThat(actual === value, 'Meta configuration changed during cutover')
+        }
         requireThat(json(run, 'verify-image-' + name, 'docker', ['inspect', '--format', '{{json .Image}}', id]) === m.image_id, 'Running image drift')
         requireThat(!actualMounts.some(x => x.Type === 'bind' || x.Destination === '/crm') && actualMounts.some(x => x.Destination === '/crm/node_modules' && x.Name === spec.deps && x.RW === false) && actualMounts.some(x => x.Destination === '/data/storage' && x.Name === spec.storage), 'Running dependency/storage mount drift')
       } else requireThat(actualMounts.some(x => x.Destination === '/usr/share/nginx/html' && x.Name === spec.spa && x.RW === false), 'Running SPA mount drift')
