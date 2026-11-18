@@ -1,0 +1,858 @@
+diff --git a/docs/flow-outbound-status.md b/docs/flow-outbound-status.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..3d95d2aa3a2e07f7f48d2c5c1091443c725bb5ac
+--- /dev/null
++++ b/docs/flow-outbound-status.md
+@@ -0,0 +1,56 @@
++# Flow outbound recording and early delivery receipts
++
++Production uses the same `record` and `mediaUrl` dependencies for message nodes,
++wait-response questions, menus and carousels. An interactive question is a normal
++outbound in the chat, and reentry through a client answer does not send it again.
++
++The gateway accepts a send before the flow step commits its outbound row. A fast
++delivery event can therefore arrive while that row is invisible to another DB
++transaction. An absent row is not proof that the event belongs to no CRM message.
++
++Migration 0045 (journal entry 46) adds private `pending_message_status`. Its primary
++key is company + connection + pipeline ID. A composite connection FK enforces the
++tenant. There is deliberately no message FK: that message may not exist yet.
++Only status, transport ID, timestamps, error and expiry are retained; no body,
++media, credentials or send intent is stored or exposed by API/MCP.
++
++The recorder and status consumer take the same transaction advisory lock before
++reading or associating a pipeline. If the consumer commits first, the recorder
++consumes its receipt. If the recorder wins, the consumer waits for its commit; a
++rollback leaves the consumer able to retain the receipt for a later recording of
++the already accepted action. The stream handler resolves only after that DB
++transaction commits. Existing `canAdvanceStatus` rules are reused, including
++failed/cancelled recovery to processing/retrying. Late queued views never replace
++terminal ACKs, and conflicting transport IDs are rejected.
++
++This applies to flow/system recording, API/MCP first sends and explicitly requested
++retries. It never initiates a retry. Pipeline conflicts cannot return another
++chat's row. Message identity remains company + connection + WAID; migration 0044
++and all its PN/LID/tenant guards are unchanged.
++
++Lock order is pipeline identity, then message/receipt rows, then chat updates for
++the recorder. The projection helper makes no network call. The enclosing flow
++transaction can retain earlier pipeline locks while it sends subsequent actions;
++the gateway does not wait for CRM event ingestion. CI proves progress through a
++second fake send with an ACK blocked on the first, using PostgreSQL lock barriers.
++The step executor is retained to preserve the T123 chat-lock guarantee. Orphan
++cleanup uses SKIP LOCKED so it cannot invert this order through another receipt.
++
++Unmatched events may legitimately belong to non-CRM messages of an imported chip.
++They expire 30 days after first storage. Bounded cleanup (100 expired rows in the
++current company/connection) occurs when another unmatched event is stored. Idle
++expired rows are inert and may remain until then. No expiry task sends, restores
++or resumes anything. Recovery after that retention window needs an explicit,
++separately reviewed historical procedure.
++
++Flow realtime publications are registered on the outer step's after-commit hook.
++A rollback cannot expose a phantom outbound. Publishing reloads the committed
++message; a process crash can lose a realtime notification, but not the recorded
++message or delivery evidence. Reloading chat history obtains the durable state.
++External executors without an after-commit hook suppress immediate publication.
++
++This patch does not recover ACKs already consumed by old code, create the missing
++historic questions, replay events, resend media, change a flow snapshot or resume
++a run. Any historical repair must identify exact authorized company, connection,
++pipeline and chat IDs and verify the existing transport evidence first. A green
++CI is not proof of WhatsApp delivery or a completed commercial flow.
+diff --git a/packages/core/src/chats/ingest/chat-ingest.ts b/packages/core/src/chats/ingest/chat-ingest.ts
+index 02d0297a131357757b7abb23815a9c561559735d..308f8ab3a328848269ae2cfc5efe0984794e6ce8 100644
+--- a/packages/core/src/chats/ingest/chat-ingest.ts
++++ b/packages/core/src/chats/ingest/chat-ingest.ts
+@@ -6,7 +6,7 @@ import { OffersService } from '../../offers/service'
+ // mensagem com código de link rastreável (`(ref XXXXXX)`) liga o clique ao contato e é gravada sem o código. Nos dois
+ // casos o `crm.inbound` sai com `ad_source` (o worker usa para o Lead automático de anúncio).
+ import { and, asc, eq, sql } from 'drizzle-orm'
+-import { auditLogs, chatEvents, chats, companies, messages, type CrmMessageStatus, type Database } from '@crm/db'
++import { auditLogs, chatEvents, chats, companies, messages, type Database } from '@crm/db'
+ import type { RealtimeEventData, RealtimeEventType } from '@crm/shared'
+ import type { IncomingMessage, WaEvent, WaEventOf, WaGateway } from '@crm/wa-port'
+ import { AttributionService, recordAttributionEvidence } from '../../attribution/service'
+@@ -16,8 +16,8 @@ import { ContactsService, type ContactDto } from '../../contacts/service'
+ import { chatScope, toChatDto, toMessageDto, type ChatRow, type MessageRow } from '../model/dto'
+ import { crmConnectionsResolver, type ConnectionResolver, type ResolvedConnection } from '../model/connections'
+ import { mergeContactChats } from '../model/merge'
++import { lockMessageStatus, projectMessageStatus, rememberMessageStatus, statusEvidence } from '../model/status-receipts'
+ import {
+-  canAdvanceStatus,
+   crmMessageType,
+   identityOf,
+   isIgnoredJid,
+@@ -318,11 +318,14 @@ export class ChatIngest {
+   private async applyStatus(event: WaEventOf<'message.status'>): Promise<IngestOutcome> {
+     const conn = await this.resolve(event.session_id)
+     if (!conn) return { status: 'ignored', reason: 'unknown_session' }
+-    const next = event.status as CrmMessageStatus
++    const evidence = statusEvidence(event)
+     // Um mesmo ID WhatsApp existe na saida de um chip e na entrada do outro.
+     // Status do pipeline pertence somente a saida da conexao que publicou o evento.
+     const connectionScope = eq(messages.connectionId, conn.connectionId)
++    let deferred = false
+     const row = await this.db.transaction(async (tx) => {
++      const scope = { ...conn, pipelineMessageId: event.message_id }
++      await lockMessageStatus(tx, scope)
+       let [msg] = await tx
+         .select()
+         .from(messages)
+@@ -336,21 +339,17 @@ export class ChatIngest {
+           .limit(2)
+           .for('update')
+         // O indice garante unicidade local; a cardinalidade tambem e validada aqui.
+-        if (candidates.length !== 1) return null
++        if (candidates.length > 1) return null
+         msg = candidates[0]
+       }
+-      if (!msg || !canAdvanceStatus(msg.status, next)) return null
+-      const at = new Date(event.at)
+-      const set: Partial<typeof messages.$inferInsert> = { status: next, updatedAt: this.now() }
+-      if (next === 'sent') set.sentAt = msg.sentAt ?? at
+-      if (next === 'delivered') Object.assign(set, { deliveredAt: msg.deliveredAt ?? at, sentAt: msg.sentAt ?? at })
+-      if (next === 'read') Object.assign(set, { readAt: msg.readAt ?? at, deliveredAt: msg.deliveredAt ?? at, sentAt: msg.sentAt ?? at })
+-      if (next === 'failed' || next === 'cancelled') set.error = event.error ?? null
+-      if (!msg.waMessageId && event.transport_message_id) set.waMessageId = event.transport_message_id
+-      const [updated] = await tx.update(messages).set(set).where(eq(messages.id, msg.id)).returning()
+-      return updated!
++      if (!msg) {
++        await rememberMessageStatus(tx, scope, evidence)
++        deferred = true
++        return null
++      }
++      return projectMessageStatus(tx, msg, evidence, this.now())
+     })
+-    if (!row) return { status: 'ignored', reason: 'not_found_or_stale' }
++    if (!row) return { status: 'ignored', reason: deferred ? 'pending_outbound' : 'not_found_or_stale' }
+     const [chat] = await this.db.select().from(chats).where(eq(chats.id, row.chatId))
+     await this.publish(conn.companyId, 'message.status', { chat_id: row.chatId, message_id: row.id, status: row.status, error: row.error }, chat)
+     return { status: 'updated' }
+diff --git a/packages/core/src/chats/model/status-receipts.ts b/packages/core/src/chats/model/status-receipts.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..dcbbc5d540163b75d9f52ee8d9979a7c98607e8a
+--- /dev/null
++++ b/packages/core/src/chats/model/status-receipts.ts
+@@ -0,0 +1,110 @@
++import { and, eq, sql } from 'drizzle-orm'
++import { messages, pendingMessageStatus, type Database } from '@crm/db'
++import type { MessageView, WaEventOf } from '@crm/wa-port'
++import type { MessageRow } from './dto'
++import { canAdvanceStatus } from './rules'
++
++type Tx = Parameters<Parameters<Database['transaction']>[0]>[0]
++type Scope = { companyId: string; connectionId: string; pipelineMessageId: string }
++type Evidence = Pick<typeof pendingMessageStatus.$inferSelect, 'status' | 'waMessageId' | 'sentAt' | 'deliveredAt' | 'readAt' | 'error'>
++
++const where = (s: Scope) => and(eq(pendingMessageStatus.companyId, s.companyId), eq(pendingMessageStatus.connectionId, s.connectionId), eq(pendingMessageStatus.pipelineMessageId, s.pipelineMessageId))
++
++/** Recorder and ACK serialize on the same pipeline identity, including before a row exists.
++ * A receipt committed first is consumed by the recorder; otherwise ACK waits for its commit.
++ * Transaction rollback releases the lock and leaves evidence available for an idempotent retry.
++ */
++export async function lockMessageStatus(tx: Tx, s: Scope): Promise<void> {
++  await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`crm-status/${s.companyId}/${s.connectionId}`}),hashtext(${s.pipelineMessageId}))`)
++}
++
++export function statusEvidence(event: WaEventOf<'message.status'>): Evidence {
++  const at = new Date(event.at)
++  const sent = ['sent', 'delivered', 'read'].includes(event.status)
++  const delivered = ['delivered', 'read'].includes(event.status)
++  return {
++    status: event.status,
++    waMessageId: event.transport_message_id ?? null,
++    sentAt: sent ? at : null,
++    deliveredAt: delivered ? at : null,
++    readAt: event.status === 'read' ? at : null,
++    error: event.status === 'failed' || event.status === 'cancelled' ? event.error ?? null : null,
++  }
++}
++
++export function viewEvidence(view: MessageView): Evidence {
++  return { status: view.status, waMessageId: view.transportMessageId, sentAt: view.sentAt ? new Date(view.sentAt) : null,
++    deliveredAt: view.deliveredAt ? new Date(view.deliveredAt) : null, readAt: view.readAt ? new Date(view.readAt) : null,
++    error: view.status === 'failed' || view.status === 'cancelled' ? view.lastError : null }
++}
++
++const earliest = (a: Date | null, b: Date | null) => !a ? b : !b ? a : a < b ? a : b
++
++function combine(a: Evidence, b: Evidence): Evidence {
++  const advance = canAdvanceStatus(a.status, b.status)
++  return {
++    status: advance ? b.status : a.status,
++    waMessageId: a.waMessageId ?? b.waMessageId,
++    sentAt: earliest(a.sentAt, b.sentAt),
++    deliveredAt: earliest(a.deliveredAt, b.deliveredAt),
++    readAt: earliest(a.readAt, b.readAt),
++    error: advance ? b.error : a.error,
++  }
++}
++
++/** Bounded, connection-local cleanup. No sends, flow changes or historical event replay. */
++async function expire(tx: Tx, s: Scope): Promise<void> {
++  await tx.execute(sql`delete from crm.pending_message_status where ctid in
++    (select ctid from crm.pending_message_status where company_id=${s.companyId}
++      and connection_id=${s.connectionId} and expires_at < now() limit 100 for update skip locked)`)
++}
++
++export async function rememberMessageStatus(tx: Tx, s: Scope, evidence: Evidence): Promise<void> {
++  await expire(tx, s)
++  const [previous] = await tx.select().from(pendingMessageStatus).where(where(s))
++  if (previous?.waMessageId && evidence.waMessageId && previous.waMessageId !== evidence.waMessageId) throw new Error('Conflicting WhatsApp status identity')
++  const next = previous ? combine(previous, evidence) : evidence
++  await tx.insert(pendingMessageStatus).values({ ...s, ...next })
++    .onConflictDoUpdate({ target: [pendingMessageStatus.companyId, pendingMessageStatus.connectionId, pendingMessageStatus.pipelineMessageId], set: next })
++}
++
++/** Monotonic delivery projection. An equal/stale ACK can still supply missing WAID/timestamps. */
++export async function projectMessageStatus(tx: Tx, msg: MessageRow, evidence: Evidence, now: Date): Promise<MessageRow | null> {
++  if (msg.direction !== 'outbound') return null
++  if (msg.waMessageId && evidence.waMessageId && msg.waMessageId !== evidence.waMessageId) return null
++  const next = combine({ ...msg, status: msg.status === 'received' ? 'queued' : msg.status }, evidence)
++  if (next.status === msg.status && next.waMessageId === msg.waMessageId &&
++      next.sentAt?.getTime() === msg.sentAt?.getTime() && next.deliveredAt?.getTime() === msg.deliveredAt?.getTime() &&
++      next.readAt?.getTime() === msg.readAt?.getTime() && next.error === msg.error) return null
++  const [updated] = await tx.update(messages).set({ ...next, updatedAt: now }).where(and(eq(messages.id, msg.id), eq(messages.companyId, msg.companyId), eq(messages.connectionId, msg.connectionId))).returning()
++  return updated ?? null
++}
++
++/** Caller holds the pipeline lock; consumes only evidence belonging to this exact outbound. */
++export async function consumeMessageStatus(tx: Tx, msg: MessageRow, now: Date): Promise<MessageRow> {
++  if (!msg.pipelineMessageId || msg.direction !== 'outbound') return msg
++  const scope = { companyId: msg.companyId, connectionId: msg.connectionId, pipelineMessageId: msg.pipelineMessageId }
++  const [receipt] = await tx.select().from(pendingMessageStatus).where(and(where(scope), sql`${pendingMessageStatus.expiresAt} >= now()`))
++  if (!receipt) return msg
++  if (msg.waMessageId && receipt.waMessageId && msg.waMessageId !== receipt.waMessageId) throw new Error('Conflicting WhatsApp status identity')
++  const updated = await projectMessageStatus(tx, msg, receipt, now)
++  await tx.delete(pendingMessageStatus).where(where(scope))
++  return updated ?? msg
++}
++
++/** Associates the already accepted send; same-pipeline queued views cannot erase a concurrent ACK.
++ * A caller-requested retry with a NEW pipeline resets only that attempt's transport metadata.
++ * Takes the pipeline lock before the row lock; no gateway/Redis call happens here.
++ */
++export async function associateMessagePipeline(tx: Tx, msg: MessageRow, view: MessageView, now: Date): Promise<MessageRow> {
++  await lockMessageStatus(tx, { companyId: msg.companyId, connectionId: msg.connectionId, pipelineMessageId: view.id })
++  const [current] = await tx.select().from(messages).where(and(eq(messages.id, msg.id), eq(messages.companyId, msg.companyId), eq(messages.connectionId, msg.connectionId), eq(messages.chatId, msg.chatId), eq(messages.direction, 'outbound'))).for('update')
++  if (!current) throw new Error('Outbound association not found')
++  let associated: MessageRow
++  if (current.pipelineMessageId === view.id) associated = await projectMessageStatus(tx, current, viewEvidence(view), now) ?? current
++  else {
++    const [updated] = await tx.update(messages).set({ ...viewEvidence(view), pipelineMessageId: view.id, updatedAt: now }).where(eq(messages.id, current.id)).returning()
++    associated = updated!
++  }
++  return consumeMessageStatus(tx, associated, now)
++}
+diff --git a/packages/core/src/chats/send/record.db.unit.test.ts b/packages/core/src/chats/send/record.db.unit.test.ts
+index d0857298f4cd76e600923195e116d7aa83075a9a..3ad1fd53b1693a52600b71678f713b1d55a4c00d 100644
+--- a/packages/core/src/chats/send/record.db.unit.test.ts
++++ b/packages/core/src/chats/send/record.db.unit.test.ts
+@@ -104,7 +104,7 @@ describe('ChatSendService.recordOutbound', () => {
+ 
+   it('sem chatId acha o chat pelo contato + sessão; sem chat devolve null', async () => {
+     const s = await setup()
+-    const rec = await s.svc.recordOutbound({ companyId: s.companyId, contactId: s.contactId, sessionId: s.sessionId, senderType: 'flow', actor: 'flow:x', content: { text: 'oi' }, view: view(`p-${s.chatId}`) })
++    const rec = await s.svc.recordOutbound({ companyId: s.companyId, contactId: s.contactId, sessionId: s.sessionId, senderType: 'flow', actor: 'flow:x', content: { text: 'oi' }, view: view(`p-${s.chatId}`, { sessionId: s.sessionId }) })
+     expect(rec?.chat_id).toBe(s.chatId)
+     expect(await s.svc.recordOutbound({ companyId: s.companyId, contactId: s.contactId, sessionId: 'outra', senderType: 'flow', actor: 'flow:x', content: { text: 'oi' }, view: view('p-none') })).toBeNull()
+   })
+diff --git a/packages/core/src/chats/send/service.ts b/packages/core/src/chats/send/service.ts
+index e37d0aefd05ba5510d8bf9cd63cb21809d0e686f..e447513eead5d71a6aac87a716cd56112e72b871 100644
+--- a/packages/core/src/chats/send/service.ts
++++ b/packages/core/src/chats/send/service.ts
+@@ -2,12 +2,13 @@
+ // Todo envio passa por `WaGateway.send` (pipeline do engine: gates, fila, antiban; SPEC 1.4 nº 2). A mensagem do
+ // CRM é reservada (`queued`) antes do gateway, então uma repetição com a mesma Idempotency-Key nunca reenvia.
+ import { and, desc, eq, inArray, lt, or, sql } from 'drizzle-orm'
+-import { chatEvents, chats, connections, contacts, messageReactions, messages, type CrmMessageStatus, type Database } from '@crm/db'
++import { chatEvents, chats, connections, contacts, messageReactions, messages, type Database } from '@crm/db'
+ import type { RealtimeEventData, RealtimeEventType } from '@crm/shared'
+-import type { MessageStatus, MessageView, OutgoingContent, PresenceKind, WaGateway } from '@crm/wa-port'
++import type { MessageView, OutgoingContent, PresenceKind, WaGateway } from '@crm/wa-port'
+ import type { ChatPublisher } from '../ingest/chat-ingest'
+ import { chatScope, toChatDto, toMessageDto, type ChatRow, type MessageDto, type MessageRow } from '../model/dto'
+ import { previewOf } from '../model/rules'
++import { associateMessagePipeline, consumeMessageStatus, lockMessageStatus, projectMessageStatus, viewEvidence } from '../model/status-receipts'
+ import { baseMime, blobUrl, MediaError, type MediaService } from '../../media/service'
+ import type { IdempotencyStore } from './idempotency'
+ 
+@@ -50,6 +51,8 @@ export interface RecordOutboundInput {
+    * de `crm.chats` com ela (deadlock). Padrão: o banco do serviço.
+    */
+   executor?: Database | Parameters<Parameters<Database['transaction']>[0]>[0] | null
++  /** Required to publish when executor belongs to an outer transaction. */
++  afterCommit?: (effect: () => Promise<void>) => void
+ }
+ 
+ /** Tipo, corpo e mídia do registro no CRM a partir do conteúdo enviado ao gateway. */
+@@ -132,17 +135,6 @@ export interface ChatSendServiceOptions {
+ 
+ export const MESSAGES_PAGE_SIZE = 25
+ 
+-const PIPELINE_STATUS: Partial<Record<MessageStatus, CrmMessageStatus>> = {
+-  queued: 'queued',
+-  processing: 'processing',
+-  retrying: 'retrying',
+-  sent: 'sent',
+-  delivered: 'delivered',
+-  read: 'read',
+-  failed: 'failed',
+-  cancelled: 'cancelled',
+-}
+-
+ /** Erro de envio rejeitado pelo pipeline (`SendRejectedError`) com o código da SPEC 3.5. */
+ const rejectionCode = (err: unknown): string | undefined =>
+   err && typeof err === 'object' && (err as { name?: unknown }).name === 'SendRejectedError' ? String((err as { code?: unknown }).code) : undefined
+@@ -240,17 +232,9 @@ export class ChatSendService {
+       await this.publish(companyId, 'message.status', { chat_id: chat.id, message_id: msg.id, status: 'failed', error }, chat)
+       throw err
+     }
+-    const [sent] = await this.db
+-      .update(messages)
+-      .set({
+-        status: PIPELINE_STATUS[view.status] ?? 'queued',
+-        pipelineMessageId: view.id,
+-        ...(view.transportMessageId ? { waMessageId: view.transportMessageId } : {}),
+-        ...(view.sentAt ? { sentAt: new Date(view.sentAt) } : {}),
+-        updatedAt: this.now(),
+-      })
+-      .where(eq(messages.id, msg.id))
+-      .returning()
++    const sent = await this.db.transaction(async tx => {
++      return associateMessagePipeline(tx, msg, view, this.now())
++    })
+     await this.publish(companyId, 'message.status', { chat_id: chat.id, message_id: msg.id, status: sent!.status, error: null }, chat)
+     return toMessageDto(sent!)
+   }
+@@ -325,11 +309,13 @@ export class ChatSendService {
+     const db = input.executor ?? this.db
+     const chat = await this.chatForRecord(input, db)
+     if (!chat) return null
++    if (input.sessionId && input.view.sessionId !== input.sessionId) throw new ChatSendError('conflict', 'Sessao do envio incompatível')
+     const described = describeOutgoing(input.content)
+     const view = input.view
+     const now = this.now()
+     const media = { ...(described.media ?? {}), actor: input.actor, ...(input.viewOnce ? { view_once: true } : {}) }
+     const result = await db.transaction(async (tx) => {
++      await lockMessageStatus(tx, { companyId: input.companyId, connectionId: chat.connectionId, pipelineMessageId: view.id })
+       const [inserted] = await tx
+         .insert(messages)
+         .values({
+@@ -342,39 +328,48 @@ export class ChatSendService {
+           type: described.type,
+           body: described.body,
+           media,
+-          status: PIPELINE_STATUS[view.status] ?? 'queued',
+           pipelineMessageId: view.id,
+-          ...(view.transportMessageId ? { waMessageId: view.transportMessageId } : {}),
+-          ...(view.sentAt ? { sentAt: new Date(view.sentAt) } : {}),
++          ...viewEvidence(view),
+         })
+         .onConflictDoNothing()
+         .returning()
+-      if (!inserted) return null
++      if (!inserted) {
++        const [existing] = await tx.select().from(messages).where(and(eq(messages.companyId, input.companyId), eq(messages.chatId, chat.id), eq(messages.connectionId, chat.connectionId), eq(messages.pipelineMessageId, view.id), eq(messages.direction, 'outbound'))).for('update')
++        if (!existing) throw new ChatSendError('conflict', 'Pipeline pertence a outro chat ou conexao')
++        const fromView = await projectMessageStatus(tx, existing, viewEvidence(view), now) ?? existing
++        const projected = await consumeMessageStatus(tx, fromView, now)
++        return { msg: projected, chat, replay: true, changed: projected !== existing }
++      }
++      const recorded = await consumeMessageStatus(tx, inserted, now)
+       const [updatedChat] = await tx
+         .update(chats)
+         .set({ lastMessageAt: now, lastMessagePreview: previewOf(described.type, described.body), updatedAt: now })
+         .where(eq(chats.id, chat.id))
+         .returning()
+-      return { msg: inserted, chat: updatedChat! }
++      return { msg: recorded, chat: updatedChat!, replay: false }
+     })
+-    if (!result) {
+-      // Repetição: devolve a linha já gravada.
+-      const [existing] = await db
+-        .select()
+-        .from(messages)
+-        .where(and(eq(messages.companyId, input.companyId), eq(messages.pipelineMessageId, view.id)))
+-        .limit(1)
+-      return existing ? toMessageDto(existing) : null
++    const publish = async () => {
++      // Read the committed projection; never leak rolled-back rows to the UI.
++      const [current] = await this.db.select().from(messages).where(and(eq(messages.id, result.msg.id), eq(messages.companyId, input.companyId), eq(messages.chatId, chat.id), eq(messages.connectionId, chat.connectionId)))
++      if (!current) return
++      if (!result.replay) {
++        await this.publish(input.companyId, 'message.created', { chat_id: chat.id, message: toMessageDto(current) as never }, result.chat)
++        await this.publish(input.companyId, 'chat.updated', { chat_id: chat.id, chat: toChatDto(result.chat) as never }, result.chat)
++      } else if (result.changed) {
++        await this.publish(input.companyId, 'message.status', { chat_id: chat.id, message_id: current.id, status: current.status, error: current.error }, result.chat)
++      }
+     }
+-    await this.publish(input.companyId, 'message.created', { chat_id: chat.id, message: toMessageDto(result.msg) as never }, result.chat)
+-    await this.publish(input.companyId, 'chat.updated', { chat_id: chat.id, chat: toChatDto(result.chat) as never }, result.chat)
++    if (input.executor) input.afterCommit?.(publish)
++    else await publish()
+     return toMessageDto(result.msg)
+   }
+ 
+   private async chatForRecord(input: RecordOutboundInput, db: NonNullable<RecordOutboundInput['executor']> = this.db): Promise<ChatRow | null> {
+     if (input.chatId) {
+-      const [row] = await db.select().from(chats).where(and(eq(chats.companyId, input.companyId), eq(chats.id, input.chatId))).limit(1)
+-      return row ?? null
++      const [row] = await db.select({ chat: chats }).from(chats)
++        .innerJoin(connections, and(eq(connections.id, chats.connectionId), eq(connections.companyId, chats.companyId)))
++        .where(and(eq(chats.companyId, input.companyId), eq(chats.id, input.chatId), input.sessionId ? eq(connections.sessionId, input.sessionId) : undefined)).limit(1)
++      return row?.chat ?? null
+     }
+     if (!input.contactId || !input.sessionId) return null
+     const [row] = await db
+@@ -494,17 +489,7 @@ export class ChatSendService {
+ 
+     const now = this.now()
+     const result = await this.db.transaction(async (tx) => {
+-      const [msg] = await tx
+-        .update(messages)
+-        .set({
+-          status: PIPELINE_STATUS[view.status] ?? 'queued',
+-          pipelineMessageId: view.id,
+-          ...(view.transportMessageId ? { waMessageId: view.transportMessageId } : {}),
+-          ...(view.sentAt ? { sentAt: new Date(view.sentAt) } : {}),
+-          updatedAt: now,
+-        })
+-        .where(eq(messages.id, reserved!.id))
+-        .returning()
++      const msg = await associateMessagePipeline(tx, reserved!, view, now)
+       const [current] = await tx.select().from(chats).where(eq(chats.id, chat.id)).for('update')
+       const set: Partial<typeof chats.$inferInsert> = { lastMessageAt: now, lastMessagePreview: previewOf(prepared.type, prepared.body), updatedAt: now }
+       // Auto-atribuição (F20): responder um chat da fila sem responsável assume o atendimento.
+@@ -515,7 +500,7 @@ export class ChatSendService {
+       }
+       if (!isAi(sender) && !current!.firstHumanReplyAt) Object.assign(set, { firstHumanReplyAt: now, firstHumanReplyBy: sender.userId })
+       const [updatedChat] = await tx.update(chats).set(set).where(eq(chats.id, chat.id)).returning()
+-      return { msg: msg!, chat: updatedChat! }
++      return { msg, chat: updatedChat! }
+     })
+     await this.publish(companyId, 'message.created', { chat_id: chat.id, message: toMessageDto(result.msg) as never }, result.chat)
+     await this.publish(companyId, 'chat.updated', { chat_id: chat.id, chat: toChatDto(result.chat) as never }, result.chat)
+diff --git a/packages/core/src/chats/send/status-race.db.unit.test.ts b/packages/core/src/chats/send/status-race.db.unit.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..3211e2fd08eac60ab07a23209fc1d2a682f5f390
+--- /dev/null
++++ b/packages/core/src/chats/send/status-race.db.unit.test.ts
+@@ -0,0 +1,203 @@
++// Runs only on disposable PostgreSQL in CI. All sends below use the fake gateway.
++import { randomUUID } from 'node:crypto'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import { and, eq, sql } from 'drizzle-orm'
++import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
++import { chats, companies, connections, contacts, createDb, messages, pendingMessageStatus, users, type Database } from '@crm/db'
++import { createTempDatabase, type TempDatabase } from '@crm/db/testing'
++import { FsBlobStore } from '@crm/node-kit'
++import type { MessageView, WaEventOf } from '@crm/wa-port'
++import type { FlowDefinition } from '@crm/shared'
++import { FakeWaGateway } from '@crm/wa-port/testing'
++import { ChatIngest } from '../ingest/chat-ingest'
++import { MediaService } from '../../media/service'
++import { ChatSendService, type RecordOutboundInput } from './service'
++import { FlowStore } from '../../flows/store/store'
++import { FlowEngine } from '../../flows/engine/runner'
++import { flowMessageRecorder, productionNodeRegistry } from '../../flows/nodes/messaging/production'
++
++let temp: TempDatabase, db: Database
++beforeAll(async () => { temp = await createTempDatabase({ migrate: true }); db = createDb(temp.url, { max: 8 }) }, 120_000)
++afterAll(async () => { await db?.$client.end(); await temp?.drop() })
++const barrier = () => { let resolve!: () => void; const promise = new Promise<void>(r => { resolve = r }); return { promise, resolve } }
++const AT = '2026-11-18T00:40:00.000Z'
++
++async function setup() {
++  const [company] = await db.insert(companies).values({ name: 'Status test', slug: randomUUID() }).returning()
++  const [connection] = await db.insert(connections).values({ companyId: company!.id, name: 'Fake chip', sessionId: randomUUID() }).returning()
++  const [contact] = await db.insert(contacts).values({ companyId: company!.id, name: 'Client', phoneE164: '+5511999990001' }).returning()
++  const [chat] = await db.insert(chats).values({ companyId: company!.id, connectionId: connection!.id, contactId: contact!.id }).returning()
++  const [user] = await db.insert(users).values({ name: 'Operator', email: randomUUID() + '@example.test', passwordHash: 'synthetic-not-login' }).returning()
++  const pipeline = randomUUID(), waId = 'WA-' + pipeline
++  const published: string[] = []
++  const view = (over: Partial<MessageView> = {}): MessageView => ({ id: pipeline, sessionId: connection!.sessionId, contactId: null, phone: contact!.phoneE164!, content: {}, status: 'queued', attempts: 0, lastError: null, transportMessageId: null, sentAt: null, deliveredAt: null, readAt: null, createdAt: AT, updatedAt: AT, ...over })
++  const send = vi.fn(async () => view())
++  const publisher = { publish: async (_company: string, type: string) => { published.push(type) } }
++  const makeService = () => new ChatSendService({ db, waGateway: { send, react: send, deleteForEveryone: send, presence: async () => undefined }, resolveSession: async () => connection!.sessionId, media: new MediaService({ blobStore: new FsBlobStore(join(tmpdir(), 'crm-status-no-files')), signingKey: Buffer.alloc(32, 1) }), pttConverter: async () => ({ audio: new Uint8Array(), mime: 'audio/ogg', seconds: 0 }), publisher })
++  const makeIngest = () => new ChatIngest({ db, publisher })
++  const event = (status: WaEventOf<'message.status'>['status'], over: Partial<WaEventOf<'message.status'>> = {}): WaEventOf<'message.status'> => ({ v: 1, type: 'message.status', session_id: connection!.sessionId, at: AT, message_id: pipeline, transport_message_id: waId, status, ...over })
++  const input = (over: Partial<RecordOutboundInput> = {}): RecordOutboundInput => ({ companyId: company!.id, chatId: chat!.id, contactId: contact!.id, sessionId: connection!.sessionId, senderType: 'flow', actor: 'flow:synthetic', content: { text: 'Question' }, view: view(), ...over })
++  const row = async () => (await db.select().from(messages).where(and(eq(messages.companyId, company!.id), eq(messages.pipelineMessageId, pipeline))))[0]
++  const pending = () => db.select().from(pendingMessageStatus).where(and(eq(pendingMessageStatus.companyId, company!.id), eq(pendingMessageStatus.pipelineMessageId, pipeline)))
++  return { company: company!, connection: connection!, chat: chat!, contact: contact!, user: user!, pipeline, waId, view, send, published, makeService, makeIngest, event, input, row, pending }
++}
++
++async function waitForAckLock(s: { company: { id: string }; connection: { id: string }; pipeline: string }) {
++  await expect.poll(async () => {
++    const r = await db.execute(sql`select exists(select 1 from pg_locks where locktype='advisory'
++      and not granted and classid=hashtext(${`crm-status/${s.company.id}/${s.connection.id}`})::oid
++      and objid=hashtext(${s.pipeline})::oid) as waiting`)
++    return (r.rows[0] as { waiting: boolean }).waiting
++  }, { timeout: 5_000 }).toBe(true)
++}
++
++describe('durable ACK / outbound association', () => {
++  it('real production engine sends the next action while an ACK waits, then publishes only after COMMIT', async () => {
++    const s = await setup(), firstRecorded = barrier(), nextAction = barrier()
++    const wa = new FakeWaGateway({ sessions: [{ id: s.connection.sessionId, state: 'STABLE' }] })
++    const registry = productionNodeRegistry({ record: flowMessageRecorder(s.makeService()), resolveTarget: async () => ({ sessionId: s.connection.sessionId, phone: s.contact.phoneE164! }), sleep: async () => { firstRecorded.resolve(); await nextAction.promise } })
++    const store = new FlowStore(db), ctx = { companyId: s.company.id }
++    const flow = await store.createFlow(ctx, { name: 'Status projection fake' })
++    const definition: FlowDefinition = { schema: 'crm.flow/v1', entry: 'start', variables: [], refs: {}, nodes: [
++      { id: 'start', type: 'start', name: 'Start', position: { x: 0, y: 0 }, actions: [] },
++      { id: 'send', type: 'message', name: 'Batch', position: { x: 1, y: 0 }, actions: [
++        { id: 'first', type: 'send_message', order: 0, config: { message_text: 'First' } },
++        { id: 'gap', type: 'delay_between_messages', order: 1, config: { delay_seconds: 1 } },
++        { id: 'second', type: 'send_message', order: 2, config: { message_text: 'Second' } },
++      ] },
++      { id: 'wait', type: 'wait_response', name: 'Question', position: { x: 2, y: 0 }, actions: [
++        { id: 'question', type: 'send_message', order: 0, config: { message_text: 'Answer?' } },
++        { id: 'await', type: 'wait_for_response', order: 1, config: { timeout_value: 2, timeout_unit: 'hours' } },
++      ] },
++    ], edges: [{ id: 'a', from: 'start', handle: 'source', to: 'send' }, { id: 'b', from: 'send', handle: 'source', to: 'wait' }] }
++    await store.fromDefinition(ctx, flow.id, definition); await store.publish(ctx, flow.id)
++    const engine = new FlowEngine({ db, wa, registry })
++    const { runId } = await engine.startRun(ctx, { flowId: flow.id, contactId: s.contact.id, chatId: s.chat.id })
++    const step = engine.step(runId, 0)
++    await firstRecorded.promise
++    const firstPipe = wa.sent[0]!.message.id
++    expect(s.published).toHaveLength(0)
++    const ack = s.makeIngest().handle(s.event('delivered', { message_id: firstPipe }))
++    try { await waitForAckLock({ ...s, pipeline: firstPipe }) } finally { nextAction.resolve() }
++    expect(await step).toMatchObject({ status: 'waiting' })
++    await ack
++    expect(wa.sent).toHaveLength(3)
++    const rows = await db.select().from(messages).where(eq(messages.chatId, s.chat.id))
++    expect(rows).toHaveLength(3)
++    expect(rows.find(r => r.pipelineMessageId === firstPipe)!.status).toBe('delivered')
++    expect(s.published.filter(t => t === 'message.created')).toHaveLength(3)
++    expect(s.send).not.toHaveBeenCalled() // no ChatSendService.send / retry was involved
++  })
++  it('ACK before row survives new service instances, duplicates and reordering without a send', async () => {
++    const s = await setup()
++    for (const status of ['sent', 'read', 'delivered', 'read', 'queued'] as const) await s.makeIngest().handle(s.event(status))
++    expect(await s.row()).toBeUndefined()
++    expect(await s.pending()).toMatchObject([{ status: 'read', waMessageId: s.waId }])
++    const recorded = await s.makeService().recordOutbound(s.input())
++    expect(recorded).toMatchObject({ status: 'read', wa_message_id: s.waId })
++    // These private timestamps are persisted on the row, not exposed by MessageDto.
++    expect(await s.row()).toMatchObject({ sentAt: new Date(AT), deliveredAt: new Date(AT), readAt: new Date(AT) })
++    expect(await s.pending()).toHaveLength(0)
++    await s.makeService().recordOutbound(s.input())
++    await s.makeIngest().handle(s.event('delivered'))
++    expect((await s.row())!.status).toBe('read')
++    expect(await db.select().from(messages).where(eq(messages.chatId, s.chat.id))).toHaveLength(1)
++    expect(s.send).not.toHaveBeenCalled()
++  })
++
++  it.each([false, true])('ACK before outer COMMIT waits, then projects after rollback=%s without resend', async rollback => {
++    const s = await setup(), ready = barrier(), release = barrier()
++    const effects: Array<() => Promise<void>> = []
++    const operation = db.transaction(async tx => {
++      await tx.update(chats).set({ status: 'attending' }).where(eq(chats.id, s.chat.id)) // T123 existing lock
++      await s.makeService().recordOutbound(s.input({ executor: tx, afterCommit: fn => { effects.push(fn) } }))
++      ready.resolve()
++      await release.promise
++      if (rollback) throw new Error('controlled rollback')
++    }).then(() => 'commit', e => (e as Error).message)
++    await ready.promise
++    expect(s.published).toHaveLength(0)
++    expect(await s.row()).toBeUndefined() // independent connection cannot see the row
++    const ack = s.makeIngest().handle(s.event('delivered'))
++    try { await waitForAckLock(s) } finally { release.resolve() }
++    expect(await operation).toBe(rollback ? 'controlled rollback' : 'commit')
++    await ack
++    if (rollback) {
++      expect(await s.row()).toBeUndefined()
++      expect(s.published).toHaveLength(0)
++      expect(await s.pending()).toHaveLength(1)
++      // The persisted action result is recorded again; the gateway is never called.
++      await s.makeService().recordOutbound(s.input())
++    } else {
++      for (const effect of effects) await effect()
++      expect(s.published).toContain('message.created')
++    }
++    expect((await s.row())!).toMatchObject({ status: 'delivered', waMessageId: s.waId })
++    expect(await s.pending()).toHaveLength(0)
++    expect(s.send).not.toHaveBeenCalled()
++  })
++
++  it('ACK after commit, duplicate ACK and queued retry never regress a read projection', async () => {
++    const s = await setup()
++    await s.makeService().recordOutbound(s.input())
++    for (const status of ['sent', 'read', 'read', 'delivered', 'queued'] as const) await s.makeIngest().handle(s.event(status))
++    await s.makeService().recordOutbound(s.input())
++    expect((await s.row())!).toMatchObject({ status: 'read', waMessageId: s.waId })
++    expect(await s.pending()).toHaveLength(0)
++    expect(s.send).not.toHaveBeenCalled()
++  })
++
++  it('API/MCP first send and explicit retry consume early ACKs, without creating another outbound', async () => {
++    const s = await setup(), sender = { userId: s.user.id, name: 'Operator' }
++    s.send.mockImplementationOnce(async () => { await s.makeIngest().handle(s.event('delivered')); return s.view() })
++    const first = await s.makeService().send(s.company.id, s.chat.id, sender, { type: 'text', text: 'One' })
++    expect(first.message).toMatchObject({ status: 'delivered', wa_message_id: s.waId })
++    expect(s.send).toHaveBeenCalledTimes(1)
++    // A different failed row and fresh pipeline exercise ONLY a user-requested retry.
++    const failed = await s.makeService().recordOutbound(s.input({ view: s.view({ id: randomUUID(), status: 'failed' }) }))
++    const retryPipeline = randomUUID(), retryWa = 'WA-' + retryPipeline
++    s.send.mockImplementationOnce(async () => {
++      await s.makeIngest().handle(s.event('read', { message_id: retryPipeline, transport_message_id: retryWa }))
++      return s.view({ id: retryPipeline })
++    })
++    const retried = await s.makeService().retry(s.company.id, s.chat.id, failed!.id, sender)
++    expect(retried).toMatchObject({ id: failed!.id, status: 'read', wa_message_id: retryWa })
++    expect(await db.select().from(messages).where(eq(messages.chatId, s.chat.id))).toHaveLength(2)
++    expect(s.send).toHaveBeenCalledTimes(2)
++  })
++
++  it('tenant/connection/WAID guards prevent foreign receipts and foreign chat reuse', async () => {
++    const a = await setup(), b = await setup()
++    await a.makeIngest().handle(a.event('read'))
++    const wrong = b.input({ view: b.view({ id: a.pipeline }) })
++    expect(await b.makeService().recordOutbound(wrong)).toMatchObject({ status: 'queued' })
++    expect(await a.pending()).toHaveLength(1)
++    expect(await a.makeService().recordOutbound(a.input())).toMatchObject({ status: 'read' })
++    await expect(db.insert(pendingMessageStatus).values({ companyId: b.company.id, connectionId: a.connection.id, pipelineMessageId: randomUUID(), status: 'sent' })).rejects.toThrow()
++    const [secondConnection] = await db.insert(connections).values({ companyId: a.company.id, sessionId: randomUUID(), name: 'Other chip' }).returning()
++    const [secondChat] = await db.insert(chats).values({ companyId: a.company.id, connectionId: secondConnection!.id, contactId: a.contact.id }).returning()
++    const secondPipe = randomUUID()
++    await a.makeIngest().handle(a.event('read', { message_id: secondPipe, transport_message_id: 'WA-' + secondPipe }))
++    expect(await db.select().from(pendingMessageStatus).where(and(eq(pendingMessageStatus.companyId, a.company.id), eq(pendingMessageStatus.connectionId, a.connection.id), eq(pendingMessageStatus.pipelineMessageId, secondPipe)))).toHaveLength(1)
++    expect(await a.makeService().recordOutbound(a.input({ chatId: secondChat!.id, sessionId: secondConnection!.sessionId, view: a.view({ id: secondPipe, sessionId: secondConnection!.sessionId }) }))).toMatchObject({ status: 'queued' })
++    await expect(a.makeService().recordOutbound(a.input({ chatId: secondChat!.id, sessionId: secondConnection!.sessionId, view: a.view({ sessionId: secondConnection!.sessionId }) }))).rejects.toMatchObject({ code: 'conflict' })
++    await a.makeIngest().handle(a.event('sent', { transport_message_id: 'WRONG-WA' }))
++    expect((await a.row())!.waMessageId).toBe(a.waId)
++    expect(a.send).not.toHaveBeenCalled(); expect(b.send).not.toHaveBeenCalled()
++  })
++
++  it('failed/cancelled recovery follows existing policy; expired orphans are bounded and never sent', async () => {
++    const s = await setup()
++    for (const status of ['failed', 'processing', 'cancelled', 'retrying', 'sent', 'delivered'] as const) await s.makeIngest().handle(s.event(status))
++    expect(await s.makeService().recordOutbound(s.input())).toMatchObject({ status: 'delivered' })
++    const orphan = randomUUID()
++    await s.makeIngest().handle(s.event('read', { message_id: orphan, transport_message_id: null }))
++    const [stored] = await db.select().from(pendingMessageStatus).where(eq(pendingMessageStatus.pipelineMessageId, orphan))
++    expect(stored!.expiresAt.getTime() - Date.now()).toBeGreaterThan(29 * 86_400_000)
++    await db.update(pendingMessageStatus).set({ expiresAt: sql`now() - interval '1 day'` }).where(eq(pendingMessageStatus.pipelineMessageId, orphan))
++    await s.makeIngest().handle(s.event('sent', { message_id: randomUUID(), transport_message_id: null }))
++    expect(await db.select().from(pendingMessageStatus).where(eq(pendingMessageStatus.pipelineMessageId, orphan))).toHaveLength(0)
++    expect(s.send).not.toHaveBeenCalled()
++  })
++})
+diff --git a/packages/core/src/flows/engine/context.ts b/packages/core/src/flows/engine/context.ts
+index 46b9f2d50961b09170b05b74b91b4329cc013af1..27ec4003b327f5775a4981264b5cb4375b366165 100644
+--- a/packages/core/src/flows/engine/context.ts
++++ b/packages/core/src/flows/engine/context.ts
+@@ -29,6 +29,8 @@ export interface FlowRunRepo {
+   companyId: string
+   /** Transação do passo (`null` no dry-run: nada é gravado). */
+   db: unknown
++  /** Publications are deferred until the outer step transaction commits. */
++  afterCommit?: (effect: () => Promise<void>) => void
+   dryRun: boolean
+ }
+ 
+diff --git a/packages/core/src/flows/engine/runner.ts b/packages/core/src/flows/engine/runner.ts
+index 4fcda1d1392818fabf9d9ba98ead10f612535832..f7e227e3aa07249f9c6623a23ddcffc2fd50d245 100644
+--- a/packages/core/src/flows/engine/runner.ts
++++ b/packages/core/src/flows/engine/runner.ts
+@@ -345,6 +345,7 @@ export class FlowEngine {
+   /** Executa o passo `expectedSeq` do run (o que o job `flow-step` chama). Entrega repetida/atrasada = no-op. */
+   async step(runId: string, expectedSeq: number): Promise<StepResult> {
+     let jumpFlowId: string | undefined
++    const afterCommit: Array<() => Promise<void>> = []
+     let companyId = ''
+     let contactId = ''
+     let chatId: string | null = null
+@@ -379,7 +380,7 @@ export class FlowEngine {
+         llm: this.opts.llm,
+         log: this.log,
+         store: this.dbStore(tx, run.companyId, run.id),
+-        repo: { companyId: run.companyId, db: tx, dryRun: false },
++        repo: { companyId: run.companyId, db: tx, dryRun: false, afterCommit: effect => { afterCommit.push(effect) } },
+         hooks: this.opts.hooks,
+         maxSteps: this.opts.maxStepsPerJob ?? MAX_STEPS_PER_JOB,
+         now: this.opts.now,
+@@ -402,6 +403,9 @@ export class FlowEngine {
+       jumpFlowId = loop.jumpFlowId
+       return { executed: true, status: loop.status, seq: state.seq, steps: loop.steps, error: loop.error ?? null }
+     })
++    for (const effect of afterCommit) {
++      try { await effect() } catch (err) { this.log.warn({ err, runId }, 'flow chat publication failed after commit') }
++    }
+     if (result.executed && jumpFlowId) {
+       try {
+         await this.startRun({ companyId }, { flowId: jumpFlowId, contactId, chatId, trigger: { ...((await this.db.select({trigger:flowRuns.trigger}).from(flowRuns).where(eq(flowRuns.id,runId)))[0]?.trigger ?? {}), kind: 'connection_flow', from_run_id: runId } })
+diff --git a/packages/core/src/flows/nodes/messaging/production.ts b/packages/core/src/flows/nodes/messaging/production.ts
+index 40cd87443cf666170344835ba83d3355cf580c23..ed51c1144afb97d7475375b068f82bbba022925b 100644
+--- a/packages/core/src/flows/nodes/messaging/production.ts
++++ b/packages/core/src/flows/nodes/messaging/production.ts
+@@ -6,6 +6,7 @@ import { blobUrl, type MediaService } from '../../../media/service'
+ import { createNodeRegistry, type NodeRegistry } from '../../engine/registry'
+ import type { MessagingDeps } from './handlers'
+ import { registerMessagingNodes } from './index'
++import { registerInteractiveNodes } from '../interactive/index'
+ 
+ export function flowMessageRecorder(chatSend: { recordOutbound(input: RecordOutboundInput): Promise<unknown> }): NonNullable<MessagingDeps['record']> {
+   return async (ctx, sent) => {
+@@ -19,6 +20,7 @@ export function flowMessageRecorder(chatSend: { recordOutbound(input: RecordOutb
+       content: sent.content,
+       view: sent.view,
+       viewOnce: sent.viewOnce,
++      ...(ctx.repo?.afterCommit ? { afterCommit: ctx.repo.afterCommit } : {}),
+       // Na transação do passo (T123): atômico com o passo e sem disputar o lock de crm.chats com ele.
+       ...(ctx.repo?.db ? { executor: ctx.repo.db as RecordOutboundInput['executor'] } : {}),
+     })
+@@ -38,5 +40,5 @@ export function mediaUrlFrom(media: Pick<MediaService, 'info'>): NonNullable<Mes
+ 
+ /** Registro de nós padrão com os nós de mensagem ligados às dependências de produção. */
+ export function productionNodeRegistry(deps: MessagingDeps): NodeRegistry {
+-  return registerMessagingNodes(createNodeRegistry(), deps)
++  return registerInteractiveNodes(registerMessagingNodes(createNodeRegistry(), deps), deps)
+ }
+diff --git a/packages/core/src/flows/nodes/messaging/production.unit.test.ts b/packages/core/src/flows/nodes/messaging/production.unit.test.ts
+index 808f959447cf3f30c056a175042789bcd83417fc..94b7a106084aaa9739cf95bc22cf224d30bf5247 100644
+--- a/packages/core/src/flows/nodes/messaging/production.unit.test.ts
++++ b/packages/core/src/flows/nodes/messaging/production.unit.test.ts
+@@ -1,6 +1,10 @@
+ // Dependências de produção dos nós de mensagem (T120): registro no chat como `flow` e mídia por referência blob.
+ import { describe, expect, it, vi } from 'vitest'
+ import { flowMessageRecorder, mediaUrlFrom, productionNodeRegistry } from './production'
++import type { FlowAction, FlowNode } from '@crm/shared'
++import { FakeWaGateway } from '@crm/wa-port/testing'
++import { buildContext, type StepStore } from '../../engine/context'
++import type { MessagingDeps } from './handlers'
+ 
+ const ctx = { companyId: 'co', chatId: 'ch', contactId: 'ct', runId: 'run-9' } as never
+ 
+@@ -37,6 +41,30 @@ describe('mediaUrlFrom', () => {
+ })
+ 
+ describe('productionNodeRegistry', () => {
++  it.each(['wait_response', 'menu', 'interactive_menu', 'carousel'])('production %s records its real send and reentry never resends', async type => {
++    const wa = new FakeWaGateway({ sessions: [{ id: 'session', name: 'test', state: 'STABLE' }] })
++    const record = vi.fn<NonNullable<MessagingDeps['record']>>(async () => undefined)
++    const mediaUrl = vi.fn<NonNullable<MessagingDeps['mediaUrl']>>(async () => ({ url: 'blob:private-fixture', mime: 'image/png' }))
++    const actions: FlowAction[] = type === 'wait_response'
++      ? [{ id: 'question', type: 'send_message', order: 0, config: { message_text: 'Choose', message_template_id: 'template' } }, { id: 'wait', type: 'wait_for_response', order: 1, config: { timeout_value: 2, timeout_unit: 'hours' } }]
++      : [{ id: 'question', type: type === 'carousel' ? 'send_carousel' : 'send_interactive_menu', order: 0, config: { message: 'Choose', text: 'Choose', options: [{ id: 'yes', title: 'Yes' }], carousel: [] } }]
++    const node: FlowNode = { id: 'node', type, name: type, position: { x: 0, y: 0 }, actions }
++    const saved = new Map<string, unknown>()
++    const store: StepStore = { findAction: async k => saved.has(k) ? { result: saved.get(k) } : null, saveAction: async a => { saved.set(a.key, a.result) }, saveStep: async () => undefined }
++    const vars: Record<string, unknown> = {}
++    const context = (seq: number) => buildContext({ runId: 'run', companyId: 'co', flowId: 'flow', contactId: 'contact', chatId: 'chat', seq, node, definition: { schema: 'crm.flow/v1', entry: node.id, nodes: [node], edges: [], refs: {}, variables: [] }, contact: null, vars, wa, store, repo: { companyId: 'co', db: null, dryRun: false }, log: { info() {}, warn() {}, error() {}, debug() {} } })
++    const registry = productionNodeRegistry({ record, mediaUrl, loadTemplate: async () => ({ header: { type: 'image', media_id: 'private-media' }, body: 'Choose', buttons: [] }), resolveTarget: async () => ({ sessionId: 'session', phone: '+5511999990001' }), sleep: async () => undefined })
++    const perSend = type === 'wait_response' ? 2 : 1
++    expect(await registry.get(type)!.execute(context(1))).toHaveProperty('wait')
++    await registry.get(type)!.execute(context(1)) // action result survives a step retry
++    expect(record).toHaveBeenCalledTimes(2 * perSend)
++    expect(record.mock.calls[0]![1].view.id).toBe(record.mock.calls[perSend]![1].view.id)
++    vars.__replies = [{ text: 'Yes' }]
++    expect(await registry.get(type)!.execute(context(2))).toHaveProperty('next')
++    expect(record).toHaveBeenCalledTimes(2 * perSend)
++    expect(wa.sent).toHaveLength(perSend)
++    if (type === 'wait_response') expect(mediaUrl).toHaveBeenCalledWith(expect.objectContaining({ companyId: 'co' }), 'private-media')
++  })
+   it('tem os nós de mensagem e os demais do registro padrão', () => {
+     const registry = productionNodeRegistry({})
+     for (const t of ['start', 'message', 'notification', 'pix']) expect(registry.has(t)).toBe(true)
+diff --git a/packages/db/drizzle/crm/0045_pending_message_status.sql b/packages/db/drizzle/crm/0045_pending_message_status.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..ed4618663e5ef5da3802515a320547a57e2a0688
+--- /dev/null
++++ b/packages/db/drizzle/crm/0045_pending_message_status.sql
+@@ -0,0 +1,20 @@
++-- ACKs may precede the CRM outbound transaction. This stores status only, never sends.
++CREATE UNIQUE INDEX connections_company_id_uq ON crm.connections(company_id,id);
++--> statement-breakpoint
++CREATE TABLE crm.pending_message_status (
++  company_id uuid NOT NULL,
++  connection_id uuid NOT NULL,
++  pipeline_message_id text NOT NULL,
++  status text NOT NULL CHECK (status IN ('queued','processing','retrying','sent','delivered','read','failed','cancelled')),
++  wa_message_id text,
++  sent_at timestamptz,
++  delivered_at timestamptz,
++  read_at timestamptz,
++  error text,
++  expires_at timestamptz NOT NULL DEFAULT (now() + interval '30 days'),
++  PRIMARY KEY(company_id,connection_id,pipeline_message_id),
++  CONSTRAINT pending_message_status_connection_fk FOREIGN KEY(company_id,connection_id)
++    REFERENCES crm.connections(company_id,id) ON DELETE CASCADE
++);
++--> statement-breakpoint
++CREATE INDEX pending_message_status_expiry_idx ON crm.pending_message_status(company_id,connection_id,expires_at);
+diff --git a/packages/db/drizzle/crm/meta/_journal.json b/packages/db/drizzle/crm/meta/_journal.json
+index 42ec540e3ed608698c016fb3c9c68661bda93477..0cb11c18b8d9d9fcb0e2192a480ec1f8fc67effd 100644
+--- a/packages/db/drizzle/crm/meta/_journal.json
++++ b/packages/db/drizzle/crm/meta/_journal.json
+@@ -316,6 +316,13 @@
+       "when": 1794954000000,
+       "tag": "0044_chat_wa_identity",
+       "breakpoints": true
++    },
++    {
++      "idx": 45,
++      "version": "7",
++      "when": 1794963600000,
++      "tag": "0045_pending_message_status",
++      "breakpoints": true
+     }
+   ]
+ }
+diff --git a/packages/db/src/schema/crm/connections.ts b/packages/db/src/schema/crm/connections.ts
+index 80b14a6ad95d09b133e83d384f9c96b3984e6a97..0df0280366334270437955f985eb29e1a7cc8214 100644
+--- a/packages/db/src/schema/crm/connections.ts
++++ b/packages/db/src/schema/crm/connections.ts
+@@ -63,6 +63,7 @@ export const connections = crm.table(
+     updatedAt: updatedAt(),
+   },
+   (t) => [
++    uniqueIndex('connections_company_id_uq').on(t.companyId, t.id),
+     uniqueIndex('connections_session_id_uq').on(t.sessionId),
+     index('connections_company_created_idx').on(t.companyId, t.createdAt),
+     check('connections_name_len', sql`char_length(${t.name}) between 2 and 100`),
+diff --git a/packages/db/src/schema/crm/index.ts b/packages/db/src/schema/crm/index.ts
+index c7233c529ccf68ef9d27894c9181eae12eccf65e..c38fc46d95fd3a8d96acde68b7e8c6ac82c47a1d 100644
+--- a/packages/db/src/schema/crm/index.ts
++++ b/packages/db/src/schema/crm/index.ts
+@@ -37,3 +37,5 @@ export * from './flow-copilot.js'
+ 
+ export * from './offers.js'
+ export * from './business-areas.js'
++
++export * from './message-status.js'
+diff --git a/packages/db/src/schema/crm/message-status.ts b/packages/db/src/schema/crm/message-status.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..a587bdd59aab4eb7ecfc998f8e8df6a560901693
+--- /dev/null
++++ b/packages/db/src/schema/crm/message-status.ts
+@@ -0,0 +1,24 @@
++import { sql } from 'drizzle-orm'
++import { check, foreignKey, index, primaryKey, text, timestamp, uuid } from 'drizzle-orm/pg-core'
++import type { CrmMessageStatus } from './chats.js'
++import { connections } from './connections.js'
++import { crm } from './schema.js'
++
++/** Unmatched delivery evidence; private, no message body and no send/retry intent. */
++export const pendingMessageStatus = crm.table('pending_message_status', {
++  companyId: uuid('company_id').notNull(),
++  connectionId: uuid('connection_id').notNull(),
++  pipelineMessageId: text('pipeline_message_id').notNull(),
++  status: text('status').$type<Exclude<CrmMessageStatus, 'received'>>().notNull(),
++  waMessageId: text('wa_message_id'),
++  sentAt: timestamp('sent_at', { withTimezone: true }),
++  deliveredAt: timestamp('delivered_at', { withTimezone: true }),
++  readAt: timestamp('read_at', { withTimezone: true }),
++  error: text('error'),
++  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull().default(sql`now() + interval '30 days'`),
++}, t => [
++  primaryKey({ columns: [t.companyId, t.connectionId, t.pipelineMessageId] }),
++  foreignKey({ name: 'pending_message_status_connection_fk', columns: [t.companyId, t.connectionId], foreignColumns: [connections.companyId, connections.id] }).onDelete('cascade'),
++  check('pending_message_status_status_check', sql`${t.status} in ('queued','processing','retrying','sent','delivered','read','failed','cancelled')`),
++  index('pending_message_status_expiry_idx').on(t.companyId, t.connectionId, t.expiresAt),
++])
