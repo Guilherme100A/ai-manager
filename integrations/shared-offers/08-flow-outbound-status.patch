@@ -436,7 +436,7 @@ index e37d0aefd05ba5510d8bf9cd63cb21809d0e686f..e447513eead5d71a6aac87a716cd5611
      await this.publish(companyId, 'chat.updated', { chat_id: chat.id, chat: toChatDto(result.chat) as never }, result.chat)
 diff --git a/packages/core/src/chats/send/status-race.db.unit.test.ts b/packages/core/src/chats/send/status-race.db.unit.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..4633eda5223b9d95ad70b95ab0eb00ad429e257f
+index 0000000000000000000000000000000000000000..d6170a02eea2f127978f3bbf328e5781cdbc436f
 --- /dev/null
 +++ b/packages/core/src/chats/send/status-race.db.unit.test.ts
 @@ -0,0 +1,200 @@
@@ -485,7 +485,7 @@ index 0000000000000000000000000000000000000000..4633eda5223b9d95ad70b95ab0eb00ad
 +  return { company: company!, connection: connection!, chat: chat!, contact: contact!, user: user!, pipeline, waId, view, send, published, makeService, makeIngest, event, input, row, pending }
 +}
 +
-+async function waitForAckLock(s: Awaited<ReturnType<typeof setup>>) {
++async function waitForAckLock(s: { company: { id: string }; connection: { id: string }; pipeline: string }) {
 +  await expect.poll(async () => {
 +    const r = await db.execute(sql`select exists(select 1 from pg_locks where locktype='advisory'
 +      and not granted and classid=hashtext(${`crm-status/${s.company.id}/${s.connection.id}`})::oid
@@ -500,7 +500,7 @@ index 0000000000000000000000000000000000000000..4633eda5223b9d95ad70b95ab0eb00ad
 +    const wa = new FakeWaGateway({ sessions: [{ id: s.connection.sessionId, state: 'STABLE' }] })
 +    const registry = productionNodeRegistry({ record: flowMessageRecorder(s.makeService()), resolveTarget: async () => ({ sessionId: s.connection.sessionId, phone: s.contact.phoneE164! }), sleep: async () => { firstRecorded.resolve(); await nextAction.promise } })
 +    const store = new FlowStore(db), ctx = { companyId: s.company.id }
-+    const flow = await store.create(ctx, { name: 'Status projection fake' })
++    const flow = await store.createFlow(ctx, { name: 'Status projection fake' })
 +    const definition: FlowDefinition = { schema: 'crm.flow/v1', entry: 'start', variables: [], refs: {}, nodes: [
 +      { id: 'start', type: 'start', name: 'Start', position: { x: 0, y: 0 }, actions: [] },
 +      { id: 'send', type: 'message', name: 'Batch', position: { x: 1, y: 0 }, actions: [
