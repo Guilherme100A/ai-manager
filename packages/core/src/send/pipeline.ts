@@ -52,6 +52,8 @@ export interface SendRequest {
   contactId?: string | null
   /** `crm`: gravado na mensagem; a entrega pula o antiban e os limites não contam este envio. */
   origin?: MessageOrigin
+  /** Guarda interna para a aceitação durável de uma mensagem da sonda. */
+  probeId?: string
 }
 
 /** Estado compartilhado entre os gates de um envio. */
@@ -199,6 +201,7 @@ export class SendPipeline {
         const contactId = req.contactId ?? ctx.contact?.id
         if (contactId) input.contactId = contactId
         if (req.origin) input.origin = req.origin
+        if (req.probeId !== undefined) input.probeId = req.probeId
         ctx.message = await this.opts.queue.enqueue(input)
       },
     }

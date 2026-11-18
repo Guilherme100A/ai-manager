@@ -1,0 +1,674 @@
+diff --git a/apps/api/src/routes/mcp/mcp-spy-probes.db.unit.test.ts b/apps/api/src/routes/mcp/mcp-spy-probes.db.unit.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..491fdcbc2a42c0a116346be4c7c349c884e8f221
+--- /dev/null
++++ b/apps/api/src/routes/mcp/mcp-spy-probes.db.unit.test.ts
+@@ -0,0 +1,229 @@
++import { randomUUID } from 'node:crypto'
++import { eq } from 'drizzle-orm'
++import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
++import { auditLogs, connections, createDb, type Database } from '@crm/db'
++import { createTempDatabase, type TempDatabase } from '@crm/db/testing'
++import { createLogger, MemoryMailer, redisConnection } from '@crm/node-kit'
++import { FakeWaGateway } from '@crm/wa-port/testing'
++import { createApp, type RedisClient } from '../../app'
++
++type Session = { cookie: string; companyId: string }
++type RpcResponse = {
++  error?: { code: number; message: string }
++  result?: { isError?: boolean; content?: { text: string }[]; tools?: { name: string }[] }
++}
++
++const headers = { 'content-type': 'application/json', 'x-requested-with': 'crm' }
++const upstreamUrl = 'http://wsm.example.test'
++const upstreamToken = 'wsm-bridge-token-test'
++const offerId = randomUUID()
++const sessionId = randomUUID()
++const probeId = randomUUID()
++const startArgs = { offer_id: offerId, session_id: sessionId, branch: 'objecao', start_in_minutes: 25 }
++const startPath = `/api/spy-bridge/start_probe?id=${offerId}`
++const stopPath = `/api/spy-bridge/stop_probe?id=${probeId}`
++const chipsPath = '/api/spy-bridge/chips'
++
++let temp: TempDatabase
++let db: Database
++let redis: RedisClient
++let app: ReturnType<typeof createApp>
++let owner: Session
++let other: Session
++let requestId = 0
++const upstream = vi.fn(async (_url: string, _init?: RequestInit) => new Response(null, { status: 500 }))
++
++async function signUp(index: number): Promise<Session> {
++  const email = `spy-${randomUUID()}@example.test`
++  const ip = { 'x-forwarded-for': `10.96.0.${index}` }
++  const password = '12345678'
++  const registered = await app.request('/api/auth/register', {
++    method: 'POST', headers: { ...headers, ...ip },
++    body: JSON.stringify({ name: 'Spy owner', email, password, password_confirmation: password }),
++  })
++  expect(registered.status).toBe(201)
++  const { user } = await registered.json() as { user: { last_company_id: string } }
++  const loggedIn = await app.request('/api/auth/login', {
++    method: 'POST', headers: { ...headers, ...ip }, body: JSON.stringify({ email, password }),
++  })
++  expect(loggedIn.status).toBe(200)
++  const cookie = /crm_session=[^;]+/.exec(loggedIn.headers.get('set-cookie') ?? '')
++  expect(cookie).not.toBeNull()
++  return { cookie: cookie![0], companyId: user.last_company_id }
++}
++
++function bridge(s: Session, method: string, path: string, body?: string) {
++  return app.request(path, { method, headers: { ...headers, cookie: s.cookie }, ...(body === undefined ? {} : { body }) })
++}
++
++async function credential(s: Session, access: 'read' | 'write') {
++  const res = await app.request('/api/mcp_credentials', {
++    method: 'POST', headers: { ...headers, cookie: s.cookie }, body: JSON.stringify({ name: `spy-${access}`, access }),
++  })
++  expect(res.status).toBe(201)
++  return await res.json() as { token: string; mcp_credential: { id: string } }
++}
++
++async function rpc(token: string, method: string, params: unknown = {}) {
++  const res = await app.request('/api/mcp', {
++    method: 'POST',
++    headers: {
++      'content-type': 'application/json', accept: 'application/json, text/event-stream',
++      'mcp-protocol-version': '2025-06-18', authorization: `Bearer ${token}`,
++    },
++    body: JSON.stringify({ jsonrpc: '2.0', id: ++requestId, method, params }),
++  })
++  expect(res.status).toBe(200)
++  return await res.json() as RpcResponse
++}
++
++const invoke = (token: string, name: string, args: unknown) => rpc(token, 'tools/call', { name, arguments: args })
++const content = (response: RpcResponse): unknown => JSON.parse(response.result!.content![0]!.text)
++const failed = (response: RpcResponse) => Boolean(response.error || response.result?.isError)
++
++beforeAll(async () => {
++  temp = await createTempDatabase({ migrate: true })
++  db = createDb(temp.url, { max: 8 })
++  redis = redisConnection({ url: process.env.REDIS_URL ?? 'redis://127.0.0.1:6379/1' })
++  app = createApp({
++    db, redis, waGateway: new FakeWaGateway(), waProfile: 'ai-manager', mailer: new MemoryMailer(),
++    trustProxy: true, logger: createLogger({ level: 'silent' }), mcpEnv: { API_PUBLIC_URL: 'https://api.example.test' },
++  })
++  owner = await signUp(1)
++  other = await signUp(2)
++}, 120000)
++
++beforeEach(() => {
++  vi.stubEnv('CRM_SPY_COMPANY_ID', owner.companyId)
++  vi.stubEnv('SPY_API_URL', upstreamUrl)
++  vi.stubEnv('SPY_API_TOKEN', upstreamToken)
++  upstream.mockReset()
++  vi.stubGlobal('fetch', upstream)
++})
++
++afterEach(() => {
++  vi.unstubAllGlobals()
++  vi.unstubAllEnvs()
++})
++
++afterAll(async () => {
++  redis?.disconnect()
++  await db?.$client.end()
++  await temp?.drop()
++})
++
++describe('MCP Sondas na API autenticada com upstream WSM simulado', () => {
++  it('encaminha a oferta, o chip e as opções exatas, para a sonda e audita sem tokens', async () => {
++    const { token, mcp_credential } = await credential(owner, 'write')
++    const started = { id: probeId, offerId, sessionId, branch: 'objecao', status: 'ativa' }
++    const stopped = { ...started, status: 'parada' }
++    upstream.mockResolvedValueOnce(Response.json({ ...started, createdBy: upstreamToken, summary: { private: 'upstream-private' }, token: upstreamToken }, { status: 201 }))
++    upstream.mockResolvedValueOnce(Response.json({ ...stopped, createdBy: upstreamToken, summary: { private: 'upstream-private' }, token: upstreamToken }))
++
++    expect(content(await invoke(token, 'start_spy_probe', startArgs))).toEqual(started)
++    expect(content(await invoke(token, 'stop_spy_probe', { id: probeId }))).toEqual(stopped)
++    expect(upstream).toHaveBeenCalledTimes(2)
++    expect(upstream).toHaveBeenNthCalledWith(1, `${upstreamUrl}/api/spy/offers/${offerId}/probes`, expect.objectContaining({
++      method: 'POST', redirect: 'error',
++      headers: { authorization: `Bearer ${upstreamToken}`, 'content-type': 'application/json' },
++      body: JSON.stringify({ sessionId, branch: 'objecao', startInMinutes: 25 }),
++    }))
++    expect(upstream).toHaveBeenNthCalledWith(2, `${upstreamUrl}/api/spy/probes/${probeId}/stop`, expect.objectContaining({
++      method: 'POST', headers: { authorization: `Bearer ${upstreamToken}`, 'content-type': 'application/json' }, body: '{}',
++    }))
++
++    const audits = await db.select().from(auditLogs).where(eq(auditLogs.companyId, owner.companyId))
++    expect(audits).toEqual(expect.arrayContaining([
++      expect.objectContaining({ action: 'spy.probe.start', targetType: 'spy_offer', targetId: offerId, detail: expect.objectContaining({ mcp_credential_id: mcp_credential.id }) }),
++      expect.objectContaining({ action: 'spy.probe.stop', targetType: 'spy_probe', targetId: probeId, detail: expect.objectContaining({ mcp_credential_id: mcp_credential.id }) }),
++    ]))
++    expect(JSON.stringify(audits)).not.toContain(token)
++    expect(JSON.stringify(audits)).not.toContain(upstreamToken)
++  })
++
++  it('lista chips com token read e remove campos privados do upstream sem adotar chips no CRM', async () => {
++    const { token } = await credential(owner, 'read')
++    const chip = { session_id: sessionId, name: 'Chip QA', phone: null, status: 'STABLE', sendable: true }
++    upstream.mockResolvedValueOnce(Response.json({
++      items: [{ ...chip, proxy: 'private-proxy-password', profile: 'private-profile', token: upstreamToken }],
++      token: upstreamToken,
++    }))
++    const result = await invoke(token, 'list_spy_chips', {})
++    expect(failed(result)).toBe(false)
++    expect(content(result)).toEqual({ items: [chip] })
++    expect(upstream).toHaveBeenCalledExactlyOnceWith(`${upstreamUrl}/api/spy/chips`, expect.objectContaining({
++      method: 'GET', headers: { authorization: `Bearer ${upstreamToken}` },
++    }))
++    expect(await db.select().from(connections).where(eq(connections.companyId, owner.companyId))).toHaveLength(0)
++  })
++
++  it('nega as duas escritas para token read sem chamar o WSM', async () => {
++    const { token } = await credential(owner, 'read')
++    const listed = await rpc(token, 'tools/list')
++    const names = listed.result!.tools!.map((tool) => tool.name)
++    expect(names).toContain('list_spy_chips')
++    expect(names).not.toContain('start_spy_probe')
++    expect(names).not.toContain('stop_spy_probe')
++    expect(failed(await invoke(token, 'start_spy_probe', startArgs))).toBe(true)
++    expect(failed(await invoke(token, 'stop_spy_probe', { id: probeId }))).toBe(true)
++    expect(upstream).not.toHaveBeenCalled()
++  })
++
++  it('nega leitura e escrita de outra empresa sem chamar o WSM', async () => {
++    const { token } = await credential(other, 'write')
++    for (const [name, args] of [
++      ['list_spy_chips', {}],
++      ['start_spy_probe', startArgs],
++      ['stop_spy_probe', { id: probeId }],
++    ] as const) {
++      const result = await invoke(token, name, args)
++      expect(failed(result)).toBe(true)
++      expect(content(result)).toMatchObject({ status: 403, error: { code: 'FORBIDDEN' } })
++    }
++    expect(upstream).not.toHaveBeenCalled()
++  })
++
++  it('rejeita métodos trocados, UUID inválido e JSON fora do contrato no bridge autenticado', async () => {
++    expect((await bridge(owner, 'POST', chipsPath, '{}')).status).toBe(404)
++    expect((await bridge(owner, 'GET', startPath)).status).toBe(404)
++    expect((await bridge(owner, 'GET', stopPath)).status).toBe(404)
++    expect((await bridge(owner, 'POST', '/api/spy-bridge/start_probe?id=' + '-'.repeat(36), JSON.stringify({ sessionId }))).status).toBe(422)
++    expect((await bridge(owner, 'POST', '/api/spy-bridge/stop_probe?id=bad-id', '{}')).status).toBe(422)
++    for (const invalid of [
++      {}, { sessionId: 'bad-id' }, { sessionId, branch: 'other' }, { sessionId, startInMinutes: -1 },
++      { sessionId, startInMinutes: 181 }, { sessionId, startInMinutes: 1.5 }, { sessionId, startInMinutes: '2' },
++      { sessionId, extra: true },
++    ]) {
++      expect((await bridge(owner, 'POST', startPath, JSON.stringify(invalid))).status).toBe(422)
++    }
++    expect((await bridge(owner, 'POST', stopPath, '{"unexpected":true}')).status).toBe(422)
++    expect((await bridge(owner, 'POST', stopPath, '{')).status).toBe(400)
++    expect(upstream).not.toHaveBeenCalled()
++  })
++
++  it('retorna falhas de upstream sem divulgar o corpo remoto nem repetir a mutação', async () => {
++    const { token } = await credential(owner, 'write')
++    upstream.mockResolvedValueOnce(Response.json({ error: { message: upstreamToken } }, { status: 409 }))
++    upstream.mockRejectedValueOnce(new Error(upstreamToken))
++    const httpError = await invoke(token, 'start_spy_probe', startArgs)
++    const networkError = await invoke(token, 'stop_spy_probe', { id: probeId })
++    expect(failed(httpError)).toBe(true)
++    expect(content(httpError)).toMatchObject({ status: 409 })
++    expect(failed(networkError)).toBe(true)
++    expect(content(networkError)).toMatchObject({ status: 502, error: { code: 'UPSTREAM_ERROR' } })
++    expect(JSON.stringify([httpError, networkError])).not.toContain(upstreamToken)
++    expect(upstream).toHaveBeenCalledTimes(2)
++  })
++
++  it('recusa respostas 2xx incompletas ou de outro chip, oferta ou sonda sem retry', async () => {
++    const { token } = await credential(owner, 'write')
++    const result = { id: probeId, offerId, sessionId, branch: 'objecao', status: 'ativa' }
++    for (const response of [{}, { ...result, offerId: randomUUID() }, { ...result, sessionId: randomUUID() }]) {
++      upstream.mockResolvedValueOnce(Response.json(response, { status: 201 }))
++      expect(content(await invoke(token, 'start_spy_probe', startArgs))).toMatchObject({ status: 502, error: { code: 'UPSTREAM_ERROR' } })
++    }
++    upstream.mockResolvedValueOnce(Response.json({ ...result, id: randomUUID(), status: 'parada' }))
++    expect(content(await invoke(token, 'stop_spy_probe', { id: probeId }))).toMatchObject({ status: 502, error: { code: 'UPSTREAM_ERROR' } })
++    expect(upstream).toHaveBeenCalledTimes(4)
++  })
++})
+diff --git a/apps/api/src/routes/spy-mcp.ts b/apps/api/src/routes/spy-mcp.ts
+index de11464eabf28e7b0cfd257bfe2abb438157f7de..2201b2461fd8eb953a5cca090452fceab8d052f5 100644
+--- a/apps/api/src/routes/spy-mcp.ts
++++ b/apps/api/src/routes/spy-mcp.ts
+@@ -1,37 +1,78 @@
+ import { Hono } from 'hono'
++import type { ContentfulStatusCode } from 'hono/utils/http-status'
+ import { asc, eq } from 'drizzle-orm'
+ import { companies } from '@crm/db'
++import { z } from 'zod'
+ import { getCompanyCtx } from '../lib/context'
+ import { ApiError } from '../lib/errors'
++import { setAudit } from '../middleware/audit'
+ import { requirePerm } from '../middleware/authorize'
+ import type { AppEnv, ResolvedDeps } from '../lib/types'
+ import { createHash } from 'node:crypto'
+ 
+ const downloads = new Map<string, { bytes: Buffer; mime: string | null; disposition: string | null; expires: number; sha256: string }>()
+ 
++const uuid = z.uuid()
++const startProbe = z.object({
++  sessionId: uuid,
++  branch: z.enum(['principal', 'objecao', 'sumiu']).optional(),
++  startInMinutes: z.number().int().min(0).max(180).optional(),
++}).strict()
++const stopProbe = z.object({}).strict()
++const chipsResponse = z.object({
++  items: z.array(z.object({
++    session_id: uuid,
++    name: z.string(),
++    phone: z.string().nullable(),
++    status: z.string(),
++    sendable: z.boolean(),
++  })),
++})
++const probeResponse = z.object({
++  id: uuid,
++  offerId: uuid,
++  sessionId: uuid,
++  branch: z.enum(['principal', 'objecao', 'sumiu']),
++  status: z.enum(['ativa', 'concluida', 'parada', 'erro']),
++})
++
+ /** Narrow bridge: the Manager has one owner company, never expose its data to other tenants. */
+ export function spyMcpRoutes(deps: ResolvedDeps) {
+   const app = new Hono<AppEnv>()
+   app.all('/api/spy-bridge/:operation', async (c) => {
+     const op = c.req.param('operation')
+-    const write = op === 'import'
++    const id = c.req.query('id') ?? ''
++    const paths = {
++      offers: '/api/spy/offers', probes: '/api/spy/probes', chips: '/api/spy/chips',
++      flow: `/api/spy/flows/${id}`, messages: `/api/spy/probes/${id}/messages`,
++      zip: `/api/spy/offers/${id}/flow.zip`, media: `/api/spy/media/${id}`,
++      import: `/api/spy/offers/${id}/copy-to-crm`,
++      start_probe: `/api/spy/offers/${id}/probes`, stop_probe: `/api/spy/probes/${id}/stop`,
++    }
++    if (!Object.hasOwn(paths, op)) throw new ApiError('NOT_FOUND', 'Operação inválida')
++    const probeWrite = op === 'start_probe' || op === 'stop_probe'
++    const write = op === 'import' || probeWrite
+     if (c.req.method !== (write ? 'POST' : 'GET')) throw new ApiError('NOT_FOUND', 'Operação inválida')
+     await requirePerm(write ? 'flows.edit' : 'flows.view')(c, async () => {})
++    const { companyId } = getCompanyCtx(c)
+     const configured = process.env.CRM_SPY_COMPANY_ID?.trim()
+     const rows = configured
+       ? await deps.db.select({ id: companies.id }).from(companies).where(eq(companies.id, configured)).limit(1)
+       : await deps.db.select({ id: companies.id }).from(companies).where(eq(companies.active, true)).orderBy(asc(companies.createdAt)).limit(2)
+-    if (rows.length !== 1 || rows[0]!.id !== getCompanyCtx(c).companyId) throw new ApiError('FORBIDDEN', 'Sonda indisponível para esta empresa')
+-    const id = c.req.query('id') ?? ''
+-    if (!['offers', 'probes'].includes(op) && !/^[0-9a-f-]{36}$/i.test(id)) throw new ApiError('VALIDATION_ERROR', 'ID inválido')
+-    const paths: Record<string, string> = {
+-      offers: '/api/spy/offers', probes: '/api/spy/probes',
+-      flow: `/api/spy/flows/${id}`, messages: `/api/spy/probes/${id}/messages`,
+-      zip: `/api/spy/offers/${id}/flow.zip`, media: `/api/spy/media/${id}`,
+-      import: `/api/spy/offers/${id}/copy-to-crm`,
++    if (rows.length !== 1 || rows[0]!.id !== companyId) throw new ApiError('FORBIDDEN', 'Sonda indisponível para esta empresa')
++    if (!['offers', 'probes', 'chips'].includes(op) && !uuid.safeParse(id).success) throw new ApiError('VALIDATION_ERROR', 'ID inválido')
++
++    let body: string | undefined
++    let requestedSessionId: string | undefined
++    if (probeWrite) {
++      const schema = op === 'start_probe' ? startProbe : stopProbe
++      const parsed = schema.safeParse(await c.req.json())
++      if (!parsed.success) throw new ApiError('VALIDATION_ERROR', 'Dados da sonda inválidos')
++      if ('sessionId' in parsed.data && typeof parsed.data.sessionId === 'string') requestedSessionId = parsed.data.sessionId
++      body = JSON.stringify(parsed.data)
+     }
+-    if (!paths[op]) throw new ApiError('NOT_FOUND', 'Operação inválida')
+-    const key = `${getCompanyCtx(c).companyId}:${op}:${id}`
++
++    const key = `${companyId}:${op}:${id}`
+     const now = Date.now()
+     for (const [k, v] of downloads) if (v.expires < now) downloads.delete(k)
+     const offset = Number(c.req.query('offset') || 0)
+@@ -41,19 +82,44 @@ export function spyMcpRoutes(deps: ResolvedDeps) {
+     let cached = downloads.get(key)
+     if (offset > 0 && !cached && (op === 'zip' || op === 'media')) throw new ApiError('CONFLICT', 'Download expirou; reinicie com offset=0')
+     if (!cached || offset === 0) {
+-    const token = process.env.SPY_API_TOKEN
+-    if (!token) throw new ApiError('CONFLICT', 'Ponte da Sonda não configurada')
+-    const upstream = await fetch(`${process.env.SPY_API_URL || 'http://api:3000'}${paths[op]}`, {
+-      method: write ? 'POST' : 'GET', headers: { authorization: `Bearer ${token}` },
+-      redirect: 'error', signal: AbortSignal.timeout(60000),
+-    })
+-    if (!upstream.ok) return c.json({ error: { message: `Sonda retornou HTTP ${upstream.status}` } }, upstream.status as 400)
+-    if (op !== 'zip' && op !== 'media') return c.json(await upstream.json())
+-    const bytes = Buffer.from(await upstream.arrayBuffer())
+-    if (bytes.length > 128 * 1024 * 1024) throw new ApiError('VALIDATION_ERROR', 'Arquivo excede 128 MiB')
+-    while (downloads.size && [...downloads.values()].reduce((n, d) => n + d.bytes.length, bytes.length) > 160 * 1024 * 1024) downloads.delete(downloads.keys().next().value!)
+-    cached = { bytes, mime: upstream.headers.get('content-type'), disposition: upstream.headers.get('content-disposition'), expires: now + 5 * 60000, sha256: createHash('sha256').update(bytes).digest('hex') }
+-    downloads.set(key, cached)
++      const token = process.env.SPY_API_TOKEN
++      if (!token) throw new ApiError('CONFLICT', 'Ponte da Sonda não configurada')
++      const path = paths[op as keyof typeof paths]
++      const upstream = await fetch(`${process.env.SPY_API_URL || 'http://api:3000'}${path}`, {
++        method: write ? 'POST' : 'GET',
++        headers: { authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
++        ...(body === undefined ? {} : { body }),
++        redirect: 'error', signal: AbortSignal.timeout(60000),
++      }).catch(() => { throw new ApiError('UPSTREAM_ERROR', 'Falha na comunicação com a Sonda') })
++      const status = upstream.status as ContentfulStatusCode
++      if (!upstream.ok) return c.json({ error: { message: `Sonda retornou HTTP ${status}` } }, status)
++      if (op !== 'zip' && op !== 'media') {
++        const data = await upstream.json().catch(() => {
++          throw new ApiError('UPSTREAM_ERROR', 'Resposta inválida da Sonda')
++        })
++        if (op === 'chips') {
++          const parsed = chipsResponse.safeParse(data)
++          if (!parsed.success) throw new ApiError('UPSTREAM_ERROR', 'Resposta inválida da Sonda')
++          return c.json(parsed.data)
++        }
++        if (probeWrite) {
++          const parsed = probeResponse.safeParse(data)
++          if (!parsed.success) throw new ApiError('UPSTREAM_ERROR', 'Resposta inválida da Sonda')
++          const sameId = (a: string, b: string | undefined) => a.toLowerCase() === b?.toLowerCase()
++          if (op === 'start_probe' ? !sameId(parsed.data.offerId, id) || !sameId(parsed.data.sessionId, requestedSessionId) : !sameId(parsed.data.id, id))
++            throw new ApiError('UPSTREAM_ERROR', 'Resposta da Sonda incompatível com a operação solicitada')
++          setAudit(c, op === 'start_probe'
++            ? { action: 'spy.probe.start', targetType: 'spy_offer', targetId: id }
++            : { action: 'spy.probe.stop', targetType: 'spy_probe', targetId: id })
++          return c.json(parsed.data, status)
++        }
++        return c.json(data, probeWrite ? status : 200)
++      }
++      const bytes = Buffer.from(await upstream.arrayBuffer())
++      if (bytes.length > 128 * 1024 * 1024) throw new ApiError('VALIDATION_ERROR', 'Arquivo excede 128 MiB')
++      while (downloads.size && [...downloads.values()].reduce((n, d) => n + d.bytes.length, bytes.length) > 160 * 1024 * 1024) downloads.delete(downloads.keys().next().value!)
++      cached = { bytes, mime: upstream.headers.get('content-type'), disposition: upstream.headers.get('content-disposition'), expires: now + 5 * 60000, sha256: createHash('sha256').update(bytes).digest('hex') }
++      downloads.set(key, cached)
+     }
+     const { bytes } = cached
+     if (offset > bytes.length) throw new ApiError('VALIDATION_ERROR', 'Offset após o fim do arquivo')
+diff --git a/docs/mcp-spy-probes.md b/docs/mcp-spy-probes.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..2e6d235482f409f3de862c5770ec27f0b831b71c
+--- /dev/null
++++ b/docs/mcp-spy-probes.md
+@@ -0,0 +1,60 @@
++# Operar Sondas pelo MCP
++
++**Iniciar uma sonda pode fazer o worker enviar mensagens reais de WhatsApp
++automaticamente pelo chip escolhido.** As ferramentas usam os recursos comuns
++da empresa autorizada na ponte das Sondas. A seleção usa sessões já existentes
++no WSM, sem etapa de importação ou troca de workspace.
++
++| Ferramenta | Credencial MCP | Permissão | Argumentos |
++| --- | --- | --- | --- |
++| `list_spy_chips` | Leitura ou escrita | `flows.view` | Nenhum |
++| `start_spy_probe` | Escrita | `flows.edit` | `offer_id` e `session_id` (UUIDs), `branch` e `start_in_minutes` opcionais |
++| `stop_spy_probe` | Escrita | `flows.edit` | `id` (UUID da sonda) |
++
++1. Consulte `list_spy_offers` e identifique o `offer_id` da oferta capturada.
++2. Chame `list_spy_chips`. Cada item contém `session_id`, `name`, `phone`,
++   `status` e `sendable`. Escolha explicitamente um chip com `sendable: true` e
++   use o UUID da sessão WSM em `session_id`. O `connection_id` identifica uma
++   conexão do CRM. O nome e a posição na lista servem apenas para consulta.
++3. Chame `start_spy_probe` com os dois IDs após confirmar a oferta e o chip.
++   `branch` aceita `principal`, `objecao` ou `sumiu`. `start_in_minutes` aceita
++   inteiros de 0 a 180. Quando omitidos, o WSM usa `principal` e atraso 0.
++   Guarde o `id` retornado para acompanhar a sonda com `list_spy_probes` ou
++   pará-la com `stop_spy_probe`.
++
++A criação reaproveita as travas do WSM para chip apto a enviar, limite diário,
++opt-out e sondas ativas. Após as verificações de chip, limite e contato, uma
++colisão com sonda ativa para o mesmo número de destino e ramificação, ou para
++o mesmo número e chip, retorna conflito (HTTP 409) sem iniciar outra. As
++ferramentas de escrita repassam a resposta da ponte e mantêm os erros
++retornados pela API no resultado MCP.
++
++O retorno de início e parada contém apenas `id`, `offerId`, `sessionId`,
++`branch` e `status`. Campos internos como `summary` e `createdBy` não são
++repassados. Uma resposta de outro chip, oferta ou sonda é recusada.
++
++Parar impede novas aceitações de mensagens da sonda na fila. O commit da
++mensagem no PostgreSQL define essa aceitação; uma mensagem já aceita pode
++ser publicada no Redis e entregue depois da parada. Parar não remove nem
++reenvia essas mensagens. A preparação da próxima parte deve respeitar a parada.
++
++Iniciar é uma operação não idempotente. Após um timeout, o resultado pode
++estar indeterminado. Consulte `list_spy_probes` e confira a oferta, o chip e a
++ramificação antes de decidir se cabe uma nova chamada.
++
++## Contrato com a ponte
++
++| Ferramenta | Método e rota | Query | JSON |
++| --- | --- | --- | --- |
++| `list_spy_chips` | `GET /api/spy-bridge/chips` | — | — |
++| `start_spy_probe` | `POST /api/spy-bridge/start_probe` | `id` da oferta | `sessionId` obrigatório, `branch` e `startInMinutes` opcionais |
++| `stop_spy_probe` | `POST /api/spy-bridge/stop_probe` | `id` da sonda | `{}` |
++
++A listagem retorna `{ items: [...] }`. O corpo de início sempre inclui
++`sessionId` e inclui as opções quando fornecidas. As chamadas POST são
++marcadas como escrita.
++
++Os testes em `packages/core/src/mcp/tools/spy.unit.test.ts` usam o protocolo
++MCP em memória e uma API simulada. Cobrem catálogo, permissões, validação dos
++argumentos, requisições à ponte e propagação de erros. A validação integrada
++da ponte e do WSM fica no CI.
+diff --git a/packages/core/src/mcp/tools/spy.ts b/packages/core/src/mcp/tools/spy.ts
+index 350c2956e02af10655750d07f4febb3e05a75b46..006c5fdd79a6c35894faac21619c5706eb846d65 100644
+--- a/packages/core/src/mcp/tools/spy.ts
++++ b/packages/core/src/mcp/tools/spy.ts
+@@ -1,5 +1,5 @@
+ import { z } from 'zod'
+-import { fromApi, tool, UUID } from './shared'
++import { compact, fromApi, tool, UUID } from './shared'
+ 
+ const offer = { id: UUID.describe('ID da oferta da Sonda, não do fluxo CRM') }
+ const chunk = { offset: z.number().int().min(0).optional(), length: z.number().int().min(1).max(1048576).optional() }
+@@ -36,6 +36,46 @@ export const spyTools = [
+     return fromApi(r)
+   } }),
+   tool({ name: 'list_spy_probes', title: 'Sondas', description: 'Lista sondas, status, chip e oferta associados.', perm: 'flows.view', run: async (_, api) => fromApi(await read(api, 'probes')) }),
++  tool({
++    name: 'list_spy_chips',
++    title: 'Chips para Sondas',
++    description: 'Lista os chips das Sondas com session_id da sessão WSM, nome, telefone, status e sendable. Escolha explicitamente um session_id com sendable=true para iniciar uma sonda.',
++    perm: 'flows.view',
++    run: async (_, api) => fromApi(await read(api, 'chips')),
++  }),
++  tool({
++    name: 'start_spy_probe',
++    title: 'Iniciar Sonda com chip escolhido',
++    description: 'Inicia uma sonda para uma oferta já capturada usando a sessão WSM escolhida explicitamente. O worker pode enviar mensagens REAIS de WhatsApp automaticamente. Após timeout, consulte list_spy_probes antes de decidir se deve tentar novamente.',
++    input: {
++      offer_id: offer.id,
++      session_id: UUID.describe('ID da sessão WSM obtido com list_spy_chips (diferente do connection_id do CRM)'),
++      branch: z.enum(['principal', 'objecao', 'sumiu']).optional(),
++      start_in_minutes: z.number().int().min(0).max(180).optional().describe('Atraso da abertura em minutos'),
++    },
++    kind: 'write',
++    perm: 'flows.edit',
++    openWorld: true,
++    idempotent: false,
++    run: async ({ offer_id, session_id, branch, start_in_minutes }, api) => fromApi(await api.request('POST', '/api/spy-bridge/start_probe', {
++      query: { id: offer_id },
++      body: compact({ sessionId: session_id, branch, startInMinutes: start_in_minutes }),
++      write: true,
++    })),
++  }),
++  tool({
++    name: 'stop_spy_probe',
++    title: 'Parar Sonda',
++    description: 'Interrompe novas mensagens da sonda identificada pelo ID retornado em start_spy_probe ou list_spy_probes. Mensagens já aceitas na fila antes da parada podem ser entregues depois.',
++    input: { id: UUID.describe('ID da sonda') },
++    kind: 'write',
++    perm: 'flows.edit',
++    run: async ({ id }, api) => fromApi(await api.request('POST', '/api/spy-bridge/stop_probe', {
++      query: { id },
++      body: {},
++      write: true,
++    })),
++  }),
+   tool({ name: 'get_spy_offer', title: 'Ver oferta capturada', description: 'Oferta com roteiro, resumo, conversas e catálogo de mídias capturadas.', input: offer, perm: 'flows.view', run: async (args, api) => fromApi(await getFlow(api, args)) }),
+   tool({ name: 'get_spy_flow', title: 'Ler fluxo sondado', description: 'Roteiro completo, conversas por ramificação e mídias da oferta; não é o grafo editável CRM.', input: offer, perm: 'flows.view', run: async (args, api) => fromApi(await getFlow(api, args)) }),
+   tool({ name: 'list_spy_media', title: 'Mídias da oferta', description: 'Lista IDs, nomes, tipos e tamanhos das mídias capturadas. Use download_spy_media para obter os bytes.', input: offer, perm: 'flows.view', run: async (args, api) => { const r = await read(api, 'flow', args); return fromApi(r.status === 200 ? { ...r, body: { media: (r.body as { media: unknown }).media } } : r) } }),
+diff --git a/packages/core/src/mcp/tools/spy.unit.test.ts b/packages/core/src/mcp/tools/spy.unit.test.ts
+index 5a3b3c85ad3d96d997e0e852aebb8b288fd294c7..2a28d04fa58627653acdd0f0c621a0da58922150 100644
+--- a/packages/core/src/mcp/tools/spy.unit.test.ts
++++ b/packages/core/src/mcp/tools/spy.unit.test.ts
+@@ -1,5 +1,8 @@
+-import { expect, it } from 'vitest'
+-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
++import { Client } from '@modelcontextprotocol/sdk/client/index.js'
++import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
++import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
++import { describe, expect, it, onTestFinished, vi } from 'vitest'
++import { registerApiTools, type McpApi, type McpApiContext, type McpApiResponse } from './shared'
+ import { spyTools, uniqueSpyConversations } from './spy'
+ 
+ it('removes identical duplicate conversations without dropping different captured text', () => {
+@@ -16,8 +19,6 @@ it('marks persisted summaries as historical snapshots instead of presenting them
+   expect(result.items[0].snapshot_notice).toContain('histórico')
+   expect(result.items[0].flowData).toBeUndefined()
+ })
+-import { registerApiTools } from './shared'
+-
+ it('read credentials expose downloads but never import; permissions hide all spy tools', () => {
+   const server = { registerTool() {} } as unknown as McpServer
+   const api = { request: async () => ({ status: 200, body: {} }) }
+@@ -28,6 +29,138 @@ it('read credentials expose downloads but never import; permissions hide all spy
+   expect(registerApiTools(server, { api, access: 'write', perms: new Set() }, spyTools)).toEqual([])
+ })
+ 
++const offerId = '10000000-0000-4000-8000-000000000001'
++const sessionId = '10000000-0000-4000-8000-000000000002'
++const probeId = '10000000-0000-4000-8000-000000000003'
++const startArgs = { offer_id: offerId, session_id: sessionId }
++
++async function connectSpy(
++  access: McpApiContext['access'],
++  perms: McpApiContext['perms'],
++  reply: McpApiResponse = { status: 200, body: {} },
++) {
++  const request = vi.fn<McpApi['request']>().mockResolvedValue(reply)
++  const server = new McpServer({ name: 'spy-test', version: '1' })
++  registerApiTools(server, { api: { request }, access, perms, businessAreasAdmin: true }, spyTools)
++  const client = new Client({ name: 'spy-client', version: '1' })
++  const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair()
++  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
++  onTestFinished(async () => {
++    await client.close()
++    await server.close()
++  })
++  const call = (name: string, args: Record<string, unknown> = {}) => client.callTool({ name, arguments: args })
++  return { client, request, call }
++}
++
++describe('MCP de operação de sondas', () => {
++  it.each([
++    { access: 'read', perms: ['flows.view', 'flows.edit'], expected: ['list_spy_chips'] },
++    { access: 'write', perms: ['flows.view'], expected: ['list_spy_chips'] },
++    { access: 'write', perms: ['flows.edit'], expected: ['start_spy_probe', 'stop_spy_probe'] },
++    { access: 'write', perms: ['flows.view', 'flows.edit'], expected: ['list_spy_chips', 'start_spy_probe', 'stop_spy_probe'] },
++  ] as const)('filtra o catálogo em $access com $perms', async ({ access, perms, expected }) => {
++    const { client } = await connectSpy(access, new Set(perms))
++    const { tools } = await client.listTools()
++    const names = tools.map(t => t.name)
++    expect(names.filter(name => ['list_spy_chips', 'start_spy_probe', 'stop_spy_probe'].includes(name))).toEqual(expected)
++  })
++
++  it('anuncia os IDs obrigatórios, o efeito externo e a ausência de escopo por workspace', async () => {
++    const { client } = await connectSpy('write', new Set(['flows.view', 'flows.edit']))
++    const { tools } = await client.listTools()
++    const list = tools.find(t => t.name === 'list_spy_chips')!
++    const start = tools.find(t => t.name === 'start_spy_probe')!
++    const stop = tools.find(t => t.name === 'stop_spy_probe')!
++    expect(list.annotations?.readOnlyHint).toBe(true)
++    expect(Object.keys(list.inputSchema.properties ?? {})).toEqual([])
++    expect(start.description).toContain('mensagens REAIS')
++    expect(start.annotations).toMatchObject({ readOnlyHint: false, openWorldHint: true, idempotentHint: false })
++    expect([...(start.inputSchema.required ?? [])].sort()).toEqual(['offer_id', 'session_id'])
++    expect(Object.keys(start.inputSchema.properties!).sort()).toEqual(['branch', 'offer_id', 'session_id', 'start_in_minutes'])
++    expect(stop.annotations?.readOnlyHint).toBe(false)
++    expect(stop.inputSchema.required).toEqual(['id'])
++    expect(Object.keys(stop.inputSchema.properties!)).toEqual(['id'])
++  })
++
++  it('recusa seleção implícita, UUIDs inválidos, ramificação desconhecida e atraso fora do contrato', async () => {
++    const { call, request } = await connectSpy('write', new Set(['flows.edit']))
++    for (const args of [
++      { offer_id: offerId },
++      { offer_id: offerId, connection_id: sessionId },
++      { session_id: sessionId },
++      { ...startArgs, offer_id: 'oferta' },
++      { ...startArgs, session_id: 'nome-do-chip' },
++      { ...startArgs, branch: 'outra' },
++      ...[-1, 181, 1.5, '0'].map(start_in_minutes => ({ ...startArgs, start_in_minutes })),
++    ]) {
++      expect(await call('start_spy_probe', args)).toMatchObject({ isError: true })
++    }
++    expect(await call('stop_spy_probe')).toMatchObject({ isError: true })
++    expect(await call('stop_spy_probe', { id: 'sonda' })).toMatchObject({ isError: true })
++    expect(request).not.toHaveBeenCalled()
++  })
++
++  it('lista os chips da ponte sem argumentos e preserva os dados das sessões', async () => {
++    const body = { items: [
++      { session_id: sessionId, name: 'Chip A', phone: '+5500000000000', status: 'STABLE', sendable: true },
++      { session_id: '10000000-0000-4000-8000-000000000004', name: 'Chip B', phone: null, status: 'NEW', sendable: false },
++    ] }
++    const { call, request } = await connectSpy('read', new Set(['flows.view']), { status: 200, body })
++    expect(await call('list_spy_chips')).toMatchObject({ content: [{ type: 'text', text: JSON.stringify(body) }] })
++    expect(request).toHaveBeenCalledExactlyOnceWith('GET', '/api/spy-bridge/chips', { query: {}, write: false })
++  })
++
++  it('inicia com o chip escolhido, omite opcionais ausentes e preserva atrasos de 0 e 180', async () => {
++    const body = { id: probeId, offerId, sessionId, status: 'ativa' }
++    const { call, request } = await connectSpy('write', new Set(['flows.edit']), { status: 201, body })
++    expect(await call('start_spy_probe', startArgs)).toMatchObject({ content: [{ type: 'text', text: JSON.stringify(body) }] })
++    await call('start_spy_probe', { ...startArgs, branch: 'objecao', start_in_minutes: 0 })
++    await call('start_spy_probe', { ...startArgs, branch: 'sumiu', start_in_minutes: 180 })
++    expect(request.mock.calls).toStrictEqual([
++      ['POST', '/api/spy-bridge/start_probe', { query: { id: offerId }, body: { sessionId }, write: true }],
++      ['POST', '/api/spy-bridge/start_probe', { query: { id: offerId }, body: { sessionId, branch: 'objecao', startInMinutes: 0 }, write: true }],
++      ['POST', '/api/spy-bridge/start_probe', { query: { id: offerId }, body: { sessionId, branch: 'sumiu', startInMinutes: 180 }, write: true }],
++    ])
++  })
++
++  it('para a sonda pelo seu ID com corpo JSON vazio', async () => {
++    const body = { id: probeId, status: 'parada' }
++    const { call, request } = await connectSpy('write', new Set(['flows.edit']), { status: 200, body })
++    expect(await call('stop_spy_probe', { id: probeId })).toMatchObject({ content: [{ type: 'text', text: JSON.stringify(body) }] })
++    expect(request).toHaveBeenCalledExactlyOnceWith('POST', '/api/spy-bridge/stop_probe', {
++      query: { id: probeId }, body: {}, write: true,
++    })
++  })
++
++  it.each([
++    [409, 'INVALID_TRANSITION', 'Sonda já ativa'],
++    [409, 'SESSION_NOT_CONNECTED', 'Chip desconectado'],
++    [429, 'RATE_LIMIT', 'Limite do chip'],
++    [403, 'CONTACT_NOT_ALLOWED', 'Contato com opt-out'],
++    [502, 'UPSTREAM_ERROR', 'Falha na comunicação com a Sonda'],
++    [504, 'TIMEOUT', 'Tempo de resposta excedido'],
++  ])('propaga %i %s sem tentar de novo', async (status, code, message) => {
++    const error = { code, message }
++    const { call, request } = await connectSpy('write', new Set(['flows.edit']), { status, body: { error } })
++    expect(await call('start_spy_probe', startArgs)).toMatchObject({
++      isError: true,
++      content: [{ type: 'text', text: JSON.stringify({ status, error }) }],
++    })
++    expect(request).toHaveBeenCalledTimes(1)
++  })
++
++  it('propaga o erro ao tentar parar uma sonda ausente ou já parada', async () => {
++    const error = { code: 'NOT_FOUND', message: 'Sonda não encontrada ou já parada' }
++    const { call, request } = await connectSpy('write', new Set(['flows.edit']), { status: 404, body: { error } })
++    expect(await call('stop_spy_probe', { id: probeId })).toMatchObject({
++      isError: true,
++      content: [{ type: 'text', text: JSON.stringify({ status: 404, error }) }],
++    })
++    expect(request).toHaveBeenCalledTimes(1)
++  })
++})
++
+ it('media and ZIP requests retain offsets; import is explicitly a write', async () => {
+   const calls: unknown[] = []
+   const api = { request: async (...args: unknown[]) => { calls.push(args); return { status: 200, body: {} } } }

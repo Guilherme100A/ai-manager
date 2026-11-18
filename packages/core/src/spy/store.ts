@@ -1,6 +1,8 @@
 import { and, desc, eq, inArray, isNotNull, lt, or, sql } from 'drizzle-orm'
 import { spyAds, spyOffers, type Database, type SpyAdData, type SpyFoundVia } from '@wsm/db'
 import { classifyInput, type LibraryAd } from './parse'
+import { SpyCaptureStore } from './capture'
+import { SpyCaptureError } from './capture-url'
 
 export type SpyAdRow = typeof spyAds.$inferSelect
 export type SpyOfferRow = typeof spyOffers.$inferSelect
@@ -64,11 +66,30 @@ export class SpyStore {
   }
 
   async saveAd(id: string, ad: LibraryAd) {
-    await this.db.update(spyAds).set({ adArchiveId: ad.adArchiveId, pageId: ad.pageId ?? null, pageName: ad.pageName ?? null, data: adData(ad), updatedAt: new Date() }).where(eq(spyAds.id, id))
+    await this.db.update(spyAds).set({ adArchiveId: ad.adArchiveId, pageId: ad.pageId ?? null, pageName: ad.pageName ?? null,
+      data: sql`${JSON.stringify(adData(ad))}::jsonb || case when ${spyAds.data}->'captureOnly' = 'true'::jsonb then '{"captureOnly":true}'::jsonb else '{}'::jsonb end`,
+      updatedAt: new Date() }).where(eq(spyAds.id, id))
   }
 
   /** Busca da Biblioteca: a linha vira 'expandido' e cada anúncio de WhatsApp entra na fila já lido. */
   async expand(parent: SpyAdRow, ads: LibraryAd[]) {
+    if (parent.data.captureOnly === true) {
+      const captures = new SpyCaptureStore(this.db), children: string[] = []
+      let added = 0, skipped = 0
+      for (const ad of ads) {
+        try {
+          const result = await captures.register(`https://www.facebook.com/ads/library/?id=${ad.adArchiveId}`, parent.createdBy, { parentId: parent.id, data: adData(ad) })
+          children.push(result.row.id)
+          if (result.created) added++
+        } catch (err) {
+          if (!(err instanceof SpyCaptureError) || err.code !== 'LEGACY_CAPTURE') throw err
+          skipped++
+        }
+      }
+      await this.db.update(spyAds).set({ status: 'expandido', error: null,
+        data: { ...parent.data, captureOnly: true, captureChildren: [...new Set(children)], captureSkipped: skipped }, updatedAt: new Date() }).where(eq(spyAds.id, parent.id))
+      return added
+    }
     let added = 0
     for (const ad of ads) {
       const [row] = await this.db.insert(spyAds).values({

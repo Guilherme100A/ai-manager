@@ -1,21 +1,28 @@
 // Sondas com Postgres local: travas da criação, histórico da conversa e janela do remarketing.
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { setTimeout as delay } from 'node:timers/promises'
 import { eq } from 'drizzle-orm'
-import { auditLogs, contacts, createDb, createTempDatabase, messages, sessions, spyOffers, spyProbes, type Database, type TempDatabase } from '@wsm/db'
+import { auditLogs, contacts, createDb, createTempDatabase, messageEvents, messages, sessions, spyOffers, spyProbes, type Database, type TempDatabase } from '@wsm/db'
+import { MessageStore, ProbeNotActiveForSendError, toMessageView } from '../queue/store'
+import { SendPipeline } from '../send/pipeline'
 import { parseDecision, ProbeAiDisabledError, SpyProbeModel } from './probe-model'
-import { contentText, SPY_CONSENT_SOURCE, SpyProbeError, SpyProbeStore } from './probe-store'
+import { contentText, SPY_CONSENT_SOURCE, SpyProbeError, SpyProbeStore, type SpyProbeRow } from './probe-store'
 
 let tmp: TempDatabase
 let db: Database
+let peer: Database
+let observer: Database
 let now = Date.parse('2026-10-20T12:00:00Z')
 
 beforeAll(async () => {
   tmp = await createTempDatabase({ migrate: true, prefix: 'wsm_core_spy_probe' })
-  db = createDb(tmp.url, { max: 2 })
+  db = createDb(tmp.url, { max: 1 })
+  peer = createDb(tmp.url, { max: 1 })
+  observer = createDb(tmp.url, { max: 1 })
 })
 
 afterAll(async () => {
-  await db?.$client.end()
+  await Promise.all([db?.$client.end(), peer?.$client.end(), observer?.$client.end()])
   await tmp?.drop()
 })
 
@@ -32,6 +39,20 @@ async function fixture(status: 'STABLE' | 'DISCONNECTED' = 'STABLE') {
   const [session] = await db.insert(sessions).values({ name: 'chip1', phone: '+5531900000001', status }).returning()
   const [offer] = await db.insert(spyOffers).values({ phone: '5584920022034', pageName: 'Chef Maria' }).returning()
   return { session: session!, offer: offer!, store: new SpyProbeStore(db, () => now) }
+}
+
+async function backendPid(database: Database) {
+  const { rows } = await database.$client.query<{ pid: number }>('select pg_backend_pid() as pid')
+  return rows[0]!.pid
+}
+
+async function waitForBlock(blocked: () => Promise<boolean>) {
+  const deadline = Date.now() + 4_000
+  do {
+    if (await blocked()) return
+    await delay(10)
+  } while (Date.now() < deadline)
+  throw new Error('Expected PostgreSQL lock wait was not observed')
 }
 
 describe('SpyProbeStore', () => {
@@ -67,6 +88,150 @@ describe('SpyProbeStore', () => {
     await expect(store.create({ offerId: offer.id, sessionId: session.id, createdBy: 'a' })).rejects.toMatchObject({ code: 'DAILY_LIMIT' })
   })
 
+  it('serializa duas criações concorrentes disputando a quinta vaga do mesmo chip', async () => {
+    const { session, offer, store } = await fixture()
+    for (let i = 0; i < 4; i++) {
+      const [previous] = await db.insert(spyOffers).values({ phone: `551199999000${i}` }).returning()
+      await store.create({ offerId: previous!.id, sessionId: session.id, createdBy: 'a' })
+    }
+    const [other] = await db.insert(spyOffers).values({ phone: '5511999993333' }).returning()
+    const [firstPid, secondPid] = await Promise.all([backendPid(db), backendPid(peer)])
+    expect(firstPid).not.toBe(secondPid)
+    const blocker = await observer.$client.connect()
+    const { rows: [blocking] } = await blocker.query<{ pid: number }>('select pg_backend_pid() as pid')
+    let outcomes: Promise<PromiseSettledResult<SpyProbeRow>[]> | undefined
+    try {
+      await blocker.query('begin')
+      await blocker.query('select id from sessions where id = $1 for no key update', [session.id])
+      outcomes = Promise.allSettled([
+        store.create({ offerId: offer.id, sessionId: session.id, createdBy: 'quota-race' }),
+        new SpyProbeStore(peer, () => now).create({ offerId: other!.id, sessionId: session.id, createdBy: 'quota-race' }),
+      ])
+      // O segundo pode ficar atrás do primeiro na fila de trava do PostgreSQL.
+      await waitForBlock(async () => {
+        const { rows: [locks] } = await blocker.query<{ first: number[]; second: number[] }>(
+          'select pg_blocking_pids($1) as first, pg_blocking_pids($2) as second', [firstPid, secondPid],
+        )
+        return (locks!.first.includes(blocking!.pid) && (locks!.second.includes(blocking!.pid) || locks!.second.includes(firstPid)))
+          || (locks!.second.includes(blocking!.pid) && locks!.first.includes(secondPid))
+      })
+    } finally {
+      await blocker.query('rollback').finally(() => blocker.release())
+      await outcomes
+    }
+    const results = await outcomes!
+    expect(results.map(({ status }) => status).sort()).toEqual(['fulfilled', 'rejected'])
+    const losingIndex = results.findIndex(({ status }) => status === 'rejected')
+    expect(results[losingIndex]).toMatchObject({ reason: { code: 'DAILY_LIMIT' } })
+    const losingOffer = [offer, other!][losingIndex]!
+    expect(await db.select().from(spyOffers).where(eq(spyOffers.id, losingOffer.id))).toEqual([losingOffer])
+    expect(await db.select().from(contacts).where(eq(contacts.phone, `+${losingOffer.phone}`))).toEqual([])
+    expect(await db.select().from(auditLogs).where(eq(auditLogs.actor, 'quota-race'))).toHaveLength(1)
+    expect(await db.select().from(spyProbes).where(eq(spyProbes.sessionId, session.id))).toHaveLength(5)
+  }, 15_000)
+
+  it.each(['branch', 'session'] as const)('reverte a mutação de consentimento quando o índice ativo de %s rejeita', async (conflict) => {
+    const { session, offer, store } = await fixture()
+    const [otherChip] = await db.insert(sessions).values({ name: 'chip2', status: 'STABLE' }).returning()
+    const phone = `+${offer.phone}`
+    const [existing] = await db.insert(spyProbes).values({ offerId: offer.id, sessionId: session.id, phone, createdBy: 'seed' }).returning()
+    if (conflict === 'session') await db.insert(contacts).values({ phone, name: 'Contato anterior', consent: false, consentSource: 'anterior' })
+    const previousContacts = await db.select().from(contacts)
+    const previousAudit = await db.select().from(auditLogs)
+
+    const create = store.create({ offerId: offer.id, createdBy: 'duplicate', ...(conflict === 'branch'
+      ? { sessionId: otherChip!.id, branch: 'principal' }
+      : { sessionId: session.id, branch: 'objecao' }) })
+    await expect(create).rejects.toMatchObject({
+      code: 'PROBE_ACTIVE',
+      message: expect.stringMatching(conflict === 'branch' ? /"principal" ativa/ : /já está sondando/),
+    })
+    expect(await db.select().from(contacts)).toEqual(previousContacts)
+    expect(await db.select().from(auditLogs)).toEqual(previousAudit)
+    expect(await db.select().from(spyOffers)).toEqual([offer])
+    expect(await db.select().from(spyProbes)).toEqual([existing])
+  })
+
+  it('duas criações da mesma ramificação em chips distintos registram uma única sonda', async () => {
+    const { session, offer, store } = await fixture()
+    const [otherChip] = await db.insert(sessions).values({ name: 'chip2', status: 'STABLE' }).returning()
+    const results = await Promise.allSettled([
+      store.create({ offerId: offer.id, sessionId: session.id, createdBy: 'branch-race' }),
+      new SpyProbeStore(peer, () => now).create({ offerId: offer.id, sessionId: otherChip!.id, createdBy: 'branch-race' }),
+    ])
+    expect(results.map(({ status }) => status).sort()).toEqual(['fulfilled', 'rejected'])
+    const losingIndex = results.findIndex(({ status }) => status === 'rejected')
+    expect(results[losingIndex]).toMatchObject({ reason: { code: 'PROBE_ACTIVE', message: expect.stringMatching(/"principal" ativa/) } })
+    expect(await db.select().from(spyOffers)).toMatchObject([{ id: offer.id, status: 'sondando' }])
+    expect(await db.select().from(spyProbes)).toHaveLength(1)
+    expect(await db.select().from(contacts)).toHaveLength(1)
+    expect(await db.select().from(auditLogs).where(eq(auditLogs.actor, 'branch-race'))).toHaveLength(1)
+  })
+
+  it('reverte também a sonda e o status da oferta se a auditoria rejeitar', async () => {
+    const { session, offer, store } = await fixture()
+    await db.$client.query("alter table audit_logs add constraint test_audit_reject check (actor <> 'reject-audit')")
+    try {
+      await expect(store.create({ offerId: offer.id, sessionId: session.id, createdBy: 'reject-audit' })).rejects.toMatchObject({
+        cause: { constraint: 'test_audit_reject' },
+      })
+    } finally {
+      await db.$client.query('alter table audit_logs drop constraint test_audit_reject')
+    }
+    expect(await db.select().from(contacts)).toEqual([])
+    expect(await db.select().from(spyProbes)).toEqual([])
+    expect(await db.select().from(spyOffers)).toEqual([offer])
+    expect(await db.select().from(auditLogs).where(eq(auditLogs.actor, 'reject-audit'))).toEqual([])
+  })
+
+  it('stop espera a aceitação em curso e veda novas mensagens sem tocar a fila de terceiros', async () => {
+    const { session, offer, store } = await fixture()
+    const probe = await store.create({ offerId: offer.id, sessionId: session.id, createdBy: 'a' })
+    const [contact] = await db.select().from(contacts)
+    const sender = new MessageStore(db)
+    const send = new SendPipeline({
+      db,
+      queue: { enqueue: async (input) => toMessageView(await sender.create(input)) },
+    })
+    const request = { sessionId: session.id, phone: probe.phone, contactId: contact!.id, content: { text: 'parte' }, actor: 'spy-probe', origin: 'spy' as const, probeId: probe.id }
+    const [otherChip] = await db.insert(sessions).values({ name: 'chip2', status: 'STABLE' }).returning()
+    await expect(sender.create({ ...request, sessionId: otherChip!.id })).rejects.toBeInstanceOf(ProbeNotActiveForSendError)
+    await expect(sender.create({ ...request, phone: '+5511000000000' })).rejects.toBeInstanceOf(ProbeNotActiveForSendError)
+    const unrelated = await sender.create({ sessionId: session.id, phone: probe.phone, content: { text: 'terceiro' } })
+
+    const [sendPid, stopPid] = await Promise.all([backendPid(db), backendPid(peer)])
+    expect(sendPid).not.toBe(stopPid)
+    const blocker = await observer.$client.connect()
+    const { rows: [blocking] } = await blocker.query<{ pid: number }>('select pg_backend_pid() as pid')
+    const blockedBy = async (pid: number) => (await blocker.query<{ pids: number[] }>('select pg_blocking_pids($1) as pids', [pid])).rows[0]!.pids
+    const stopper = new SpyProbeStore(peer, () => now)
+    let acceptance: Promise<PromiseSettledResult<Awaited<ReturnType<SendPipeline['send']>>>[]> | undefined
+    let stopping: Promise<PromiseSettledResult<SpyProbeRow | undefined>[]> | undefined
+    try {
+      await blocker.query('begin')
+      // INSERT do evento acontece após a trava da sonda, ainda antes do commit de aceitação.
+      await blocker.query('lock table message_events in share mode')
+      acceptance = Promise.allSettled([send.send(request)])
+      await waitForBlock(async () => (await blockedBy(sendPid)).includes(blocking!.pid))
+      stopping = Promise.allSettled([stopper.end(probe.id, 'parada', 'stop')])
+      await waitForBlock(async () => (await blockedBy(stopPid)).includes(sendPid))
+    } finally {
+      await blocker.query('rollback').finally(() => blocker.release())
+      await Promise.all([acceptance, stopping])
+    }
+    const [accepted] = await acceptance!
+    const [stopped] = await stopping!
+    expect(accepted).toMatchObject({ status: 'fulfilled', value: { status: 'queued' } })
+    expect(stopped).toMatchObject({ status: 'fulfilled', value: { status: 'parada' } })
+    await expect(send.send(request)).rejects.toBeInstanceOf(ProbeNotActiveForSendError)
+    await store.inboundSeen(probe.id, new Date(now), 0)
+    await store.postpone(probe.id, 1000)
+    await store.replied(probe.id, { turns: 99, sentAt: new Date(now) })
+    expect(await store.get(probe.id)).toMatchObject({ status: 'parada', endedReason: 'stop', turns: 0, replyDueAt: null, lastInboundAt: null, lastOutboundAt: null })
+    expect(await db.select({ status: messages.status }).from(messages)).toEqual([{ status: 'queued' }, { status: 'queued' }])
+    expect(await sender.get(unrelated.id)).toMatchObject({ status: 'queued', content: { text: 'terceiro' } })
+    expect(await db.select({ to: messageEvents.toStatus }).from(messageEvents)).toEqual([{ to: 'queued' }, { to: 'queued' }])
+  }, 15_000)
   it('histórico com as duas pontas, mensagem mais recente e encerramento da escuta', async () => {
     const { session, offer, store } = await fixture()
     const probe = await store.create({ offerId: offer.id, sessionId: session.id, createdBy: 'a' })

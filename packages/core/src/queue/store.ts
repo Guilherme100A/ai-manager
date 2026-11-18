@@ -1,6 +1,6 @@
 // Persistência das mensagens (tabelas messages + message_events). Toda transição é atômica com seu evento (SPEC 3.3).
 import { and, asc, desc, eq, type SQL } from 'drizzle-orm'
-import { E164_REGEX, messageEvents, messages, sessions, type Database } from '@wsm/db'
+import { E164_REGEX, messageEvents, messages, sessions, spyProbes, type Database } from '@wsm/db'
 import type { OutgoingContent } from '../transport'
 import { SessionError } from '../session'
 import { canTransitionMessage, MessageNotFoundError, MessageTransitionError, type MessageStatus } from './states'
@@ -43,9 +43,18 @@ export interface EnqueueMessageInput {
   contactId?: string | null
   /** `crm`: envio da ponte do CRM (não conta nos limites do chip e não passa pelo antiban). */
   origin?: MessageOrigin | null
+  /** Guarda interna de envios da sonda, validada no mesmo commit da mensagem. */
+  probeId?: string
 }
 
 export type MessageOrigin = 'crm' | 'spy'
+
+export class ProbeNotActiveForSendError extends Error {
+  constructor() {
+    super('probe does not authorize this message')
+    this.name = 'ProbeNotActiveForSendError'
+  }
+}
 
 export interface ListMessagesFilter {
   sessionId?: string
@@ -113,9 +122,21 @@ export class MessageStore {
     if (!E164_REGEX.test(input.phone) && !/^[^\s@]+@g\.us$/.test(input.phone)) throw new SessionError('VALIDATION_ERROR', 'phone must be E.164 (e.g. +5511999999999)')
     if (input.phone.endsWith('@g.us') && input.contactId) throw new SessionError('VALIDATION_ERROR', 'group messages cannot reference an individual contact')
     if (!isUuid(input.sessionId)) throw new SessionError('SESSION_NOT_FOUND', `session ${input.sessionId} not found`)
+    const { probeId } = input
+    if (probeId !== undefined && (input.origin !== 'spy' || !isUuid(probeId))) throw new ProbeNotActiveForSendError()
     return this.db.transaction(async (tx) => {
-      const [session] = await tx.select({ id: sessions.id }).from(sessions).where(eq(sessions.id, input.sessionId))
+      const sessionQuery = tx.select({ id: sessions.id }).from(sessions).where(eq(sessions.id, input.sessionId))
+      // Ordem pai → sonda: a exclusão do chip também trava o pai antes do cascade.
+      const [session] = await (probeId === undefined ? sessionQuery : sessionQuery.for('key share'))
       if (!session) throw new SessionError('SESSION_NOT_FOUND', `session ${input.sessionId} not found`)
+      if (probeId !== undefined) {
+        // Usa a mesma linha que end() atualiza. O commit abaixo aceita a mensagem antes de publicar no Redis.
+        const [probe] = await tx.select({ id: spyProbes.id }).from(spyProbes).where(and(
+          eq(spyProbes.id, probeId), eq(spyProbes.status, 'ativa'),
+          eq(spyProbes.sessionId, input.sessionId), eq(spyProbes.phone, input.phone),
+        )).for('no key update')
+        if (!probe) throw new ProbeNotActiveForSendError()
+      }
       const [row] = await tx
         .insert(messages)
         .values({

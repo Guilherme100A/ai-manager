@@ -32,42 +32,45 @@ export class SpyProbeStore {
   /** Começa uma sonda: valida chip e limites, registra o contato (origem: anúncio) e deixa a abertura pendente. */
   /** `startInMs`: atrasa a abertura (várias sondas na mesma oferta não chegam todas juntas). */
   async create(input: { offerId: string; sessionId: string; createdBy: string; branch?: SpyBranch; maxTurns?: number; startInMs?: number }): Promise<SpyProbeRow> {
-    const [offer] = await this.db.select().from(spyOffers).where(eq(spyOffers.id, input.offerId))
-    if (!offer) throw new SpyProbeError('OFFER_NOT_FOUND', 'Oferta não encontrada')
-    const [session] = await this.db.select().from(sessions).where(eq(sessions.id, input.sessionId))
-    if (!session) throw new SpyProbeError('SESSION_NOT_FOUND', 'Chip não encontrado')
-    if (!SENDABLE_STATES.includes(session.status)) throw new SpyProbeError('SESSION_NOT_READY', `O chip ${session.name} está ${session.status}; use um chip conectado`)
-    const phone = `+${offer.phone}`
-    const managed = await this.db.select({ id: sessions.id }).from(sessions).where(eq(sessions.phone, phone)).limit(1)
-    if (managed.length > 0) throw new SpyProbeError('OWN_NUMBER', 'Esse número é de um chip seu')
-    const since = new Date(this.now() - DAY)
-    const [count] = await this.db.select({ n: sql<number>`count(*)::int` }).from(spyProbes)
-      .where(and(eq(spyProbes.sessionId, session.id), gte(spyProbes.startedAt, since)))
-    const n = count?.n ?? 0
-    if (n >= SPY_PROBES_PER_DAY) throw new SpyProbeError('DAILY_LIMIT', `O chip ${session.name} já começou ${n} sondas nas últimas 24 h (limite ${SPY_PROBES_PER_DAY})`)
-
-    const [contact] = await this.db.select().from(contacts).where(eq(contacts.phone, phone))
-    if (contact?.optOut) throw new SpyProbeError('OPT_OUT', 'Esse número pediu para não receber mensagens')
-    if (!contact) {
-      await this.db.insert(contacts).values({ phone, name: offer.pageName, consent: true, consentAt: new Date(this.now()), consentSource: SPY_CONSENT_SOURCE })
-    } else if (!contact.consent) {
-      await this.db.update(contacts).set({ consent: true, consentAt: new Date(this.now()), consentSource: SPY_CONSENT_SOURCE }).where(eq(contacts.id, contact.id))
-    }
-    let row: SpyProbeRow | undefined
     try {
-      [row] = await this.db.insert(spyProbes).values({
-        offerId: offer.id, sessionId: session.id, phone, createdBy: input.createdBy, maxTurns: input.maxTurns ?? 12, branch: input.branch ?? 'principal',
-        replyDueAt: new Date(this.now() + Math.max(0, input.startInMs ?? 0)), startedAt: new Date(this.now()), updatedAt: new Date(this.now()),
-      }).returning()
+      return await this.db.transaction(async (tx) => {
+        const [offer] = await tx.select().from(spyOffers).where(eq(spyOffers.id, input.offerId))
+        if (!offer) throw new SpyProbeError('OFFER_NOT_FOUND', 'Oferta não encontrada')
+        // Serializa criações do chip. KEY SHARE das FKs continua compatível com a trava.
+        const [session] = await tx.select().from(sessions).where(eq(sessions.id, input.sessionId)).for('no key update')
+        if (!session) throw new SpyProbeError('SESSION_NOT_FOUND', 'Chip não encontrado')
+        if (!SENDABLE_STATES.includes(session.status)) throw new SpyProbeError('SESSION_NOT_READY', `O chip ${session.name} está ${session.status}; use um chip conectado`)
+        const phone = `+${offer.phone}`
+        const managed = await tx.select({ id: sessions.id }).from(sessions).where(eq(sessions.phone, phone)).limit(1)
+        if (managed.length > 0) throw new SpyProbeError('OWN_NUMBER', 'Esse número é de um chip seu')
+        const startedAt = new Date(this.now())
+        const since = new Date(startedAt.getTime() - DAY)
+        const [count] = await tx.select({ n: sql<number>`count(*)::int` }).from(spyProbes)
+          .where(and(eq(spyProbes.sessionId, session.id), gte(spyProbes.startedAt, since)))
+        const n = count?.n ?? 0
+        if (n >= SPY_PROBES_PER_DAY) throw new SpyProbeError('DAILY_LIMIT', `O chip ${session.name} já começou ${n} sondas nas últimas 24 h (limite ${SPY_PROBES_PER_DAY})`)
+
+        const consent = { consent: true, consentAt: startedAt, consentSource: SPY_CONSENT_SOURCE }
+        await tx.insert(contacts).values({ phone, name: offer.pageName, ...consent }).onConflictDoNothing({ target: contacts.phone })
+        const [contact] = await tx.select().from(contacts).where(eq(contacts.phone, phone)).for('no key update')
+        if (!contact) throw new Error('Contato removido durante a criação da sonda')
+        if (contact.optOut) throw new SpyProbeError('OPT_OUT', 'Esse número pediu para não receber mensagens')
+        if (!contact.consent) await tx.update(contacts).set(consent).where(eq(contacts.id, contact.id))
+
+        const [row] = await tx.insert(spyProbes).values({
+          offerId: offer.id, sessionId: session.id, phone, createdBy: input.createdBy, maxTurns: input.maxTurns ?? 12, branch: input.branch ?? 'principal',
+          replyDueAt: new Date(startedAt.getTime() + Math.max(0, input.startInMs ?? 0)), startedAt, updatedAt: startedAt,
+        }).returning()
+        await tx.update(spyOffers).set({ status: 'sondando', updatedAt: startedAt }).where(eq(spyOffers.id, offer.id))
+        await tx.insert(auditLogs).values({ actor: input.createdBy, action: 'spy.probe.start', targetType: 'spy_probe', targetId: row!.id, detail: { offerId: offer.id, sessionId: session.id, consentSource: SPY_CONSENT_SOURCE } })
+        return row!
+      }, { isolationLevel: 'read committed' })
     } catch (err) {
       const detail = String((err as { cause?: unknown }).cause ?? err)
       if (/spy_probes_active_branch_idx/.test(detail)) throw new SpyProbeError('PROBE_ACTIVE', `Já existe uma sonda "${input.branch ?? 'principal'}" ativa nessa oferta`)
       if (/spy_probes_active_session_idx/.test(detail)) throw new SpyProbeError('PROBE_ACTIVE', 'Esse chip já está sondando essa oferta; use outro chip para outra ramificação')
       throw err
     }
-    await this.db.update(spyOffers).set({ status: 'sondando', updatedAt: new Date(this.now()) }).where(eq(spyOffers.id, offer.id))
-    await this.db.insert(auditLogs).values({ actor: input.createdBy, action: 'spy.probe.start', targetType: 'spy_probe', targetId: row!.id, detail: { offerId: offer.id, sessionId: session.id, consentSource: SPY_CONSENT_SOURCE } })
-    return row!
   }
 
   async list(limit = 100): Promise<SpyProbeView[]> {
@@ -127,12 +130,14 @@ export class SpyProbeStore {
 
   /** Mensagem nova da oferta: responde depois de `delayMs` (reinicia a cada mensagem, para juntar as que vêm em sequência). */
   async inboundSeen(id: string, at: Date, delayMs: number) {
-    await this.db.update(spyProbes).set({ lastInboundAt: at, replyDueAt: new Date(this.now() + delayMs), updatedAt: new Date(this.now()) }).where(eq(spyProbes.id, id))
+    await this.db.update(spyProbes).set({ lastInboundAt: at, replyDueAt: new Date(this.now() + delayMs), updatedAt: new Date(this.now()) })
+      .where(and(eq(spyProbes.id, id), eq(spyProbes.status, 'ativa')))
   }
 
   /** Não deu para responder agora (chip fora, limite, erro passageiro): tenta de novo em `ms`. */
   async postpone(id: string, ms: number) {
-    await this.db.update(spyProbes).set({ replyDueAt: new Date(this.now() + ms), updatedAt: new Date(this.now()) }).where(eq(spyProbes.id, id))
+    await this.db.update(spyProbes).set({ replyDueAt: new Date(this.now() + ms), updatedAt: new Date(this.now()) })
+      .where(and(eq(spyProbes.id, id), eq(spyProbes.status, 'ativa')))
   }
 
   due() {
@@ -145,7 +150,7 @@ export class SpyProbeStore {
       ...(patch.turns !== undefined ? { turns: patch.turns } : {}),
       ...(patch.summary ? { summary: patch.summary } : {}),
       ...(patch.sentAt ? { lastOutboundAt: patch.sentAt } : {}),
-    }).where(eq(spyProbes.id, id))
+    }).where(and(eq(spyProbes.id, id), eq(spyProbes.status, 'ativa')))
   }
 
   /** Encerra (ou para) a sonda e encerra também a escuta de novas mensagens. */

@@ -1,7 +1,7 @@
 // Rotas do Espião com Postgres local: fila de links, número manual, tentar de novo e remover.
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import JSZip from 'jszip'
-import { createDb, createTempDatabase, messages, sessions, spyMedia, spyOffers, spyProbes, type Database, type TempDatabase } from '@wsm/db'
+import { createDb, createTempDatabase, messages, proxies, sessions, spyMedia, spyOffers, spyProbes, type Database, type TempDatabase } from '@wsm/db'
 import { createApp } from '../app'
 import { captureLogger, fakeRedis } from '../test-utils'
 
@@ -26,6 +26,30 @@ afterAll(async () => {
 describe('/api/spy', () => {
   it('exige login', async () => {
     expect((await app.request('/api/spy/ads')).status).toBe(401)
+    expect((await app.request('/api/spy/chips')).status).toBe(401)
+  })
+
+  it('lista as sessões WSM com a mesma disponibilidade da sonda e apenas os campos públicos', async () => {
+    const [proxy] = await db.insert(proxies).values({
+      protocol: 'http', host: 'proxy.example.test', port: 8080, username: 'private-proxy-user',
+    }).returning()
+    const [stable, disconnected, warming, degraded, paused] = await db.insert(sessions).values([
+      { name: 'A estável', phone: '+5531900000041', status: 'STABLE', proxyId: proxy!.id, browser: ['private-os', 'private-browser', '1'], note: 'private-note' },
+      { name: 'B desconectado', status: 'DISCONNECTED' },
+      { name: 'C aquecendo', status: 'WARMING' },
+      { name: 'D degradado', status: 'DEGRADED' },
+      { name: 'E pausado', status: 'PAUSED' },
+    ]).returning()
+
+    const res = await app.request('/api/spy/chips', { headers: auth })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ items: [
+      { session_id: stable!.id, name: stable!.name, phone: stable!.phone, status: 'STABLE', sendable: true },
+      { session_id: disconnected!.id, name: disconnected!.name, phone: null, status: 'DISCONNECTED', sendable: false },
+      { session_id: warming!.id, name: warming!.name, phone: null, status: 'WARMING', sendable: true },
+      { session_id: degraded!.id, name: degraded!.name, phone: null, status: 'DEGRADED', sendable: true },
+      { session_id: paused!.id, name: paused!.name, phone: null, status: 'PAUSED', sendable: false },
+    ] })
   })
 
   it('configura quais chips ficam fora da sonda automática', async () => {
@@ -72,11 +96,12 @@ describe('/api/spy', () => {
     const notReady = await start(down!.id)
     expect(notReady.status).toBe(409)
     expect(((await notReady.json()) as { error: { code: string } }).error.code).toBe('SESSION_NOT_CONNECTED')
+    expect(await db.select({ id: spyProbes.id }).from(spyProbes)).toEqual([])
 
     const res = await start(chip!.id)
     expect(res.status).toBe(201)
     const probe = await res.json() as { id: string; status: string }
-    expect(probe.status).toBe('ativa')
+    expect(probe).toMatchObject({ status: 'ativa', offerId: offer!.id, sessionId: chip!.id, branch: 'principal' })
     expect((await start(chip!.id)).status).toBe(409)
 
     await db.insert(messages).values({ sessionId: chip!.id, phone: '+5588933009387', direction: 'inbound', status: 'delivered', content: { type: 'conversation', text: 'Olá!' } })
