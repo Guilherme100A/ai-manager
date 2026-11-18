@@ -1,0 +1,402 @@
+diff --git a/apps/api/src/routes/mcp/mcp-spy-capture.db.unit.test.ts b/apps/api/src/routes/mcp/mcp-spy-capture.db.unit.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..215d22a91fb856c0e68984211dcfb56ce39f0943
+--- /dev/null
++++ b/apps/api/src/routes/mcp/mcp-spy-capture.db.unit.test.ts
+@@ -0,0 +1,203 @@
++import { randomUUID } from 'node:crypto'
++import { eq } from 'drizzle-orm'
++import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
++import { auditLogs, connections, createDb, type Database } from '@crm/db'
++import { createTempDatabase, type TempDatabase } from '@crm/db/testing'
++import { createLogger, MemoryMailer, redisConnection } from '@crm/node-kit'
++import { FakeWaGateway } from '@crm/wa-port/testing'
++import { createApp, type RedisClient } from '../../app'
++
++type Session = { cookie: string; companyId: string }
++type RpcResponse = {
++  error?: { code: number; message: string }
++  result?: { isError?: boolean; content?: { text: string }[]; tools?: { name: string }[] }
++}
++
++const headers = { 'content-type': 'application/json', 'x-requested-with': 'crm' }
++const upstreamUrl = 'http://wsm.example.test'
++const upstreamToken = 'wsm-bridge-token-test'
++const offerId = randomUUID()
++const sessionId = randomUUID()
++const probeId = randomUUID()
++const startArgs = { offer_id: offerId, session_id: sessionId, branch: 'objecao', start_in_minutes: 25 }
++
++
++
++
++let temp: TempDatabase
++let db: Database
++let redis: RedisClient
++let app: ReturnType<typeof createApp>
++let owner: Session
++let other: Session
++let requestId = 0
++const upstream = vi.fn(async (_url: string, _init?: RequestInit) => new Response(null, { status: 500 }))
++
++async function signUp(index: number): Promise<Session> {
++  const email = `spy-${randomUUID()}@example.test`
++  const ip = { 'x-forwarded-for': `10.97.0.${index}` }
++  const password = '12345678'
++  const registered = await app.request('/api/auth/register', {
++    method: 'POST', headers: { ...headers, ...ip },
++    body: JSON.stringify({ name: 'Spy owner', email, password, password_confirmation: password }),
++  })
++  expect(registered.status).toBe(201)
++  const { user } = await registered.json() as { user: { last_company_id: string } }
++  const loggedIn = await app.request('/api/auth/login', {
++    method: 'POST', headers: { ...headers, ...ip }, body: JSON.stringify({ email, password }),
++  })
++  expect(loggedIn.status).toBe(200)
++  const cookie = /crm_session=[^;]+/.exec(loggedIn.headers.get('set-cookie') ?? '')
++  expect(cookie).not.toBeNull()
++  return { cookie: cookie![0], companyId: user.last_company_id }
++}
++
++function bridge(s: Session, method: string, path: string, body?: string) {
++  return app.request(path, { method, headers: { ...headers, cookie: s.cookie }, ...(body === undefined ? {} : { body }) })
++}
++
++async function credential(s: Session, access: 'read' | 'write') {
++  const res = await app.request('/api/mcp_credentials', {
++    method: 'POST', headers: { ...headers, cookie: s.cookie }, body: JSON.stringify({ name: `spy-${access}`, access }),
++  })
++  expect(res.status).toBe(201)
++  return await res.json() as { token: string; mcp_credential: { id: string } }
++}
++
++async function rpc(token: string, method: string, params: unknown = {}) {
++  const res = await app.request('/api/mcp', {
++    method: 'POST',
++    headers: {
++      'content-type': 'application/json', accept: 'application/json, text/event-stream',
++      'mcp-protocol-version': '2025-06-18', authorization: `Bearer ${token}`,
++    },
++    body: JSON.stringify({ jsonrpc: '2.0', id: ++requestId, method, params }),
++  })
++  expect(res.status).toBe(200)
++  return await res.json() as RpcResponse
++}
++
++const invoke = (token: string, name: string, args: unknown) => rpc(token, 'tools/call', { name, arguments: args })
++const content = (response: RpcResponse): unknown => JSON.parse(response.result!.content![0]!.text)
++const failed = (response: RpcResponse) => Boolean(response.error || response.result?.isError)
++
++beforeAll(async () => {
++  temp = await createTempDatabase({ migrate: true })
++  db = createDb(temp.url, { max: 8 })
++  redis = redisConnection({ url: process.env.REDIS_URL ?? 'redis://127.0.0.1:6379/1' })
++  app = createApp({
++    db, redis, waGateway: new FakeWaGateway(), waProfile: 'ai-manager', mailer: new MemoryMailer(),
++    trustProxy: true, logger: createLogger({ level: 'silent' }), mcpEnv: { API_PUBLIC_URL: 'https://api.example.test' },
++  })
++  owner = await signUp(1)
++  other = await signUp(2)
++}, 120000)
++
++beforeEach(() => {
++  vi.stubEnv('CRM_SPY_COMPANY_ID', owner.companyId)
++  vi.stubEnv('SPY_API_URL', upstreamUrl)
++  vi.stubEnv('SPY_API_TOKEN', upstreamToken)
++  upstream.mockReset()
++  vi.stubGlobal('fetch', upstream)
++})
++
++afterEach(() => {
++  vi.unstubAllGlobals()
++  vi.unstubAllEnvs()
++})
++
++afterAll(async () => {
++  redis?.disconnect()
++  await db?.$client.end()
++  await temp?.drop()
++})
++
++const captureId = randomUUID()
++const fixtureLink = 'https://api.whatsapp.com/send/?phone=5511999900011&token=SANITIZED_LINK_TOKEN&utm_source=fixture'
++const capture = (status = 'na_fila', found: string | null = null) => ({ capture_id: captureId, status, offer_id: found,
++  attempts: status === 'na_fila' ? 0 : 1, retry_at: null, reason: null, offer_ids: found ? [found] : [],
++  capture_only: true, manual_start_required: true, requires_offer_choice: false, finished: Boolean(found), children: [], skipped_existing: 0 })
++
++describe('MCP link capture before explicit probe start', () => {
++  it('registers, reuses and polls to offer_id without sending; only explicit chip start reaches fake transport', async () => {
++    const { token } = await credential(owner, 'write')
++    const transport = vi.fn(async (_chip: string) => undefined)
++    let registrations = 0, polls = 0
++    const calls: string[] = []
++    upstream.mockImplementation(async (url, init) => {
++      calls.push(url)
++      if (url.endsWith('/api/spy/captures')) {
++        expect(JSON.parse(String(init?.body))).toEqual({ url: fixtureLink })
++        expect(init?.method).toBe('POST')
++        return Response.json({ ...capture(), created: registrations++ === 0, private: upstreamToken }, { status: registrations === 1 ? 201 : 200 })
++      }
++      if (url.endsWith('/api/spy/captures/' + captureId)) return Response.json(++polls === 1 ? capture('lendo') : capture('achado', offerId))
++      if (url.endsWith('/api/spy/chips')) return Response.json({ items: [
++        { session_id: randomUUID(), name: 'Other chip', phone: null, status: 'STABLE', sendable: true },
++        { session_id: sessionId, name: 'Chosen chip', phone: null, status: 'STABLE', sendable: true },
++      ] })
++      if (url.endsWith(`/api/spy/offers/${offerId}/probes`)) {
++        const body = JSON.parse(String(init?.body))
++        expect(body.sessionId).toBe(sessionId)
++        await transport(body.sessionId)
++        return Response.json({ id: probeId, offerId, sessionId, branch: 'objecao', status: 'ativa' }, { status: 201 })
++      }
++      if (url.endsWith(`/api/spy/probes/${probeId}/stop`)) return Response.json({ id: probeId, offerId, sessionId, branch: 'objecao', status: 'parada' })
++      throw new Error('Unexpected fake upstream operation')
++    })
++    const first = content(await invoke(token, 'capture_spy_offer', { url: fixtureLink }))
++    expect(first).toMatchObject({ capture_id: captureId, created: true, offer_id: null, capture_only: true })
++    expect(content(await invoke(token, 'capture_spy_offer', { url: fixtureLink }))).toMatchObject({ capture_id: captureId, created: false })
++    expect(content(await invoke(token, 'get_spy_capture', { capture_id: captureId }))).toMatchObject({ status: 'lendo', offer_id: null })
++    expect(content(await invoke(token, 'get_spy_capture', { capture_id: captureId }))).toMatchObject({ status: 'achado', offer_id: offerId, finished: true })
++    await invoke(token, 'list_spy_chips', {})
++    expect(transport).not.toHaveBeenCalled()
++    expect(calls.some(url => url.endsWith('/probes'))).toBe(false)
++    expect(failed(await invoke(token, 'start_spy_probe', { offer_id: offerId }))).toBe(true)
++    expect(transport).not.toHaveBeenCalled()
++    expect(content(await invoke(token, 'start_spy_probe', startArgs))).toMatchObject({ id: probeId, sessionId })
++    expect(transport).toHaveBeenCalledExactlyOnceWith(sessionId)
++    expect(content(await invoke(token, 'stop_spy_probe', { id: probeId }))).toMatchObject({ status: 'parada' })
++    expect(await db.select().from(connections).where(eq(connections.companyId, owner.companyId))).toEqual([])
++    const audits = await db.select().from(auditLogs).where(eq(auditLogs.companyId, owner.companyId))
++    expect(audits.some(a => a.action === 'spy.capture.create')).toBe(true)
++    expect(JSON.stringify([first, audits])).not.toContain('SANITIZED_LINK_TOKEN')
++    expect(JSON.stringify([first, audits])).not.toContain(upstreamToken)
++  })
++
++  it('read credential can poll but cannot register; another company cannot access either operation', async () => {
++    const read = await credential(owner, 'read'), foreign = await credential(other, 'write')
++    upstream.mockResolvedValueOnce(Response.json(capture('lendo')))
++    expect(content(await invoke(read.token, 'get_spy_capture', { capture_id: captureId }))).toMatchObject({ status: 'lendo' })
++    upstream.mockClear()
++    expect(failed(await invoke(read.token, 'capture_spy_offer', { url: fixtureLink }))).toBe(true)
++    for (const [name, args] of [['capture_spy_offer', { url: fixtureLink }], ['get_spy_capture', { capture_id: captureId }]] as const) {
++      expect(content(await invoke(foreign.token, name, args))).toMatchObject({ status: 403 })
++    }
++    expect(upstream).not.toHaveBeenCalled()
++  })
++
++  it('validates URL/host, methods and strict capture body before upstream', async () => {
++    for (const url of ['not a URL', 'https://evil.test/?next=https://wa.me/5511999900011', 'https://user:SANITIZED_LINK_TOKEN@facebook.com/page/posts/1'])
++      expect((await bridge(owner, 'POST', '/api/spy-bridge/capture_offer', JSON.stringify({ url }))).status).toBe(422)
++    expect((await bridge(owner, 'POST', '/api/spy-bridge/capture_offer', JSON.stringify({ url: fixtureLink, sessionId, autoProbe: true }))).status).toBe(422)
++    expect((await bridge(owner, 'GET', '/api/spy-bridge/capture_offer')).status).toBe(404)
++    expect((await bridge(owner, 'GET', '/api/spy-bridge/capture_status?id=bad')).status).toBe(422)
++    expect(upstream).not.toHaveBeenCalled()
++  })
++
++  it('rejects unsafe or mismatched capture responses and returns safe not-found/legacy conflicts', async () => {
++    const { token } = await credential(owner, 'write')
++    upstream.mockResolvedValueOnce(Response.json({ ...capture(), capture_only: false }))
++    upstream.mockResolvedValueOnce(Response.json({ ...capture(), capture_id: randomUUID() }))
++    upstream.mockResolvedValueOnce(Response.json({ private: upstreamToken }, { status: 404 }))
++    upstream.mockResolvedValueOnce(Response.json({ private: upstreamToken }, { status: 409 }))
++    expect(content(await invoke(token, 'capture_spy_offer', { url: fixtureLink }))).toMatchObject({ status: 502 })
++    expect(content(await invoke(token, 'get_spy_capture', { capture_id: captureId }))).toMatchObject({ status: 502 })
++    expect(content(await invoke(token, 'get_spy_capture', { capture_id: captureId }))).toMatchObject({ status: 404 })
++    const result = await invoke(token, 'capture_spy_offer', { url: fixtureLink })
++    expect(content(result)).toMatchObject({ status: 409 })
++    expect(JSON.stringify(result)).not.toContain(upstreamToken)
++    expect(upstream).toHaveBeenCalledTimes(4)
++  })
++})
+diff --git a/apps/api/src/routes/spy-mcp.ts b/apps/api/src/routes/spy-mcp.ts
+index 2201b2461fd8eb953a5cca090452fceab8d052f5..1d8547fa6a12f0c8146a31a6c17afae8c7f27506 100644
+--- a/apps/api/src/routes/spy-mcp.ts
++++ b/apps/api/src/routes/spy-mcp.ts
+@@ -19,6 +19,19 @@ const startProbe = z.object({
+   startInMinutes: z.number().int().min(0).max(180).optional(),
+ }).strict()
+ const stopProbe = z.object({}).strict()
++const captureInput = z.object({ url: z.string().trim().url().max(2048).refine(value => {
++  try {
++    const u = new URL(value)
++    return ['http:', 'https:'].includes(u.protocol) && !u.username && !u.password && !u.port
++      && ['wa.me', 'api.whatsapp.com', 'web.whatsapp.com', 'whatsapp.com', 'www.whatsapp.com', 'facebook.com', 'www.facebook.com', 'm.facebook.com', 'web.facebook.com', 'mbasic.facebook.com', 'fb.com', 'www.fb.com'].includes(u.hostname)
++  } catch { return false }
++}, 'Use link do Facebook ou WhatsApp') }).strict()
++const captureItem = z.object({
++  capture_id: uuid, status: z.enum(['na_fila', 'lendo', 'achado', 'sem_numero', 'erro', 'expandido']), offer_id: uuid.nullable(),
++  attempts: z.number().int().min(0), retry_at: z.string().nullable(), reason: z.enum(['capture_failed', 'phone_not_found', 'retry_scheduled']).nullable(),
++})
++const captureResponse = captureItem.extend({ offer_ids: z.array(uuid), capture_only: z.literal(true), manual_start_required: z.literal(true),
++  requires_offer_choice: z.boolean(), finished: z.boolean(), children: z.array(captureItem), skipped_existing: z.number().int().min(0), created: z.boolean().optional() })
+ const chipsResponse = z.object({
+   items: z.array(z.object({
+     session_id: uuid,
+@@ -48,10 +61,12 @@ export function spyMcpRoutes(deps: ResolvedDeps) {
+       zip: `/api/spy/offers/${id}/flow.zip`, media: `/api/spy/media/${id}`,
+       import: `/api/spy/offers/${id}/copy-to-crm`,
+       start_probe: `/api/spy/offers/${id}/probes`, stop_probe: `/api/spy/probes/${id}/stop`,
++      capture_offer: '/api/spy/captures', capture_status: `/api/spy/captures/${id}`,
+     }
+     if (!Object.hasOwn(paths, op)) throw new ApiError('NOT_FOUND', 'Operação inválida')
+     const probeWrite = op === 'start_probe' || op === 'stop_probe'
+-    const write = op === 'import' || probeWrite
++    const captureWrite = op === 'capture_offer'
++    const write = op === 'import' || probeWrite || captureWrite
+     if (c.req.method !== (write ? 'POST' : 'GET')) throw new ApiError('NOT_FOUND', 'Operação inválida')
+     await requirePerm(write ? 'flows.edit' : 'flows.view')(c, async () => {})
+     const { companyId } = getCompanyCtx(c)
+@@ -60,10 +75,15 @@ export function spyMcpRoutes(deps: ResolvedDeps) {
+       ? await deps.db.select({ id: companies.id }).from(companies).where(eq(companies.id, configured)).limit(1)
+       : await deps.db.select({ id: companies.id }).from(companies).where(eq(companies.active, true)).orderBy(asc(companies.createdAt)).limit(2)
+     if (rows.length !== 1 || rows[0]!.id !== companyId) throw new ApiError('FORBIDDEN', 'Sonda indisponível para esta empresa')
+-    if (!['offers', 'probes', 'chips'].includes(op) && !uuid.safeParse(id).success) throw new ApiError('VALIDATION_ERROR', 'ID inválido')
++    if (!['offers', 'probes', 'chips', 'capture_offer'].includes(op) && !uuid.safeParse(id).success) throw new ApiError('VALIDATION_ERROR', 'ID inválido')
+ 
+     let body: string | undefined
+     let requestedSessionId: string | undefined
++    if (captureWrite) {
++      const parsed = captureInput.safeParse(await c.req.json())
++      if (!parsed.success) throw new ApiError('VALIDATION_ERROR', 'Link de captura inválido')
++      body = JSON.stringify(parsed.data)
++    }
+     if (probeWrite) {
+       const schema = op === 'start_probe' ? startProbe : stopProbe
+       const parsed = schema.safeParse(await c.req.json())
+@@ -102,6 +122,12 @@ export function spyMcpRoutes(deps: ResolvedDeps) {
+           if (!parsed.success) throw new ApiError('UPSTREAM_ERROR', 'Resposta inválida da Sonda')
+           return c.json(parsed.data)
+         }
++        if (captureWrite || op === 'capture_status') {
++          const parsed = captureResponse.safeParse(data)
++          if (!parsed.success || op === 'capture_status' && parsed.data.capture_id.toLowerCase() !== id.toLowerCase()) throw new ApiError('UPSTREAM_ERROR', 'Resposta inválida da Captura')
++          if (captureWrite) setAudit(c, { action: 'spy.capture.create', targetType: 'spy_capture', targetId: parsed.data.capture_id, detail: { capture_only: true, created: parsed.data.created === true } })
++          return c.json(parsed.data, status)
++        }
+         if (probeWrite) {
+           const parsed = probeResponse.safeParse(data)
+           if (!parsed.success) throw new ApiError('UPSTREAM_ERROR', 'Resposta inválida da Sonda')
+diff --git a/docs/mcp-spy-capture.md b/docs/mcp-spy-capture.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..04d72e1ad7617b9b80d7d757016b30ec7819d3a6
+--- /dev/null
++++ b/docs/mcp-spy-capture.md
+@@ -0,0 +1,50 @@
++# Capturar link novo antes de iniciar a Sonda
++
++1. Chame `capture_spy_offer` com `url` HTTP(S) de um anúncio, post ou busca da
++   Biblioteca do Facebook, ou link de número `wa.me`/`api.whatsapp.com/send`.
++   O retorno contém `capture_id`, `status` e, quando disponível, `offer_id`.
++2. Consulte `get_spy_capture` com esse `capture_id`. `na_fila` e `lendo` indicam
++   processamento; `retry_at` indica nova tentativa agendada. `finished: true`
++   encerra a descoberta; `reason` informa falha ou número não encontrado sem
++   expor o erro bruto do provedor. Não faça polling em laço sem intervalo.
++3. Uma busca pode retornar vários `offer_ids`. O sistema não escolhe o primeiro:
++   `requires_offer_choice` indica que o usuário deve selecionar a oferta. O
++   `offer_id` singular de uma busca só é preenchido após a descoberta concluir
++   com um único resultado. `children` mostra o andamento dos anúncios da busca.
++4. Com a oferta identificada, chame `list_spy_chips`, escolha o `session_id`
++   WSM explicitamente e só então `start_spy_probe` da PR15. Acompanhe com
++   `list_spy_probes`/`get_spy_probe_messages` e encerre com `stop_spy_probe`.
++
++**Capturar e consultar não iniciam sonda, não escolhem chip e não enviam
++WhatsApp.** Essa regra é persistida no JSON do anúncio e preservada ao salvar
++metadados, expandir buscas, recuperar um processo interrompido e repetir a
++descoberta. A sonda explícita continua podendo enviar mensagens reais.
++
++`capture_spy_offer` exige credencial de escrita e `flows.edit`.
++`get_spy_capture` exige `flows.view` e aceita credencial de leitura. A ponte
++mantém o bloqueio para outras empresas e usa o mesmo catálogo comum da Sonda.
++
++Links equivalentes, inclusive variantes com tracking e token, reutilizam a
++captura sem resetar seu estado. Tokens, tracking, texto da mensagem e fragmentos
++são descartados antes de persistir o link no WSM. URLs de outros hosts,
++credenciais na URL, portas não padrão e links sem destino suportado são
++recusados. O retorno não contém a URL original, metadados privados ou erros
++brutos. Uma resposta de outro `capture_id` é rejeitada pela ponte.
++
++Um link já gerenciado pelo caminho automático do painel retorna conflito;
++ele não é convertido ou pausado silenciosamente. Anúncios antigos encontrados
++numa expansão são contabilizados em `skipped_existing`. O comportamento
++automático do painel permanece no seu caminho existente. Uma captura que
++termine sem oferta não autoriza tentar um chip aleatório ou reenviar mensagens.
++
++Rotas da ponte: `POST /api/spy-bridge/capture_offer` com `{url}` e
++`GET /api/spy-bridge/capture_status?id=UUID`. Rotas WSM correspondentes:
++`POST /api/spy/captures` e `GET /api/spy/captures/:id`. O registro idempotente
++retorna 201 na primeira chamada e 200 nas repetições. Não há nova migration:
++o marcador usa o JSONB já existente; os 47 registros CRM e o SQL público
++permanecem preservados.
++
++Os testes usam Facebook/WSM/transporte simulados e bancos temporários no CI.
++Eles não comprovam captura externa real de um anúncio privado ou disponível
++apenas após login. Publicação, OAuth e consultas reais permitidas são etapas
++separadas; este pacote não autoriza uma sonda real para terceiros como teste.
+diff --git a/packages/core/src/mcp/tools/spy.ts b/packages/core/src/mcp/tools/spy.ts
+index 006c5fdd79a6c35894faac21619c5706eb846d65..8df92e03bddeb3fc564bb02a77f1b087962ecb9d 100644
+--- a/packages/core/src/mcp/tools/spy.ts
++++ b/packages/core/src/mcp/tools/spy.ts
+@@ -26,6 +26,17 @@ async function getFlow(api: import('./shared').McpApi, args: { id: string }) {
+ }
+ 
+ export const spyTools = [
++  tool({ name: 'capture_spy_offer', title: 'Capturar oferta por link',
++    description: 'Cadastra um link HTTP(S) novo do Facebook/WhatsApp para descobrir a oferta. Somente captura: NÃO escolhe chip, inicia sonda ou envia WhatsApp. Retorna capture_id; consulte get_spy_capture até obter offer_id. Links equivalentes reutilizam a captura. Depois liste os chips e inicie explicitamente com start_spy_probe.',
++    input: { url: z.string().trim().url().max(2048).describe('Link de anúncio/post/busca do Facebook ou de número do WhatsApp. Não envie credenciais.') },
++    kind: 'write', perm: 'flows.edit', idempotent: true, openWorld: true,
++    run: async (args, api) => fromApi(await api.request('POST', '/api/spy-bridge/capture_offer', { body: args, write: true })),
++  }),
++  tool({ name: 'get_spy_capture', title: 'Consultar captura da oferta',
++    description: 'Consulta status, tentativas e offer_id da captura, sem iniciar sonda. Se uma busca encontrar várias ofertas, retorna offer_ids e requires_offer_choice; escolha a oferta explicitamente. Após finished sem offer_id, a captura não encontrou uma oferta ou conflitou com cadastros antigos.',
++    input: { capture_id: UUID }, perm: 'flows.view',
++    run: async ({ capture_id }, api) => fromApi(await read(api, 'capture_status', { id: capture_id })),
++  }),
+   tool({ name: 'list_spy_offers', title: 'Ofertas da Sonda', description: 'Lista ofertas capturadas pelo Espião, com IDs, números e status. Para roteiro e resumo atuais consulte get_spy_flow.', perm: 'flows.view', run: async (_, api) => {
+     const r = await read(api, 'offers')
+     if (r.status === 200 && r.body && typeof r.body === 'object') {
+diff --git a/packages/core/src/mcp/tools/spy.unit.test.ts b/packages/core/src/mcp/tools/spy.unit.test.ts
+index 2a28d04fa58627653acdd0f0c621a0da58922150..4aaec89707c507e531631e7bf2253205074a0204 100644
+--- a/packages/core/src/mcp/tools/spy.unit.test.ts
++++ b/packages/core/src/mcp/tools/spy.unit.test.ts
+@@ -29,6 +29,42 @@ it('read credentials expose downloads but never import; permissions hide all spy
+   expect(registerApiTools(server, { api, access: 'write', perms: new Set() }, spyTools)).toEqual([])
+ })
+ 
++describe('capture tools are separate from probe starts', () => {
++  it('requires write/edit to register while read/view can only poll', async () => {
++    for (const [access, perms, expected] of [
++      ['read', ['flows.view', 'flows.edit'], ['get_spy_capture']],
++      ['write', ['flows.view'], ['get_spy_capture']],
++      ['write', ['flows.edit'], ['capture_spy_offer']],
++    ] as const) {
++      const s = await connectSpy(access, new Set(perms))
++      const names = (await s.client.listTools()).tools.map(t => t.name).filter(n => ['capture_spy_offer', 'get_spy_capture'].includes(n))
++      expect(names).toEqual(expected)
++    }
++  })
++  it('registers one link idempotently without accepting a chip; polling is read-only', async () => {
++    const s = await connectSpy('write', new Set(['flows.view', 'flows.edit']))
++    const tools = (await s.client.listTools()).tools
++    const capture = tools.find(t => t.name === 'capture_spy_offer')!
++    expect(capture.annotations).toMatchObject({ idempotentHint: true, readOnlyHint: false })
++    expect(capture.inputSchema.required).toEqual(['url'])
++    expect(Object.keys(capture.inputSchema.properties!)).toEqual(['url'])
++    expect(capture.description).toContain('NÃO escolhe chip')
++    await s.call('capture_spy_offer', { url: 'https://wa.me/5511999900011' })
++    await s.call('get_spy_capture', { capture_id: offerId })
++    expect(s.request.mock.calls).toEqual([
++      ['POST', '/api/spy-bridge/capture_offer', { body: { url: 'https://wa.me/5511999900011' }, write: true }],
++      ['GET', '/api/spy-bridge/capture_status', { query: { id: offerId }, write: false }],
++    ])
++  })
++  it('rejects missing/malformed/oversized link and malformed capture ID before the API', async () => {
++    const s = await connectSpy('write', new Set(['flows.view', 'flows.edit']))
++    for (const args of [{}, { url: 'not a URL' }, { url: 'https://facebook.com/' + 'x'.repeat(2048) }])
++      expect(await s.call('capture_spy_offer', args)).toMatchObject({ isError: true })
++    expect(await s.call('get_spy_capture', { capture_id: 'wrong' })).toMatchObject({ isError: true })
++    expect(s.request).not.toHaveBeenCalled()
++  })
++})
++
+ const offerId = '10000000-0000-4000-8000-000000000001'
+ const sessionId = '10000000-0000-4000-8000-000000000002'
+ const probeId = '10000000-0000-4000-8000-000000000003'

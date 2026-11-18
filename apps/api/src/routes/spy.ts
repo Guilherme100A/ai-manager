@@ -4,7 +4,7 @@ import { z } from 'zod'
 import JSZip from 'jszip'
 import { randomUUID } from 'node:crypto'
 import { asc, desc, eq, or, inArray, isNotNull, sql } from 'drizzle-orm'
-import { buildSpyFlow, mediaZipPath, renderBranchConversation, renderFlowPlaybook, renderFlowSummary, SENDABLE_STATES, SpyProbeError, SpyProbeStore, SpyStore, normalizePhone, type SpyFlow } from '@wsm/core'
+import { buildSpyFlow, mediaZipPath, renderBranchConversation, renderFlowPlaybook, renderFlowSummary, SENDABLE_STATES, SpyCaptureError, SpyCaptureStore, SpyProbeError, SpyProbeStore, SpyStore, normalizePhone, type SpyFlow } from '@wsm/core'
 import { sessions, spyMedia, spyOffers, spyProbes, SPY_BRANCHES } from '@wsm/db'
 import { ApiError, type ErrorCode } from '../errors'
 import { setAudit } from '../middleware/audit'
@@ -28,9 +28,21 @@ const editFlowSchema = z.object({
 export function spyRoutes(deps: Pick<AppDeps, 'db' | 'redis'>) {
   const store = new SpyStore(deps.db)
   const probes = new SpyProbeStore(deps.db)
+  const captures = new SpyCaptureStore(deps.db)
   return new Hono<AppEnv>()
     .get('/api/spy/ads', async (c) => c.json({ items: await store.listAds() }))
     .get('/api/spy/offers', async (c) => c.json({ items: await store.listOffers() }))
+    .post('/api/spy/captures', validate('json', z.object({ url: z.string().trim().min(1).max(2048) }).strict()), async (c) => {
+      try {
+        const result = await captures.register(c.req.valid('json').url, c.get('actor'))
+        setAudit(c, { action: 'spy.capture.create', targetType: 'spy_capture', targetId: result.row.id, detail: { created: result.created, capture_only: true } })
+        return c.json({ ...await captures.get(result.row.id), created: result.created }, result.created ? 201 : 200)
+      } catch (err) { throw captureError(err) }
+    })
+    .get('/api/spy/captures/:id', validate('param', adParam), async (c) => {
+      try { return c.json(await captures.get(c.req.valid('param').id)) }
+      catch (err) { throw captureError(err) }
+    })
     .get('/api/spy/chips', async (c) => {
       const chips = await deps.db.select({
         session_id: sessions.id, name: sessions.name, phone: sessions.phone, status: sessions.status,
@@ -220,6 +232,11 @@ export function spyRoutes(deps: Pick<AppDeps, 'db' | 'redis'>) {
       setAudit(c, { action: 'spy.probe.stop', targetType: 'spy_probe', targetId: id })
       return c.json(row)
     })
+}
+
+function captureError(err: unknown) {
+  if (!(err instanceof SpyCaptureError)) return err
+  return new ApiError(err.code === 'INVALID_URL' ? 'VALIDATION_ERROR' : err.code === 'LEGACY_CAPTURE' ? 'INVALID_TRANSITION' : 'NOT_FOUND', err.message)
 }
 
 const startProbeSchema = z.object({

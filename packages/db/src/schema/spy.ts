@@ -13,6 +13,10 @@ export interface SpyImportedFlowData {
 }
 
 export interface SpyAdData {
+  /** Captura explícita do MCP: nunca inicia sonda automaticamente. */
+  captureOnly?: boolean
+  captureChildren?: string[]
+  captureSkipped?: number
   ctaType?: string
   linkUrl?: string
   body?: string

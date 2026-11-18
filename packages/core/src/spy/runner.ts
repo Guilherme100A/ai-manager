@@ -96,7 +96,7 @@ export class SpyRunner {
 
   private async found(id: string, result: { phone: string; foundVia: 'link' | 'texto' | 'post' | 'pagina' | 'manual'; evidenceUrl?: string; candidates?: string[] }) {
     const row = await this.options.store.found(id, result)
-    if (row?.offerId && this.options.onOfferFound) {
+    if (row?.offerId && row.data.captureOnly !== true && this.options.onOfferFound) {
       try {
         await this.options.onOfferFound(row.offerId)
       } catch (err) {

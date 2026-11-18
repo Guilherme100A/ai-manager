@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/Guilherme100A/crm-copy.git",
   "base_sha": "acf78e2da49865afa06fe6a4cee77bcf0e888152",
-  "expected_tree": "af9c8482823fb72833a14041af6183027e21a6f2",
+  "expected_tree": "acc2a3c3e355958be0fb5feed6214cd94c2088f6",
   "sanitization": {
     "excluded_files": [
       "scripts/elevenlabs-account-diagnose.ts",
@@ -28,7 +28,7 @@
     ],
     "reason": "Exclude unrelated operator scripts/private deployment context and audit-only harnesses; replace operational hosts in documentation and URL fixtures with reserved example.test hosts. Original local source preserved.",
     "baseline_tree": "539e4a6dac07e50188e418d0e1a3d669e5f6d687",
-    "final_tree": "af9c8482823fb72833a14041af6183027e21a6f2"
+    "final_tree": "acc2a3c3e355958be0fb5feed6214cd94c2088f6"
   },
   "test_only_changes": [
     {
@@ -417,6 +417,19 @@
         "apps/api/src/routes/mcp/mcp-spy-probes.db.unit.test.ts",
         "apps/api/src/routes/spy-mcp.ts",
         "docs/mcp-spy-probes.md",
+        "packages/core/src/mcp/tools/spy.ts",
+        "packages/core/src/mcp/tools/spy.unit.test.ts"
+      ]
+    },
+    {
+      "file": "13-mcp-spy-capture.patch",
+      "description": "Capture a new Facebook or WhatsApp link and poll the offer ID through MCP without starting a probe; preserve explicit chip selection, owner permissions, private data and prior patches. No migration or real test send.",
+      "sha256": "5123ea02396767084e90b5dcda3985e317827eb9f363975298e5c77b7852d426",
+      "bytes": 25007,
+      "files": [
+        "apps/api/src/routes/mcp/mcp-spy-capture.db.unit.test.ts",
+        "apps/api/src/routes/spy-mcp.ts",
+        "docs/mcp-spy-capture.md",
         "packages/core/src/mcp/tools/spy.ts",
         "packages/core/src/mcp/tools/spy.unit.test.ts"
       ]
