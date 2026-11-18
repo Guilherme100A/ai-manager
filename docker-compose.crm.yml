@@ -39,6 +39,9 @@ x-crm-env: &crm-env
   CRM_SSO_SECRET: ${CRM_SSO_SECRET:?defina CRM_SSO_SECRET}
   API_PUBLIC_URL: ${CRM_API_PUBLIC_URL:-http://localhost:8080/crm}
   WEB_PUBLIC_URL: ${CRM_WEB_PUBLIC_URL:-http://localhost:8080/crm}
+  META_APP_ID: ${CRM_META_APP_ID:-}
+  META_APP_SECRET: ${CRM_META_APP_SECRET:-}
+  META_OAUTH_REDIRECT_URI: ${CRM_META_OAUTH_REDIRECT_URI:-}
   # MCP pode usar HTTPS em um host separado sem mudar as URLs existentes das integrações.
   MCP_PUBLIC_URL: ${CRM_MCP_PUBLIC_URL:-}
   MCP_WEB_PUBLIC_URL: ${CRM_MCP_WEB_PUBLIC_URL:-}

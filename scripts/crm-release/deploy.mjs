@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { pathToFileURL } from 'node:url'
-import { INSTALLED_CRM_JOURNALS, sha, hashFile, read, parseJSON, requireThat, command, atomic, dedicatedPaths, validateManifest, specFor, override, composeArgs, validateConfig, sourceDigest, secrets, tsxCommand, availableMemoryBytes } from './lib.mjs'
+import { INSTALLED_CRM_JOURNALS, sha, hashFile, read, parseJSON, requireThat, command, atomic, dedicatedPaths, validateManifest, specFor, override, composeArgs, validateConfig, sourceDigest, secrets, metaEnvironment, tsxCommand, availableMemoryBytes } from './lib.mjs'
 const json = (run, label, cmd, args) => parseJSON(run(label, cmd, args), label)
 export function deploy(options, run = command) {
   requireThat(options.lockHeld === true, 'Shared deployment lock required')
@@ -133,6 +133,8 @@ export function deploy(options, run = command) {
     requireThat(schema.column === true && schema.trigger === true && schema.indexes === 2, 'CRM schema verification failed')
     const areas = parseJSON(dc('verify-business-area-schema', psql("BEGIN READ ONLY; SELECT json_build_object('areas',to_regclass('crm.business_areas') IS NOT NULL,'resources',to_regclass('crm.business_area_resources') IS NOT NULL,'offer_column',EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='crm' AND table_name='offers' AND column_name='business_area_id'),'flow_share_column',EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='crm' AND table_name='business_area_resources' AND column_name='shared_with_workspaces' AND is_nullable='NO' AND data_type='boolean')); COMMIT;")), 'business area schema')
     requireThat(areas.areas === true && areas.resources === true && areas.offer_column === true && areas.flow_share_column === true, 'Business area schema verification failed')
+    const meta = parseJSON(dc('verify-workspace-meta-schema', psql("BEGIN READ ONLY; SELECT json_build_object('constraints',(SELECT count(*) FROM pg_constraint WHERE connamespace='crm'::regnamespace AND convalidated AND conname IN ('meta_profiles_area_fk','meta_ad_accounts_area_profile_fk','pixel_configs_area_account_fk','pixel_configs_workspace_ck')),'indexes',(SELECT count(*) FROM pg_indexes WHERE schemaname='crm' AND indexname IN ('meta_profiles_workspace_fb_user_uq','meta_ad_accounts_workspace_identity_uq','pixel_configs_workspace_identity_uq'))); COMMIT;")), 'workspace Meta schema')
+    requireThat(meta.constraints === 4 && meta.indexes === 3, 'Workspace Meta schema verification failed')
     const identity = parseJSON(dc('verify-message-identity-schema', psql("BEGIN READ ONLY; SELECT json_build_object('scoped',to_regclass('crm.messages_company_connection_wa_id_uq') IS NOT NULL,'old_global',to_regclass('crm.messages_company_wa_id_uq') IS NOT NULL,'column',EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='crm' AND table_name='messages' AND column_name='connection_id' AND is_nullable='NO'),'trigger',EXISTS(SELECT 1 FROM pg_trigger WHERE tgname='bind_message_connection' AND tgrelid='crm.messages'::regclass AND tgenabled='O'),'fk',(SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname='messages_chat_connection_fk' AND conrelid='crm.messages'::regclass AND convalidated)); COMMIT;")), 'message identity schema')
     requireThat(identity.scoped === true && identity.old_global === false && identity.column === true && identity.trigger === true && typeof identity.fk === 'string' && identity.fk.includes('FOREIGN KEY (company_id, chat_id, connection_id)') && identity.fk.includes('REFERENCES crm.chats(company_id, id, connection_id)'), 'Message identity schema verification failed')
     const pendingStatus = parseJSON(dc('verify-pending-message-status-schema', psql("BEGIN READ ONLY; SELECT json_build_object('table',to_regclass('crm.pending_message_status') IS NOT NULL,'connection_index',to_regclass('crm.connections_company_id_uq') IS NOT NULL,'fk',(SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname='pending_message_status_connection_fk' AND conrelid='crm.pending_message_status'::regclass AND convalidated),'expiry',EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='crm' AND table_name='pending_message_status' AND column_name='expires_at' AND is_nullable='NO')); COMMIT;")), 'pending message status schema')
@@ -154,6 +156,11 @@ export function deploy(options, run = command) {
       if (name !== 'crm-web') {
         requireThat(e.includes('SHARED_OFFERS_COMPANY_ID=' + company), 'Gate changed during cutover')
         for (const key of secrets) requireThat(e.includes(key + '=' + before.services[name].environment[key]), 'Credential changed during cutover')
+        for (const key of metaEnvironment) {
+          const value = before.services[name].environment[key] ?? ''
+          const actual = e.find(entry => entry.startsWith(key + '='))?.slice(key.length + 1) ?? ''
+          requireThat(actual === value, 'Meta configuration changed during cutover')
+        }
         requireThat(json(run, 'verify-image-' + name, 'docker', ['inspect', '--format', '{{json .Image}}', id]) === m.image_id, 'Running image drift')
         requireThat(!actualMounts.some(x => x.Type === 'bind' || x.Destination === '/crm') && actualMounts.some(x => x.Destination === '/crm/node_modules' && x.Name === spec.deps && x.RW === false) && actualMounts.some(x => x.Destination === '/data/storage' && x.Name === spec.storage), 'Running dependency/storage mount drift')
       } else requireThat(actualMounts.some(x => x.Destination === '/usr/share/nginx/html' && x.Name === spec.spa && x.RW === false), 'Running SPA mount drift')

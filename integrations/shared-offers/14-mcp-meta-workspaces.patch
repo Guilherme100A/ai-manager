@@ -1,0 +1,1493 @@
+diff --git a/apps/api/src/routes/meta-entities/index.ts b/apps/api/src/routes/meta-entities/index.ts
+index 0f6e48d4a93dac83b38d6a4c3c992d6492f89694..0b293a1b3f41d580a092d5a72f3783946da31c3c 100644
+--- a/apps/api/src/routes/meta-entities/index.ts
++++ b/apps/api/src/routes/meta-entities/index.ts
+@@ -44,7 +44,7 @@ export function metaEntitiesRoutes(deps: ResolvedDeps) {
+       const body = c.req.valid('json')
+       const result = await metaDomain(async () => {
+         try {
+-          return await svc().update(companyId, id, body)
++          return await svc().update(companyId, id, body, c.get('businessArea'))
+         } catch (err) {
+           if (!(err instanceof MetaMutationError)) throw err
+           if (err.code === 'not_found') throw new ApiError('NOT_FOUND', err.message)
+diff --git a/apps/api/src/routes/meta-oauth/index.ts b/apps/api/src/routes/meta-oauth/index.ts
+index 2db62943f0f1dbf70ac13b9575aacbe2f89d99b6..5bb69587310231b57cdb336788a0ac4b75aff8c5 100644
+--- a/apps/api/src/routes/meta-oauth/index.ts
++++ b/apps/api/src/routes/meta-oauth/index.ts
+@@ -3,7 +3,7 @@
+ // confere o `state` contra a sessão e SEMPRE redireciona para `/facebook/profiles?meta_oauth=success|error`.
+ import { Hono } from 'hono'
+ import { z } from 'zod'
+-import { MetaProfilesError, metaConfigFromEnv } from '@crm/core'
++import { BusinessAreasService, MetaProfilesError, metaConfigFromEnv } from '@crm/core'
+ import { getCompanyCtx, getCtx } from '../../lib/context'
+ import type { AppEnv, ResolvedDeps } from '../../lib/types'
+ import { validate } from '../../lib/validate'
+@@ -24,7 +24,7 @@ export function metaOAuthRoutes(deps: ResolvedDeps) {
+   app.post('/api/meta/oauth/start', requirePerm('facebook.profiles'), requireMetaManager, validate('json', startSchema), async (c) => {
+     const ctx = getCompanyCtx(c)
+     const body = c.req.valid('json')
+-    const { oauth_url } = await metaDomain(() => svc().startOAuth({ companyId: ctx.companyId, userId: ctx.user!.id, profileId: body.profile_id ?? null }))
++    const { oauth_url } = await metaDomain(() => svc().startOAuth({ companyId: ctx.companyId, userId: ctx.user!.id, profileId: body.profile_id ?? null, businessAreaId: c.get('businessArea') ?? undefined }))
+     setAudit(c, { action: 'meta.oauth.start', targetType: 'meta_profile', ...(body.profile_id ? { targetId: body.profile_id } : {}) })
+     return c.json({ oauth_url }, 200)
+   })
+@@ -32,21 +32,33 @@ export function metaOAuthRoutes(deps: ResolvedDeps) {
+   app.get('/api/meta/oauth/callback', async (c) => {
+     const back = (status: 'success' | 'error', message?: string) => {
+       const url = new URL('facebook/profiles', webUrl().replace(/\/+$/, '') + '/')
++      c.header('Cache-Control', 'no-store')
++      c.header('Referrer-Policy', 'no-referrer')
+       url.searchParams.set('meta_oauth', status)
+       if (message) url.searchParams.set('meta_message', short(message))
+       return c.redirect(url.toString(), 302)
+     }
+     const ctx = getCtx(c)
+     const q = c.req.query()
+-    if (q.error) return back('error', q.error_description || q.error_reason || q.error)
++    if (q.error) return back('error', 'Autorização recusada ou cancelada na Meta')
+     if (!ctx.companyId || !ctx.user || !canManageMetaProfiles(ctx)) return back('error', 'Sem permissão para conectar perfis Meta')
+     try {
+-      const profile = await svc().completeOAuth({ companyId: ctx.companyId, userId: ctx.user.id, code: q.code, state: q.state })
+-      setAudit(c, { action: 'meta.oauth.connect', targetType: 'meta_profile', targetId: profile.id, detail: { ad_accounts: profile.ad_accounts_count } })
++      const state = svc().readOAuthState(q.state)
++      if (!state || state.companyId !== ctx.companyId || state.userId !== ctx.user.id || !q.code) return back('error', 'Autorização inválida ou expirada')
++      const area = state.businessAreaId
++      if (area) {
++        const areas = new BusinessAreasService(deps.db)
++        if (!await areas.administrator(ctx.companyId, ctx.user.id)) return back('error', 'Workspace indisponível')
++        await areas.get(ctx.companyId, area)
++        const claimed = await deps.redis.set(`crm:meta-oauth:state:${state.nonce}`, 'used', 'EX', 900, 'NX')
++        if (!claimed) return back('error', 'Autorização já utilizada. Inicie uma nova conexão.')
++      }
++      const profile = await svc().completeOAuth({ companyId: ctx.companyId, userId: ctx.user.id, code: q.code, state: q.state, workspaceId: area })
++      setAudit(c, { action: 'meta.oauth.connect', targetType: 'meta_profile', targetId: profile.id, detail: { ad_accounts: profile.ad_accounts_count, business_area_id: area ?? null } })
+       return back('success')
+     } catch (err) {
+-      if (err instanceof MetaProfilesError) return back('error', err.message)
+-      deps.logger?.error({ err }, 'meta oauth callback falhou')
++      if (err instanceof MetaProfilesError && err.code !== 'upstream') return back('error', err.message)
++      deps.logger?.error('meta oauth callback falhou')
+       return back('error', 'Falha ao conectar o perfil Meta')
+     }
+   })
+diff --git a/apps/api/src/routes/meta-pixels/index.ts b/apps/api/src/routes/meta-pixels/index.ts
+index b9fa1a265e2f2af7012ac2a87d28150093fe7211..4943a39d385ad6ed12851610744eb8c9df3dfabf 100644
+--- a/apps/api/src/routes/meta-pixels/index.ts
++++ b/apps/api/src/routes/meta-pixels/index.ts
+@@ -83,24 +83,26 @@ export function metaPixelsRoutes(deps: ResolvedDeps) {
+ 
+   app.get('/api/meta/pixels', perm, async (c) => {
+     const { companyId } = getCompanyCtx(c)
+-    return c.json({ items: await svc().list(companyId) }, 200)
++    return c.json({ items: await svc().list(companyId, c.get('businessArea')) }, 200)
+   })
+ 
+   app.get('/api/meta/pixels/:id', perm, validate('query', getQuery), async (c) => {
+     const { companyId } = getCompanyCtx(c)
+     const q = c.req.valid('query')
+     const includeAccessToken = q.include_access_token === 'true' || q.include_access_token === '1'
+-    return c.json({ pixel: await domain(() => svc().get(companyId, c.req.param('id'), { includeAccessToken })) }, 200)
++    return c.json({ pixel: await domain(() => svc().get(companyId, c.req.param('id'), { includeAccessToken, area: c.get('businessArea') })) }, 200)
+   })
+ 
+   app.get('/api/meta/pixels/:id/events', perm, validate('query', eventsQuery), async (c) => {
+     const { companyId } = getCompanyCtx(c)
+     const q = c.req.valid('query')
++    await domain(() => svc().get(companyId, c.req.param('id'), { area: c.get('businessArea') }))
+     const out = await domain(() => new CapiEventLogService({ db: deps.db }).list(companyId, c.req.param('id'), q))
+     return c.json(out, 200)
+   })
+ 
+   app.post('/api/meta/pixels', perm, validate('json', createSchema), async (c) => {
++    if (c.get('businessArea')) throw new ApiError('VALIDATION_ERROR', 'Vincule o pixel a uma conta de anúncio deste workspace')
+     const { companyId } = getCompanyCtx(c)
+     const pixel = await domain(() => svc().create(companyId, c.req.valid('json')))
+     setAudit(c, { action: 'meta.pixel.create', targetType: 'pixel_config', targetId: pixel.id, detail: { name: pixel.name } })
+@@ -111,7 +113,7 @@ export function metaPixelsRoutes(deps: ResolvedDeps) {
+     const { companyId } = getCompanyCtx(c)
+     const id = c.req.param('id')
+     const body = c.req.valid('json')
+-    const pixel = await domain(() => svc().update(companyId, id, body))
++    const pixel = await domain(() => svc().update(companyId, id, body, c.get('businessArea')))
+     setAudit(c, { action: 'meta.pixel.update', targetType: 'pixel_config', targetId: id, detail: { fields: Object.keys(body).filter((k) => k !== 'access_token' || body.access_token) } })
+     return c.json({ pixel }, 200)
+   })
+@@ -119,7 +121,7 @@ export function metaPixelsRoutes(deps: ResolvedDeps) {
+   app.delete('/api/meta/pixels/:id', perm, async (c) => {
+     const { companyId } = getCompanyCtx(c)
+     const id = c.req.param('id')
+-    await domain(() => svc().remove(companyId, id))
++    await domain(() => svc().remove(companyId, id, c.get('businessArea')))
+     setAudit(c, { action: 'meta.pixel.delete', targetType: 'pixel_config', targetId: id })
+     return c.body(null, 204)
+   })
+diff --git a/apps/api/src/routes/meta-profiles/index.ts b/apps/api/src/routes/meta-profiles/index.ts
+index 431949d0058e01f4522228e0587392190762ea1b..e1fb8c0c5108eaf761a40d5604b2119a073b6829 100644
+--- a/apps/api/src/routes/meta-profiles/index.ts
++++ b/apps/api/src/routes/meta-profiles/index.ts
+@@ -3,6 +3,7 @@
+ import { Hono } from 'hono'
+ import { z } from 'zod'
+ import { getCompanyCtx } from '../../lib/context'
++import { ApiError } from '../../lib/errors'
+ import type { AppEnv, ResolvedDeps } from '../../lib/types'
+ import { validate } from '../../lib/validate'
+ import { setAudit } from '../../middleware/audit'
+@@ -13,6 +14,14 @@ const adAccountSchema = z.preprocess(
+   (v) => (v && typeof v === 'object' && !Array.isArray(v) && 'meta_ad_account' in v ? (v as { meta_ad_account: unknown }).meta_ad_account : v),
+   z.object({ included_in_dashboard: z.boolean() }),
+ )
++const linkAccount = z.strictObject({ profile_id: z.uuid(), fb_account_id: z.string().regex(/^act_\d{1,32}$/) })
++const linkPixel = z.strictObject({ ad_account_id: z.uuid(), pixel_id: z.string().regex(/^\d{1,32}$/), refresh_oauth_token: z.boolean().optional() })
++const pixelAccount = z.strictObject({ ad_account_id: z.uuid() })
++const candidateProfile = z.strictObject({ profile_id: z.uuid() })
++const workspaceId = (area: string | null | undefined) => {
++  if (!area) throw new ApiError('VALIDATION_ERROR', 'Selecione um workspace Admin 1/2/3')
++  return area
++}
+ 
+ export function metaProfilesRoutes(deps: ResolvedDeps) {
+   const svc = () => metaProfilesServiceFor(deps)
+@@ -20,19 +29,19 @@ export function metaProfilesRoutes(deps: ResolvedDeps) {
+   const view = requirePerm('facebook.profiles')
+   app.get('/api/meta/profiles', view, async (c) => {
+     const { companyId } = getCompanyCtx(c)
+-    return c.json({ items: await metaDomain(() => svc().list(companyId)) }, 200)
++    return c.json({ items: await metaDomain(() => svc().list(companyId, c.get('businessArea'))) }, 200)
+   })
+ 
+   app.get('/api/meta/profiles/:id', view, async (c) => {
+     const { companyId } = getCompanyCtx(c)
+-    const profile = await metaDomain(() => svc().get(companyId, c.req.param('id')))
++    const profile = await metaDomain(() => svc().get(companyId, c.req.param('id'), c.get('businessArea')))
+     return c.json({ profile }, 200)
+   })
+ 
+   app.delete('/api/meta/profiles/:id', view, requireMetaManager, async (c) => {
+     const { companyId } = getCompanyCtx(c)
+     const id = c.req.param('id')
+-    await metaDomain(() => svc().remove(companyId, id))
++    await metaDomain(() => svc().remove(companyId, id, c.get('businessArea')))
+     setAudit(c, { action: 'meta.profile.delete', targetType: 'meta_profile', targetId: id })
+     return c.body(null, 204)
+   })
+@@ -40,7 +49,7 @@ export function metaProfilesRoutes(deps: ResolvedDeps) {
+   app.post('/api/meta/profiles/:id/refresh-ad-accounts', view, requireMetaManager, async (c) => {
+     const { companyId } = getCompanyCtx(c)
+     const id = c.req.param('id')
+-    const profile = await metaDomain(() => svc().refreshAdAccounts(companyId, id))
++    const profile = await metaDomain(() => svc().refreshAdAccounts(companyId, id, c.get('businessArea')))
+     setAudit(c, { action: 'meta.profile.refresh_ad_accounts', targetType: 'meta_profile', targetId: id, detail: { ad_accounts: profile.ad_accounts_count } })
+     return c.json({ profile }, 200)
+   })
+@@ -49,10 +58,45 @@ export function metaProfilesRoutes(deps: ResolvedDeps) {
+     const { companyId } = getCompanyCtx(c)
+     const id = c.req.param('id')
+     const { included_in_dashboard } = c.req.valid('json')
+-    const account = await metaDomain(() => svc().setIncluded(companyId, id, included_in_dashboard))
++    const account = await metaDomain(() => svc().setIncluded(companyId, id, included_in_dashboard, c.get('businessArea')))
+     setAudit(c, { action: 'meta.ad_account.update', targetType: 'meta_ad_account', targetId: id, detail: { included_in_dashboard } })
+     return c.json({ ad_account: account }, 200)
+   })
+ 
++  app.get('/api/meta/workspace/status', view, async (c) => {
++    const { companyId } = getCompanyCtx(c)
++    const area = workspaceId(c.get('businessArea'))
++    const profiles = await metaDomain(() => svc().list(companyId, area))
++    return c.json({ business_area_id: area, ...svc().configurationStatus(), profiles, provider_access_verified: false })
++  })
++  app.get('/api/meta/workspace/ad-accounts', view, validate('query', candidateProfile), async (c) => {
++    const { companyId } = getCompanyCtx(c)
++    const area = workspaceId(c.get('businessArea'))
++    const { profile_id } = c.req.valid('query')
++    return c.json({ items: await metaDomain(() => svc().listWorkspaceCandidates(companyId, area, profile_id)), provider_access_verified: true })
++  })
++  app.post('/api/meta/workspace/ad-accounts', view, requireMetaManager, validate('json', linkAccount), async (c) => {
++    const { companyId } = getCompanyCtx(c)
++    const area = workspaceId(c.get('businessArea'))
++    const { profile_id, fb_account_id } = c.req.valid('json')
++    const account = await metaDomain(() => svc().linkWorkspaceAccount(companyId, area, profile_id, fb_account_id))
++    setAudit(c, { action: 'meta.workspace.ad_account.link', targetType: 'meta_ad_account', targetId: account.id, detail: { business_area_id: area } })
++    return c.json({ ad_account: account })
++  })
++  const pixel = requirePerm('facebook.pixel')
++  app.get('/api/meta/workspace/pixels', view, pixel, validate('query', pixelAccount), async (c) => {
++    const { companyId } = getCompanyCtx(c)
++    const area = workspaceId(c.get('businessArea'))
++    const { ad_account_id } = c.req.valid('query')
++    return c.json({ items: await metaDomain(() => svc().listWorkspacePixels(companyId, area, ad_account_id)), provider_access_verified: true })
++  })
++  app.post('/api/meta/workspace/pixels', view, pixel, requireMetaManager, validate('json', linkPixel), async (c) => {
++    const { companyId } = getCompanyCtx(c)
++    const area = workspaceId(c.get('businessArea'))
++    const { ad_account_id, pixel_id, refresh_oauth_token } = c.req.valid('json')
++    const linked = await metaDomain(() => svc().linkWorkspacePixel(companyId, area, ad_account_id, pixel_id, refresh_oauth_token))
++    setAudit(c, { action: 'meta.workspace.pixel.link', targetType: 'pixel_config', targetId: linked.id, detail: { business_area_id: area } })
++    return c.json({ pixel: linked, capi_delivery_verified: false })
++  })
+   return app
+ }
+diff --git a/apps/api/src/routes/meta-profiles/shared.ts b/apps/api/src/routes/meta-profiles/shared.ts
+index fdfd723fd5c629acfbaa831c2313af85a4073064..4d5f5818f9d45ab86894314d25d8bfa34ac9cdb0 100644
+--- a/apps/api/src/routes/meta-profiles/shared.ts
++++ b/apps/api/src/routes/meta-profiles/shared.ts
+@@ -41,6 +41,7 @@ export async function metaDomain<T>(fn: () => Promise<T>): Promise<T> {
+   } catch (err) {
+     if (!(err instanceof MetaProfilesError)) throw err
+     if (err.code === 'not_found') throw new ApiError('NOT_FOUND', err.message)
++    if (err.code === 'conflict') throw new ApiError('CONFLICT', err.message)
+     if (err.code === 'invalid_state') throw new ApiError('VALIDATION_ERROR', err.message, { fields: [{ path: 'state', message: err.message }] })
+     if (err.code === 'not_configured') throw new ApiError('CONFLICT', err.message, { error_code: 'meta_not_configured' })
+     if (err.code === 'token_invalid') throw new ApiError('CONFLICT', err.message, { error_code: 'meta_token_invalid', ...err.details })
+diff --git a/apps/api/src/routes/meta-structure/index.ts b/apps/api/src/routes/meta-structure/index.ts
+index 352ed5c8dd76130bd28f62b2a4dc3c8470af6d71..87b0aa2c67495e7fc5674eed753e2df2879ca43c 100644
+--- a/apps/api/src/routes/meta-structure/index.ts
++++ b/apps/api/src/routes/meta-structure/index.ts
+@@ -52,6 +52,7 @@ export function metaStructureRoutes(deps: ResolvedDeps) {
+     const bundle = await metaDomain(async () => {
+       try {
+         return await svc().getBundle(companyId, {
++          businessAreaId: c.get('businessArea'),
+           ...(q.level ? { level: q.level } : {}),
+           ...((q.status_filter ?? q.status) ? { status_filter: q.status_filter ?? q.status } : {}),
+           ...(q.date_preset ? { date_preset: q.date_preset } : {}),
+diff --git a/docs/mcp-meta-workspaces.md b/docs/mcp-meta-workspaces.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..01952eb4010c32a4682b96b7fd25da91bcc754bf
+--- /dev/null
++++ b/docs/mcp-meta-workspaces.md
+@@ -0,0 +1,17 @@
++# Meta nos workspaces pelo MCP
++
++No mesmo login do CRM, Admin 1, Admin 2 e Admin 3 têm vínculos próprios de perfil Facebook, conta de anúncio e pixel. O mesmo perfil Facebook pode autorizar os três workspaces. Uma conta de anúncio ou um pixel vinculado a um workspace fica indisponível para novos vínculos nos outros.
++
++1. Rode `list_business_areas` e use o UUID de Admin 1, Admin 2 ou Admin 3 como `business_area_id`.
++2. Consulte `get_workspace_meta_status`. `configured` verifica a presença da configuração do app. `https_callback` verifica o protocolo do retorno. Os dados desse status vêm do CRM.
++3. Rode `start_workspace_meta_oauth` com o workspace. Abra `oauth_url` em um navegador com a sessão do mesmo usuário do CRM e autorize no Facebook. O link é de uso único e expira em 15 minutos. Para reconectar um perfil do workspace, informe também seu `profile_id`.
++4. Consulte o status de novo, copie o ID do perfil recém autorizado e rode `list_workspace_meta_ad_accounts`. Essa consulta chega à Meta. Escolha a conta e use `link_workspace_meta_ad_account` com `profile_id` e `fb_account_id` no formato `act_...`.
++5. Use o UUID CRM da conta em `list_workspace_meta_pixels`. Selecione o dataset dessa lista e rode `link_workspace_meta_pixel` com `ad_account_id` e o `pixel_id` numérico. Nas ofertas, use os UUIDs CRM devolvidos por cada vínculo.
++
++A conexão requer app Meta configurado e autorização da conta para os ativos selecionados. No Compose, os campos são `CRM_META_APP_ID`, `CRM_META_APP_SECRET` e, quando necessário, `CRM_META_OAUTH_REDIRECT_URI`. Configure o segredo no ambiente protegido do servidor. O retorno precisa usar HTTPS, apontar para a rota publicada `/api/meta/oauth/callback` com o prefixo do CRM e coincidir com a URL registrada no app Meta. A autorização usa o navegador. Nenhuma ferramenta recebe senha, código OAuth ou token Facebook como argumento para criar esses vínculos.
++
++O vínculo do pixel usa uma leitura de `/act_<id>/adspixels` para confirmar acesso ao ativo. O CRM guarda uma cópia cifrada da credencial OAuth. Se a Meta exigir outra credencial para a Conversions API, o editor do pixel aceita uma credencial própria. Depois de reautorizar o Facebook, `refresh_oauth_token: true` substitui a credencial do pixel pela do perfil. A consulta e o vínculo não validam entrega pela Conversions API. Automações globais de venda e Lead ficam desligadas para pixels dos workspaces.
++
++Ofertas novas ou editadas em um workspace exigem conta e pixel desse workspace, com o pixel vinculado à conta selecionada. Fluxos privados podem usar o pixel do próprio workspace. Fluxos compartilhados usam o destino da oferta quando rodados por uma oferta. Cadastros anteriores ficam em Geral e os destinos históricos das ofertas são preservados. Uma BM declarada continua um identificador informado pelo usuário.
++
++Referências: [Marketing API](https://developers.facebook.com/docs/marketing-api/reference/v27.0/) e [pixels por conta de anúncio](https://developers.facebook.com/documentation/ads-commerce/marketing-api/reference/ad-account/adspixels.md).
+diff --git a/packages/core/src/business-areas/service.ts b/packages/core/src/business-areas/service.ts
+index acb15190c67820c29a7af50e285df28ef5d892a0..aada4931342feda9fad33584cdad3fe41dda60b3 100644
+--- a/packages/core/src/business-areas/service.ts
++++ b/packages/core/src/business-areas/service.ts
+@@ -67,10 +67,11 @@ export class BusinessAreasService {
+       return (await rows<BusinessArea>(db, sql`update crm.business_areas set name=${input.name.trim()},bm_id=${input.bm_id} where company_id=${company} and id=${id} returning *`))[0]!
+     })
+   }
+-  async ownsResource(company: string, kind: AreaResourceKind, id: string) {
++  async ownsResource(company: string, kind: AreaResourceKind, id: string, area: string | null = null) {
+     if (!uuid(id)) return false
+     const table = AREA_RESOURCE_TABLES[kind]
+-    return (await rows(this.db, sql`select 1 from crm.${sql.raw(table)} where company_id=${company} and id=${id}`)).length > 0
++    return (await rows(this.db, sql`select 1 from crm.${sql.raw(table)} where company_id=${company} and id=${id}
++      ${kind === 'account' || kind === 'pixel' ? sql`and business_area_id is not distinct from ${area}::uuid` : sql``}`)).length > 0
+   }
+   async flowAllowed(company: string, area: string | null, id: string, edit = false) {
+     if (!uuid(id)) return false
+@@ -97,8 +98,8 @@ export class BusinessAreasService {
+         throw new BusinessAreaError('validation','Integrações de nota fiscal/UTMify globais não podem ser usadas como destino de uma área')
+       } else if (kind && v !== null && v !== undefined && v !== '') {
+         // Expressions may be evaluated later by a flow: never accept a dynamic payment/pixel destination in a partition.
+-        if (!uuid(v) || !await (kind === 'flow' ? this.flowAllowed(company, area, v) : this.ownsResource(company, kind, v)))
+-          throw new BusinessAreaError('validation', `Referência ${key} não pertence à empresa`)
++        if (!uuid(v) || !await (kind === 'flow' ? this.flowAllowed(company, area, v) : this.ownsResource(company, kind, v, area)))
++          throw new BusinessAreaError('validation', `Referência ${key} não está disponível neste workspace`)
+       } else if (typeof v === 'object') await this.assertReferences(company, area, v, depth + 1)
+     }
+   }
+@@ -114,8 +115,11 @@ export class BusinessAreasService {
+     const result: Record<string, unknown> = {}
+     for (const [kind, table] of Object.entries(AREA_RESOURCE_TABLES)) {
+       const name = kind === 'integration' ? sql.raw('r.label') : kind === 'account' ? sql.raw('coalesce(r.name,r.fb_account_id)') : sql.raw('r.name')
+-      result[kind] = await rows(this.db, sql`select r.id,${name} as name,null::uuid as area_id from crm.${sql.raw(table)} r
+-        where r.company_id=${company} ${kind === 'flow' && area !== undefined ? sql`and ${workspaceFlowFilter(company, area, sql`r.id`)}` : sql``} order by name`)
++      const scopedMeta = kind === 'account' || kind === 'pixel'
++      result[kind] = await rows(this.db, sql`select r.id,${name} as name,${scopedMeta ? sql`r.business_area_id` : sql`null::uuid`} as area_id from crm.${sql.raw(table)} r
++        where r.company_id=${company}
++          ${kind === 'flow' && area !== undefined ? sql`and ${workspaceFlowFilter(company, area, sql`r.id`)}` : sql``}
++          ${scopedMeta ? sql`and r.business_area_id is not distinct from ${area ?? null}::uuid` : sql``} order by name`)
+     }
+     return result
+   }
+diff --git a/packages/core/src/flows/nodes/pixel/index.ts b/packages/core/src/flows/nodes/pixel/index.ts
+index f04860d974455320cc01606beaba23438b8fd5d2..041077394fce6a0096e4f1ce824c62bd54e42e2f 100644
+--- a/packages/core/src/flows/nodes/pixel/index.ts
++++ b/packages/core/src/flows/nodes/pixel/index.ts
+@@ -10,6 +10,7 @@ import { opportunityForRun, OffersService } from '../../../offers/service'
+ //   `event_id = ctx.idempotencyKey('pixel')` — o retry do passo não reenvia.
+ // `registerPixelNodes` troca o stub do grupo `pixel` em `nodes/index.ts`; `configurePixelNodes` define as deps do processo.
+ import type { Database } from '@crm/db'
++import { sql } from 'drizzle-orm'
+ import { parseMoney } from '../../../meta-capi/hashing'
+ import { eventJobId, type CapiEventEnqueue } from '../../../meta-capi/ad-lead'
+ import { CAPI_EVENT_NAMES, CapiService, type CapiEventName, type CapiSendResult, type CapiServiceOptions } from '../../../meta-capi/service'
+@@ -69,6 +70,13 @@ export function pixelHandler(deps: PixelNodeDeps = {}): NodeHandler {
+         const c = configOf(ctx)
+         const pixelConfigId = String(c.pixel_config_id ?? '').trim()
+         if (!pixelConfigId) throw new PixelNodeError('pixel_not_configured', 'selecione o pixel')
++        const { rows } = await db.execute(sql`select 1 from crm.pixel_configs p
++          where p.company_id=${ctx.companyId} and p.id=${pixelConfigId}
++            and (p.business_area_id is null or exists (
++              select 1 from crm.business_area_resources f where f.company_id=p.company_id and f.kind='flow'
++                and f.resource_id=${ctx.flowId} and f.area_id=p.business_area_id and not f.shared_with_workspaces
++            ))`)
++        if (!rows.length) throw new PixelNodeError('pixel_not_available', 'Pixel não disponível neste fluxo')
+         const eventName = pixelEventName(c.event_type)
+         const rawValue = c.item_value
+         const value = typeof rawValue === 'number' ? rawValue : typeof rawValue === 'string' ? ctx.render(rawValue) : null
+diff --git a/packages/core/src/mcp/tools/index.ts b/packages/core/src/mcp/tools/index.ts
+index a61338d7e527f946c323086f86824c4a5a935371..a173394b8d8b0e3fc787eb40fb2be7a4e868f187 100644
+--- a/packages/core/src/mcp/tools/index.ts
++++ b/packages/core/src/mcp/tools/index.ts
+@@ -9,6 +9,7 @@ import { insightsTools } from './insights'
+ import { paymentsTools } from './payments'
+ import { pixelsTools } from './pixels'
+ import { businessAreasTools } from './business-areas'
++import { metaWorkspaceTools } from './meta-workspaces'
+ import { offersTools } from './offers'
+ import { connectionsTools } from './connections'
+ import { registerApiTools, type McpApiContext } from './shared'
+@@ -16,7 +17,7 @@ import { registerApiTools, type McpApiContext } from './shared'
+ export const MCP_API_TOOLS = [...conversationsTools.map(t=>({...t,areaScoped:t.name==='get_conversation_flow_runs'})), ...flowsTools.map(t => ({ ...t, areaScoped: true })), ...spyTools, ...audioTools, ...mediaTools, ...insightsTools.map(t => ({ ...t, areaScoped: t.name === 'get_ad_metrics' })), ...pixelsTools.map(t => ({ ...t, areaScoped: true })), ...paymentsTools.map(t => ({ ...t, areaScoped: true })), ...connectionsTools] as const
+ 
+ export function registerAllApiTools(server: McpServer, ctx: McpApiContext, sharedOffers = false): string[] {
+-  return registerApiTools(server, ctx, sharedOffers ? [...MCP_API_TOOLS, ...offersTools.map(t => ({ ...t, areaScoped: true })), ...(ctx.businessAreasAdmin ? businessAreasTools : [])] : MCP_API_TOOLS)
++  return registerApiTools(server, ctx, sharedOffers ? [...MCP_API_TOOLS, ...offersTools.map(t => ({ ...t, areaScoped: true })), ...(ctx.businessAreasAdmin ? [...businessAreasTools, ...metaWorkspaceTools] : [])] : MCP_API_TOOLS)
+ }
+ 
+ export type { HttpMethod, McpApi, McpApiContext, McpApiRequest, McpApiResponse } from './shared'
+diff --git a/packages/core/src/mcp/tools/meta-workspaces.ts b/packages/core/src/mcp/tools/meta-workspaces.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..6325266c48d4973958c7dee59a5465e0ec5b8b9f
+--- /dev/null
++++ b/packages/core/src/mcp/tools/meta-workspaces.ts
+@@ -0,0 +1,45 @@
++import { z } from 'zod'
++import { fromApi, tool, UUID } from './shared'
++
++const workspace = { business_area_id: UUID.describe('Workspace Admin 1/2/3 obtido com list_business_areas') }
++const profile = { profile_id: UUID.describe('Perfil CRM deste workspace, obtido com get_workspace_meta_status') }
++const adAccount = { ad_account_id: UUID.describe('UUID CRM da conta vinculada neste workspace') }
++
++export const metaWorkspaceTools = [
++  tool({
++    name: 'get_workspace_meta_status', title: 'Ver configuração Meta do workspace', perm: 'facebook.profiles',
++    description: 'Consulta configuração OAuth, perfis e contas vinculadas no workspace. Use a consulta de contas acessíveis para conferir acesso real na Meta.',
++    input: workspace,
++    run: async ({ business_area_id }, api) => fromApi(await api.request('GET', '/api/meta/workspace/status', { businessAreaId: business_area_id })),
++  }),
++  tool({
++    name: 'start_workspace_meta_oauth', title: 'Autorizar Facebook no workspace', perm: 'facebook.profiles', kind: 'write',
++    description: 'Gera o link oficial de autorização para o workspace escolhido. Abra no navegador com a mesma conta do CRM e autorize no Facebook. Depois consulte get_workspace_meta_status. Para reconectar, informe profile_id do workspace.',
++    input: { ...workspace, profile_id: profile.profile_id.optional() },
++    run: async ({ business_area_id, profile_id }, api) => fromApi(await api.request('POST', '/api/meta/oauth/start', { businessAreaId: business_area_id, body: { profile_id } })),
++  }),
++  tool({
++    name: 'list_workspace_meta_ad_accounts', title: 'Consultar contas disponíveis na Meta', perm: 'facebook.profiles', openWorld: true,
++    description: 'Consulta a Meta ao vivo pelo perfil deste workspace. Retorna contas autorizadas para escolha, excluindo vínculos com outro Admin.',
++    input: { ...workspace, ...profile },
++    run: async ({ business_area_id, profile_id }, api) => fromApi(await api.request('GET', '/api/meta/workspace/ad-accounts', { businessAreaId: business_area_id, query: { profile_id } })),
++  }),
++  tool({
++    name: 'link_workspace_meta_ad_account', title: 'Vincular conta de anúncio ao workspace', perm: 'facebook.profiles', kind: 'write', idempotent: true, openWorld: true,
++    description: 'Confere o acesso na Meta e vincula explicitamente a conta escolhida. Retorna o UUID CRM para usar ao consultar pixels e configurar ofertas.',
++    input: { ...workspace, ...profile, fb_account_id: z.string().regex(/^act_\d{1,32}$/) },
++    run: async ({ business_area_id, ...body }, api) => fromApi(await api.request('POST', '/api/meta/workspace/ad-accounts', { businessAreaId: business_area_id, body })),
++  }),
++  tool({
++    name: 'list_workspace_meta_pixels', title: 'Consultar pixels da conta de anúncio na Meta', perm: 'facebook.pixel', openWorld: true,
++    description: 'Consulta na Meta os pixels/datasets acessíveis pela conta vinculada. A verificação é de acesso ao ativo.',
++    input: { ...workspace, ...adAccount },
++    run: async ({ business_area_id, ad_account_id }, api) => fromApi(await api.request('GET', '/api/meta/workspace/pixels', { businessAreaId: business_area_id, query: { ad_account_id } })),
++  }),
++  tool({
++    name: 'link_workspace_meta_pixel', title: 'Vincular pixel ao workspace', perm: 'facebook.pixel', kind: 'write', idempotent: true, openWorld: true,
++    description: 'Vincula pixel existente e acessível na conta escolhida. Retorna o UUID CRM para a oferta. A vinculação não envia eventos. Após reconectar, refresh_oauth_token=true substitui explicitamente a credencial CAPI pela nova credencial do perfil.',
++    input: { ...workspace, ...adAccount, pixel_id: z.string().regex(/^\d{1,32}$/), refresh_oauth_token: z.boolean().optional() },
++    run: async ({ business_area_id, ...body }, api) => fromApi(await api.request('POST', '/api/meta/workspace/pixels', { businessAreaId: business_area_id, body })),
++  }),
++]
+diff --git a/packages/core/src/meta-ads/client/graph.ts b/packages/core/src/meta-ads/client/graph.ts
+index 684b046265d4c6cee2747876dc15cd20846c97a1..384fd043f163b89e059b71226ec8ae1ab524d214 100644
+--- a/packages/core/src/meta-ads/client/graph.ts
++++ b/packages/core/src/meta-ads/client/graph.ts
+@@ -160,6 +160,7 @@ export class GraphClient {
+     try {
+       res = await this.doFetch(url, {
+         method,
++        redirect: 'error',
+         ...(body ? { body, headers: { 'content-type': 'application/x-www-form-urlencoded' } } : {}),
+         signal: AbortSignal.timeout(this.opts.timeoutMs ?? 30_000),
+       })
+diff --git a/packages/core/src/meta-ads/client/testing/fake-graph.ts b/packages/core/src/meta-ads/client/testing/fake-graph.ts
+index 23bbf3882c9ad4b4d940f5a8ee804e5295c1ace3..2e54866f2243339c3a9f6406d194a419186641e5 100644
+--- a/packages/core/src/meta-ads/client/testing/fake-graph.ts
++++ b/packages/core/src/meta-ads/client/testing/fake-graph.ts
+@@ -243,6 +243,17 @@ export class FakeMetaGraph {
+       }
+       return send(200, { data: slice, paging })
+     }
++    const pixels = /^\/(act_\d+)\/adspixels$/.exec(endpoint)
++    if (pixels && req.method === 'GET') {
++      if (!user.adAccounts.some(a => a.id === pixels[1])) return error(403, 200, 'Account permission required')
++      return send(200, this.page(this.adAccountPixels.get(pixels[1]!) ?? [], params, `${this.url}/${version}${endpoint}`))
++    }
++    const entityGet = /^\/([^/]+)$/.exec(endpoint)
++    if (entityGet && req.method === 'GET' && params.fields === 'account_id') {
++      const entity = this.entity(entityGet[1]!)
++      if (entity && user.adAccounts.some(a => a.id === entity.account))
++        return send(200, { id: entityGet[1], account_id: entity.account.replace(/^act_/, '') })
++    }
+     // ---- T101: estrutura e insights por conta de anúncio ----
+     const actEdge = /^\/(act_[^/]+)\/(campaigns|adsets|ads|insights)$/.exec(endpoint)
+     if (actEdge) {
+@@ -271,6 +282,11 @@ export class FakeMetaGraph {
+ 
+   /** Mutações recebidas (sem `access_token`/`appsecret_proof`), na ordem. */
+   readonly mutations: FakeMutation[] = []
++  private readonly adAccountPixels = new Map<string, { id: string; name?: string }[]>()
++
++  setAdAccountPixels(accountId: string, pixels: { id: string; name?: string }[]) {
++    this.adAccountPixels.set(accountId, [...pixels])
++  }
+ 
+   /** Entidade da estrutura semeada (`setStructure`) pelo id, com a conta e o nível. */
+   entity(entityId: string): { account: string; level: 'campaign' | 'adset' | 'ad'; entity: Record<string, unknown> } | null {
+diff --git a/packages/core/src/meta-ads/mutations/service.ts b/packages/core/src/meta-ads/mutations/service.ts
+index e8eaf1ae24e5b001c4c31ec3226a2299cc7c0352..0e30cb488050a6d5c03b624e87a962d66a32aa08 100644
+--- a/packages/core/src/meta-ads/mutations/service.ts
++++ b/packages/core/src/meta-ads/mutations/service.ts
+@@ -9,7 +9,8 @@ import { and, eq } from 'drizzle-orm'
+ import { metaAdAccounts, type Database } from '@crm/db'
+ import type { Redis } from 'ioredis'
+ import { MetaGraphError } from '../client/graph'
+-import type { MetaProfilesService } from '../profiles/service'
++import { metaAreaFilter, type MetaProfilesService } from '../profiles/service'
++import { isSharedOffersCompany } from '../../offers/policy'
+ import { DEFAULT_RATE_LIMIT_WAIT_MS, isRateLimitError } from '../structure/account'
+ import type { MetaBundleService } from '../structure/service'
+ 
+@@ -102,12 +103,12 @@ export class MetaMutationsService {
+     return this.opts.now?.() ?? new Date()
+   }
+ 
+-  async update(companyId: string, entityId: string, input: MetaEntityUpdateInput): Promise<MetaEntityUpdateResult> {
++  async update(companyId: string, entityId: string, input: MetaEntityUpdateInput, area: string | null = null): Promise<MetaEntityUpdateResult> {
+     const v = this.validate(entityId, input)
+     const [account] = await this.opts.db
+       .select({ id: metaAdAccounts.id, profileId: metaAdAccounts.profileId, fbAccountId: metaAdAccounts.fbAccountId })
+       .from(metaAdAccounts)
+-      .where(and(eq(metaAdAccounts.companyId, companyId), eq(metaAdAccounts.fbAccountId, v.fbAccountId)))
++      .where(and(eq(metaAdAccounts.companyId, companyId), eq(metaAdAccounts.fbAccountId, v.fbAccountId), metaAreaFilter(metaAdAccounts.businessAreaId, area)))
+       .limit(1)
+     if (!account) throw new MetaMutationError('not_found', 'Conta de anúncio não encontrada')
+ 
+@@ -115,9 +116,15 @@ export class MetaMutationsService {
+     const blocked = Number((await this.opts.redis.get(rateKey)) ?? 0)
+     if (blocked > this.now().getTime()) throw this.rateLimited(blocked)
+ 
+-    const token = await this.opts.profiles.accessToken(companyId, account.profileId)
++    const token = await this.opts.profiles.accessToken(companyId, account.profileId, area)
+     try {
+-      await this.opts.profiles.graph(token).post(entityId, v.sent)
++      const graph = this.opts.profiles.graph(token)
++      if (isSharedOffersCompany(companyId)) {
++        const entity = await graph.get<{ account_id?: string }>(entityId, { fields: 'account_id' })
++        if (entity.account_id !== account.fbAccountId.replace(/^act_/, ''))
++          throw new MetaMutationError('not_found', 'Entidade não pertence à conta de anúncio selecionada')
++      }
++      await graph.post(entityId, v.sent)
+     } catch (err) {
+       if (isRateLimitError(err)) {
+         const retryAt = this.now().getTime() + DEFAULT_RATE_LIMIT_WAIT_MS
+diff --git a/packages/core/src/meta-ads/profiles/oauth.ts b/packages/core/src/meta-ads/profiles/oauth.ts
+index c9e353d0b59eb352a93c2f0fa49a483702f44634..2d12011c1bba8a3f36dba3fab7e24d0d0f46af8a 100644
+--- a/packages/core/src/meta-ads/profiles/oauth.ts
++++ b/packages/core/src/meta-ads/profiles/oauth.ts
+@@ -52,6 +52,7 @@ export interface OAuthStatePayload {
+   userId: string
+   /** "Reconectar" um perfil existente. */
+   profileId: string | null
++  businessAreaId?: string
+   /** Expira em (ms epoch). */
+   exp: number
+   nonce: string
+@@ -80,6 +81,7 @@ export function signOAuthState(key: Buffer, input: Omit<OAuthStatePayload, 'exp'
+     companyId: input.companyId,
+     userId: input.userId,
+     profileId: input.profileId ?? null,
++    ...(input.businessAreaId ? { businessAreaId: input.businessAreaId } : {}),
+     exp: input.exp ?? now + META_OAUTH_STATE_TTL_MS,
+     nonce: input.nonce ?? randomBytes(9).toString('base64url'),
+   }
+@@ -99,7 +101,8 @@ export function verifyOAuthState(key: Buffer, state: string | null | undefined,
+     const p = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as OAuthStatePayload
+     if (typeof p.companyId !== 'string' || typeof p.userId !== 'string' || typeof p.exp !== 'number') return null
+     if (p.exp < now) return null
+-    return { companyId: p.companyId, userId: p.userId, profileId: typeof p.profileId === 'string' ? p.profileId : null, exp: p.exp, nonce: String(p.nonce ?? '') }
++    if (p.businessAreaId !== undefined && typeof p.businessAreaId !== 'string') return null
++    return { companyId: p.companyId, userId: p.userId, profileId: typeof p.profileId === 'string' ? p.profileId : null, ...(p.businessAreaId ? { businessAreaId: p.businessAreaId } : {}), exp: p.exp, nonce: String(p.nonce ?? '') }
+   } catch {
+     return null
+   }
+diff --git a/packages/core/src/meta-ads/profiles/service.ts b/packages/core/src/meta-ads/profiles/service.ts
+index 7e393e9c9fe81b70350f375ff51a6e67ab3eeafe..44f521c9e460681b9287b38e0e65dd6156680ef4 100644
+--- a/packages/core/src/meta-ads/profiles/service.ts
++++ b/packages/core/src/meta-ads/profiles/service.ts
+@@ -2,16 +2,19 @@
+ // longo → `/me` → contas), listar sem o token, atualizar a lista de contas (upsert que preserva
+ // `included_in_dashboard`), marcar conta no dashboard e remover o perfil. O token longo só existe cifrado.
+ import { randomUUID } from 'node:crypto'
+-import { and, asc, eq, inArray, sql } from 'drizzle-orm'
+-import { metaAdAccounts, metaProfiles, type Database } from '@crm/db'
++import { and, asc, eq, inArray, isNotNull, sql } from 'drizzle-orm'
++import { metaAdAccounts, metaProfiles, pixelConfigs, type Database } from '@crm/db'
+ import { getCredentialsCipher, parseEncrypted, serializeEncrypted, type CredentialCipher } from '@crm/node-kit'
++import { tokenAad as pixelTokenAad } from '../../meta-capi/pixels'
+ import { GraphClient, MetaGraphError } from '../client/graph'
+ import { defaultOAuthStateKey, oauthDialogUrl, signOAuthState, verifyOAuthState, type MetaConfig } from './oauth'
+ 
+ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+ export const META_AD_ACCOUNT_FIELDS = 'id,account_id,name,currency,account_status'
+ 
+-export type MetaProfilesErrorCode = 'not_found' | 'invalid_state' | 'not_configured' | 'upstream' | 'token_invalid'
++export type MetaProfilesErrorCode = 'not_found' | 'invalid_state' | 'not_configured' | 'upstream' | 'token_invalid' | 'conflict'
++export const metaAreaFilter = (column: typeof metaProfiles.businessAreaId | typeof metaAdAccounts.businessAreaId | typeof pixelConfigs.businessAreaId, area: string | null = null) =>
++  sql`${column} is not distinct from ${area}::uuid`
+ 
+ export class MetaProfilesError extends Error {
+   constructor(
+@@ -132,10 +135,12 @@ export class MetaProfilesService {
+   // ---------------------------------------------------------------- OAuth
+ 
+   /** URL do Facebook Login com `state` assinado (empresa + usuário + perfil a reconectar). */
+-  async startOAuth(input: { companyId: string; userId: string; profileId?: string | null }): Promise<{ oauth_url: string; state: string }> {
++  async startOAuth(input: { companyId: string; userId: string; profileId?: string | null; businessAreaId?: string }): Promise<{ oauth_url: string; state: string }> {
+     this.assertConfigured()
+-    if (input.profileId) await this.profileRow(input.companyId, input.profileId)
+-    const state = signOAuthState(this.stateKey(), { companyId: input.companyId, userId: input.userId, profileId: input.profileId ?? null }, this.now().getTime())
++    if (input.businessAreaId && !this.configurationStatus().https_callback)
++      throw new MetaProfilesError('not_configured', 'Configure uma URL HTTPS de retorno OAuth no CRM e no app da Meta')
++    if (input.profileId) await this.profileRow(input.companyId, input.profileId, input.businessAreaId)
++    const state = signOAuthState(this.stateKey(), { companyId: input.companyId, userId: input.userId, profileId: input.profileId ?? null, ...(input.businessAreaId ? { businessAreaId: input.businessAreaId } : {}) }, this.now().getTime())
+     return { oauth_url: oauthDialogUrl(this.config, state), state }
+   }
+ 
+@@ -144,10 +149,16 @@ export class MetaProfilesService {
+    * longo, grava o perfil (upsert por usuário Meta) e busca as contas. Qualquer falha → `MetaProfilesError` e nada
+    * é criado.
+    */
+-  async completeOAuth(input: { companyId: string; userId: string; code: string | null | undefined; state: string | null | undefined }): Promise<MetaProfileDto> {
+-    const state = verifyOAuthState(this.stateKey(), input.state, this.now().getTime())
++  readOAuthState(state: string | null | undefined) {
++    return verifyOAuthState(this.stateKey(), state, this.now().getTime())
++  }
++
++  async completeOAuth(input: { companyId: string; userId: string; code: string | null | undefined; state: string | null | undefined; workspaceId?: string }): Promise<MetaProfileDto> {
++    const state = this.readOAuthState(input.state)
+     if (!state || state.companyId !== input.companyId || state.userId !== input.userId) throw new MetaProfilesError('invalid_state', 'state inválido, expirado ou de outra empresa/usuário')
+     if (!input.code) throw new MetaProfilesError('invalid_state', 'code ausente')
++    if (state.businessAreaId !== input.workspaceId) throw new MetaProfilesError('invalid_state', 'Workspace OAuth inválido')
++    const previous = state.profileId ? await this.profileRow(input.companyId, state.profileId, state.businessAreaId) : null
+     const graph = this.graph()
+     const token = await this.upstream(async () => {
+       const short = await graph.get<{ access_token: string }>(
+@@ -162,58 +173,161 @@ export class MetaProfilesService {
+       )
+     })
+     const me = await this.upstream(() => graph.get<{ id: string; name?: string; picture?: { data?: { url?: string } } }>('me', { fields: 'id,name,picture{url}' }, { accessToken: token.access_token }))
++    if (!me.id || (previous && previous.fbUserId !== me.id)) throw new MetaProfilesError('invalid_state', 'Use o mesmo perfil Facebook para reconectar')
+     const expiresAt = token.expires_in ? new Date(this.now().getTime() + token.expires_in * 1000) : null
+-    const profile = await this.upsertProfile(input.companyId, input.userId, me, token.access_token, expiresAt)
+-    await this.syncAccounts(profile, token.access_token)
+-    return this.get(input.companyId, profile.id)
++    const profile = await this.upsertProfile(input.companyId, input.userId, me, token.access_token, expiresAt, state.businessAreaId)
++    if (!state.businessAreaId) await this.syncAccounts(profile, token.access_token)
++    return this.get(input.companyId, profile.id, state.businessAreaId)
+   }
+ 
+   // ---------------------------------------------------------------- perfis
+ 
+-  async list(companyId: string): Promise<MetaProfileDto[]> {
+-    const profiles = await this.db.select().from(metaProfiles).where(eq(metaProfiles.companyId, companyId)).orderBy(asc(metaProfiles.createdAt))
++  async list(companyId: string, area: string | null = null): Promise<MetaProfileDto[]> {
++    const profiles = await this.db.select().from(metaProfiles).where(and(eq(metaProfiles.companyId, companyId), metaAreaFilter(metaProfiles.businessAreaId, area))).orderBy(asc(metaProfiles.createdAt))
+     if (!profiles.length) return []
+     const accounts = await this.db
+       .select()
+       .from(metaAdAccounts)
+-      .where(and(eq(metaAdAccounts.companyId, companyId), inArray(metaAdAccounts.profileId, profiles.map((p) => p.id))))
++      .where(and(eq(metaAdAccounts.companyId, companyId), metaAreaFilter(metaAdAccounts.businessAreaId, area), inArray(metaAdAccounts.profileId, profiles.map((p) => p.id))))
+       .orderBy(asc(metaAdAccounts.name), asc(metaAdAccounts.fbAccountId))
+     return profiles.map((p) => profileDto(p, accounts.filter((a) => a.profileId === p.id)))
+   }
+ 
+-  async get(companyId: string, id: string): Promise<MetaProfileDto> {
+-    const p = await this.profileRow(companyId, id)
+-    const accounts = await this.db.select().from(metaAdAccounts).where(eq(metaAdAccounts.profileId, p.id)).orderBy(asc(metaAdAccounts.name), asc(metaAdAccounts.fbAccountId))
++  async get(companyId: string, id: string, area: string | null = null): Promise<MetaProfileDto> {
++    const p = await this.profileRow(companyId, id, area)
++    const accounts = await this.db.select().from(metaAdAccounts).where(and(eq(metaAdAccounts.companyId, companyId), eq(metaAdAccounts.profileId, p.id), metaAreaFilter(metaAdAccounts.businessAreaId, area))).orderBy(asc(metaAdAccounts.name), asc(metaAdAccounts.fbAccountId))
+     return profileDto(p, accounts)
+   }
+ 
+   /** Remove o perfil e as contas dele (cascata). */
+-  async remove(companyId: string, id: string): Promise<void> {
+-    const p = await this.profileRow(companyId, id)
++  async remove(companyId: string, id: string, area: string | null = null): Promise<void> {
++    const p = await this.profileRow(companyId, id, area)
++    if (area && (await this.get(companyId, id, area)).ad_accounts.length) throw new MetaProfilesError('conflict', 'O perfil possui conta vinculada a este workspace')
+     await this.db.delete(metaProfiles).where(eq(metaProfiles.id, p.id))
+   }
+ 
+   /** Busca as contas na Meta e faz upsert sem mexer em `included_in_dashboard` das existentes (AC-T99-03). */
+-  async refreshAdAccounts(companyId: string, id: string): Promise<MetaProfileDto> {
+-    const p = await this.profileRow(companyId, id)
+-    await this.syncAccounts(p, this.token(p))
++  async refreshAdAccounts(companyId: string, id: string, area: string | null = null): Promise<MetaProfileDto> {
++    const p = await this.profileRow(companyId, id, area)
++    if (area) {
++      for (const a of await this.discover(p)) {
++        await this.db.update(metaAdAccounts).set({
++          name: a.name, currency: a.currency, accountStatus: a.account_status, updatedAt: this.now(),
++        }).where(and(eq(metaAdAccounts.companyId, companyId), eq(metaAdAccounts.businessAreaId, area), eq(metaAdAccounts.profileId, id), eq(metaAdAccounts.fbAccountId, a.fb_account_id)))
++      }
++    } else await this.syncAccounts(p, this.token(p))
+     return this.get(companyId, id)
+   }
+ 
+-  async setIncluded(companyId: string, adAccountId: string, included: boolean): Promise<MetaAdAccountDto> {
++  async setIncluded(companyId: string, adAccountId: string, included: boolean, area: string | null = null): Promise<MetaAdAccountDto> {
+     if (!UUID_RE.test(adAccountId)) throw new MetaProfilesError('not_found', 'Conta de anúncio não encontrada')
+     const [row] = await this.db
+       .update(metaAdAccounts)
+       .set({ includedInDashboard: included, updatedAt: this.now() })
+-      .where(and(eq(metaAdAccounts.companyId, companyId), eq(metaAdAccounts.id, adAccountId)))
++      .where(and(eq(metaAdAccounts.companyId, companyId), eq(metaAdAccounts.id, adAccountId), metaAreaFilter(metaAdAccounts.businessAreaId, area)))
+       .returning()
+     if (!row) throw new MetaProfilesError('not_found', 'Conta de anúncio não encontrada')
+     return accountDto(row)
+   }
+ 
+   /** Token decifrado de um perfil (uso interno de outros módulos Meta, ex.: T101). */
+-  async accessToken(companyId: string, profileId: string): Promise<string> {
+-    return this.token(await this.profileRow(companyId, profileId))
++  async accessToken(companyId: string, profileId: string, area: string | null = null): Promise<string> {
++    return this.token(await this.profileRow(companyId, profileId, area))
++  }
++
++  configurationStatus() {
++    const configured = Boolean(this.config.appId && this.config.appSecret)
++    let httpsCallback = false
++    try {
++      const url = new URL(this.config.redirectUri)
++      httpsCallback = url.protocol === 'https:' && !url.username && !url.password && !url.hash
++    } catch { /* malformed deployment config */ }
++    return { configured, https_callback: httpsCallback, graph_api_version: this.config.version }
++  }
++
++  private async discover(profile: ProfileRow) {
++    const accounts = await this.workspaceGraph(() => this.graph(this.token(profile)).getAll<GraphAdAccount>('me/adaccounts', { fields: META_AD_ACCOUNT_FIELDS, limit: 100 }))
++    return accounts.flatMap(account => {
++      const id = typeof account.id === 'string' ? account.id.replace(/^act_/, '') : ''
++      if (!/^\d{1,32}$/.test(id)) return []
++      return [{ fb_account_id: `act_${id}`, name: account.name ?? null, currency: account.currency ?? null, account_status: account.account_status ?? null }]
++    })
++  }
++
++  async listWorkspaceCandidates(companyId: string, area: string, profileId: string) {
++    const profile = await this.profileRow(companyId, profileId, area)
++    const candidates = await this.discover(profile)
++    const elsewhere = await this.db.select({ id: metaAdAccounts.fbAccountId }).from(metaAdAccounts).where(and(
++      eq(metaAdAccounts.companyId, companyId), isNotNull(metaAdAccounts.businessAreaId), sql`${metaAdAccounts.businessAreaId} <> ${area}`,
++    ))
++    const unavailable = new Set(elsewhere.map(a => a.id))
++    return candidates.filter(account => !unavailable.has(account.fb_account_id))
++  }
++
++  async linkWorkspaceAccount(companyId: string, area: string, profileId: string, fbAccountId: string) {
++    const found = (await this.listWorkspaceCandidates(companyId, area, profileId)).find(a => a.fb_account_id === fbAccountId)
++    if (!found) throw new MetaProfilesError('not_found', 'Conta indisponível neste workspace ou no perfil da Meta')
++    const [row] = await this.db.insert(metaAdAccounts).values({
++      companyId, businessAreaId: area, profileId, fbAccountId, name: found.name, currency: found.currency, accountStatus: found.account_status,
++      includedInDashboard: true,
++    }).onConflictDoNothing().returning()
++    if (row) return accountDto(row)
++    const existing = await this.workspaceAccount(companyId, area, fbAccountId, true)
++    if (existing?.profileId === profileId) return accountDto(existing)
++    throw new MetaProfilesError('conflict', 'A conta já possui vínculo com outro perfil ou workspace')
++  }
++
++  private async workspaceAccount(companyId: string, area: string, id: string, graphId = false) {
++    const [account] = await this.db.select().from(metaAdAccounts).where(and(
++      eq(metaAdAccounts.companyId, companyId), eq(metaAdAccounts.businessAreaId, area),
++      eq(graphId ? metaAdAccounts.fbAccountId : metaAdAccounts.id, id),
++    )).limit(1)
++    return account
++  }
++
++  private async workspacePixelAccess(companyId: string, area: string, accountId: string) {
++    const account = await this.workspaceAccount(companyId, area, accountId)
++    if (!account || !/^act_\d{1,32}$/.test(account.fbAccountId)) throw new MetaProfilesError('not_found', 'Conta não vinculada a este workspace')
++    const token = await this.accessToken(companyId, account.profileId, area)
++    const pixels = await this.workspaceGraph(() => this.graph(token).getAll<{ id: string; name?: string }>(`${account.fbAccountId}/adspixels`, { fields: 'id,name', limit: 100 }))
++    return { token, pixels: pixels.filter(p => typeof p.id === 'string' && /^\d{1,32}$/.test(p.id)).map(p => ({ pixel_id: p.id, name: typeof p.name === 'string' ? p.name : null })) }
++  }
++
++  async listWorkspacePixels(companyId: string, area: string, accountId: string) {
++    const { pixels } = await this.workspacePixelAccess(companyId, area, accountId)
++    const linked = await this.db.select({ pixelId: pixelConfigs.pixelId, accountId: pixelConfigs.metaAdAccountId }).from(pixelConfigs).where(and(
++      eq(pixelConfigs.companyId, companyId), isNotNull(pixelConfigs.businessAreaId),
++    ))
++    const unavailable = new Set(linked.filter(p => p.accountId !== accountId).map(p => p.pixelId))
++    return pixels.filter(pixel => !unavailable.has(pixel.pixel_id))
++  }
++
++  async linkWorkspacePixel(companyId: string, area: string, accountId: string, pixelId: string, refreshToken = false) {
++    const { pixels, token } = await this.workspacePixelAccess(companyId, area, accountId)
++    const pixel = pixels.find(p => p.pixel_id === pixelId)
++    if (!pixel) throw new MetaProfilesError('not_found', 'Pixel não disponível nesta conta de anúncio')
++    const id = randomUUID()
++    const encrypted = (recordId: string) => serializeEncrypted(this.cipher().encrypt(token, pixelTokenAad(recordId)))
++    const [created] = await this.db.insert(pixelConfigs).values({
++      id, companyId, businessAreaId: area, metaAdAccountId: accountId, pixelId,
++      name: (pixel.name && pixel.name.trim().length >= 2 ? pixel.name.trim() : `Pixel ${pixelId}`).slice(0, 255), accessTokenEnc: encrypted(id),
++    }).onConflictDoNothing().returning({ id: pixelConfigs.id })
++    if (created) return { id: created.id, ...pixel, ad_account_id: accountId }
++    const [existing] = await this.db.select({ id: pixelConfigs.id }).from(pixelConfigs).where(and(
++      eq(pixelConfigs.companyId, companyId), eq(pixelConfigs.businessAreaId, area), eq(pixelConfigs.metaAdAccountId, accountId), eq(pixelConfigs.pixelId, pixelId),
++    )).limit(1)
++    if (!existing) throw new MetaProfilesError('conflict', 'Pixel já vinculado a outra conta ou workspace')
++    if (refreshToken) await this.db.update(pixelConfigs).set({ accessTokenEnc: encrypted(existing.id), updatedAt: this.now() }).where(eq(pixelConfigs.id, existing.id))
++    return { id: existing.id, ...pixel, ad_account_id: accountId }
++  }
++
++  /** Read checks never mutate cached credentials or return provider text which may include private values. */
++  private async workspaceGraph<T>(fn: () => Promise<T>): Promise<T> {
++    try { return await fn() } catch (error) {
++      if (!(error instanceof MetaGraphError)) throw error
++      if (error.isTokenError) throw new MetaProfilesError('token_invalid', 'Token da Meta inválido ou expirado: reconecte o perfil')
++      throw new MetaProfilesError('upstream', 'A Meta recusou a consulta ou não respondeu', { graph_code: typeof error.code === 'number' ? error.code : null })
++    }
+   }
+ 
+   // ---------------------------------------------------------------- internos
+@@ -234,9 +348,9 @@ export class MetaProfilesService {
+     return this.cipher().decrypt<string>(parseEncrypted<string>(p.accessTokenEnc), tokenAad(p.id))
+   }
+ 
+-  private async profileRow(companyId: string, id: string): Promise<ProfileRow> {
++  private async profileRow(companyId: string, id: string, area: string | null = null): Promise<ProfileRow> {
+     if (!UUID_RE.test(id)) throw new MetaProfilesError('not_found', 'Perfil Meta não encontrado')
+-    const [p] = await this.db.select().from(metaProfiles).where(and(eq(metaProfiles.companyId, companyId), eq(metaProfiles.id, id))).limit(1)
++    const [p] = await this.db.select().from(metaProfiles).where(and(eq(metaProfiles.companyId, companyId), eq(metaProfiles.id, id), metaAreaFilter(metaProfiles.businessAreaId, area))).limit(1)
+     if (!p) throw new MetaProfilesError('not_found', 'Perfil Meta não encontrado')
+     return p
+   }
+@@ -247,24 +361,28 @@ export class MetaProfilesService {
+     me: { id: string; name?: string; picture?: { data?: { url?: string } } },
+     accessToken: string,
+     expiresAt: Date | null,
++    area: string | null = null,
+   ): Promise<ProfileRow> {
+-    const [existing] = await this.db.select().from(metaProfiles).where(and(eq(metaProfiles.companyId, companyId), eq(metaProfiles.fbUserId, me.id))).limit(1)
+-    const id = existing?.id ?? randomUUID()
+-    const values = {
+-      fbUserName: me.name ?? null,
+-      pictureUrl: me.picture?.data?.url ?? null,
+-      accessTokenEnc: serializeEncrypted(this.cipher().encrypt(accessToken, tokenAad(id))),
+-      tokenExpiresAt: expiresAt,
+-      active: true,
+-      connectedByUserId: userId,
+-      updatedAt: this.now(),
+-    }
+-    if (existing) {
+-      const [row] = await this.db.update(metaProfiles).set(values).where(eq(metaProfiles.id, id)).returning()
++    return this.db.transaction(async tx => {
++      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${JSON.stringify(['meta-profile', companyId, area, me.id])},0))`)
++      const [existing] = await tx.select().from(metaProfiles).where(and(eq(metaProfiles.companyId, companyId), eq(metaProfiles.fbUserId, me.id), metaAreaFilter(metaProfiles.businessAreaId, area))).limit(1)
++      const id = existing?.id ?? randomUUID()
++      const values = {
++        fbUserName: me.name ?? null,
++        pictureUrl: me.picture?.data?.url ?? null,
++        accessTokenEnc: serializeEncrypted(this.cipher().encrypt(accessToken, tokenAad(id))),
++        tokenExpiresAt: expiresAt,
++        active: true,
++        connectedByUserId: userId,
++        updatedAt: this.now(),
++      }
++      if (existing) {
++        const [row] = await tx.update(metaProfiles).set(values).where(eq(metaProfiles.id, id)).returning()
++        return row!
++      }
++      const [row] = await tx.insert(metaProfiles).values({ id, companyId, businessAreaId: area, fbUserId: me.id, ...values }).returning()
+       return row!
+-    }
+-    const [row] = await this.db.insert(metaProfiles).values({ id, companyId, fbUserId: me.id, ...values }).returning()
+-    return row!
++    })
+   }
+ 
+   private async syncAccounts(p: ProfileRow, accessToken: string): Promise<void> {
+diff --git a/packages/core/src/meta-ads/sales-join/service.ts b/packages/core/src/meta-ads/sales-join/service.ts
+index 8b17152209105fa5e164e43ebfd3cbac63d05318..83f65c17352f1845bd031e7fd79501e1f3d76051 100644
+--- a/packages/core/src/meta-ads/sales-join/service.ts
++++ b/packages/core/src/meta-ads/sales-join/service.ts
+@@ -35,6 +35,7 @@ export class InternalSalesError extends Error {
+ 
+ export interface InternalSalesQuery {
+   companyId: string
++  businessAreaId?: string
+   /** `YYYY-MM-DD` no fuso da empresa (inclusive). */
+   since: string
+   until: string
+@@ -47,10 +48,11 @@ export interface InternalSalesQuery {
+ }
+ 
+ /** Contrato da opção `internalSales` do `MetaBundleService` (T101): preenche as linhas e devolve avisos. */
++type SalesPeriod = { since: string; until: string; displayCurrency: string; businessAreaId?: string }
+ export interface SalesJoin {
+   apply(
+     companyId: string,
+-    period: { since: string; until: string; displayCurrency: string },
++    period: SalesPeriod,
+     rows: JoinRows,
+   ): Promise<{ warnings: string[] }>
+ }
+@@ -108,6 +110,10 @@ export class InternalSalesService implements SalesJoin {
+           gte(sales.soldAt, lo),
+           lt(sales.soldAt, hi),
+           inArray(sales.sourceId, ids),
++          q.businessAreaId ? sql`exists (
++            select 1 from crm.offer_opportunities o where o.company_id=${sales.companyId} and o.id=${sales.opportunityId}
++              and o.snapshot->>'business_area_id'=${q.businessAreaId}
++          )` : undefined,
+           q.confidence === 'probable' ? eq(sales.attributionConfidence, 'probable') : inArray(sales.attributionConfidence, ['confirmed_native', 'confirmed_link']),
+         ),
+       )
+@@ -123,11 +129,12 @@ export class InternalSalesService implements SalesJoin {
+   /** Consulta + cruzamento (sem gravar nas linhas). */
+   async join(
+     companyId: string,
+-    period: { since: string; until: string; displayCurrency: string; timeZone?: string; confidence?: 'confirmed' | 'probable' },
++    period: SalesPeriod & { timeZone?: string; confidence?: 'confirmed' | 'probable' },
+     rows: JoinRows,
+   ): Promise<JoinResult> {
+     const aggregates = await this.aggregates({
+       companyId,
++      ...(period.businessAreaId ? { businessAreaId: period.businessAreaId } : {}),
+       ...(period.confidence ? { confidence: period.confidence } : {}),
+       since: period.since,
+       until: period.until,
+@@ -143,7 +150,7 @@ export class InternalSalesService implements SalesJoin {
+    */
+   async apply(
+     companyId: string,
+-    period: { since: string; until: string; displayCurrency: string },
++    period: SalesPeriod,
+     rows: JoinRows,
+   ): Promise<{ warnings: string[] }> {
+     const result = await this.join(companyId, period, rows)
+diff --git a/packages/core/src/meta-ads/structure/service.ts b/packages/core/src/meta-ads/structure/service.ts
+index 8e0fbf91e11bf23ecf6e32816e1c997d4e0a0c00..30d68c05bb2ba576e7d4ac312bc1f241179e2811 100644
+--- a/packages/core/src/meta-ads/structure/service.ts
++++ b/packages/core/src/meta-ads/structure/service.ts
+@@ -6,7 +6,7 @@ import { randomBytes } from 'node:crypto'
+ import { and, asc, eq, inArray } from 'drizzle-orm'
+ import { companies, metaAdAccounts, type Database } from '@crm/db'
+ import type { Redis } from 'ioredis'
+-import type { MetaProfilesService } from '../profiles/service'
++import { metaAreaFilter, type MetaProfilesService } from '../profiles/service'
+ import type { SalesJoin } from '../sales-join/service'
+ import { fetchAccountRows, MetaRateLimitedError, type BundleAccount, type BundleRow } from './account'
+ import { fxRatesFromEnv, type FxRate } from './metrics'
+@@ -46,6 +46,7 @@ export interface BundleEnvelope {
+ 
+ export interface MetaSyncJobData {
+   companyId: string
++  businessAreaId?: string
+   bundleKey: string
+   params: BundleParams
+   accountIds: string[]
+@@ -73,6 +74,7 @@ export interface MetaBundleServiceOptions {
+ }
+ 
+ export interface BundleRequest extends RawBundleQuery {
++  businessAreaId?: string | null
+   force_refresh?: boolean
+   async?: boolean
+ }
+@@ -142,7 +144,8 @@ export class MetaBundleService {
+    */
+   async getBundle(companyId: string, req: BundleRequest): Promise<BundleEnvelope> {
+     const params = await this.params(companyId, req)
+-    const accounts = await this.accounts(companyId, params.adAccountIds)
++    const area = req.businessAreaId ?? null
++    const accounts = await this.accounts(companyId, params.adAccountIds, area)
+     const key = bundleKey(companyId, params, accounts.map((a) => a.id))
+     if (accounts.length === 0) return { ...this.empty(key, params, 'ready', 0), warnings: ['no_ad_accounts'] }
+ 
+@@ -163,7 +166,7 @@ export class MetaBundleService {
+       // Mesma janela de limite = mesmo job (dedupe); force_refresh gera um novo.
+       if (req.async && this.opts.enqueue) {
+         const force = req.force_refresh ?? false
+-        await this.enqueue(companyId, key, params, accounts, force, force ? undefined : `bundle-${key}-rl-${blockedUntil}`)
++        await this.enqueue(companyId, key, params, accounts, force, area, force ? undefined : `bundle-${key}-rl-${blockedUntil}`)
+       }
+       return this.rateLimitedFallback(key, params, accounts.length)
+     }
+@@ -173,12 +176,12 @@ export class MetaBundleService {
+       if (req.force_refresh) await this.save('state', key, state, BUNDLE_STATE_TTL_S)
+       // T129: o estado é a trava de concorrência (SET NX): quem não grava não enfileira e devolve o estado do outro.
+       else if (!(await this.claimState(key, state))) return (await this.read(this.k('state', key))) ?? state
+-      await this.publish(companyId, state)
+-      await this.enqueue(companyId, key, params, accounts, req.force_refresh ?? false)
++      if (!area) await this.publish(companyId, state)
++      await this.enqueue(companyId, key, params, accounts, req.force_refresh ?? false, area)
+       return state
+     }
+     try {
+-      return await this.build(companyId, key, params, accounts)
++      return await this.build(companyId, key, params, accounts, area)
+     } catch (err) {
+       if (err instanceof MetaRateLimitedError) return this.rateLimitedFallback(key, params, accounts.length)
+       throw err
+@@ -191,17 +194,18 @@ export class MetaBundleService {
+    * com `rate_limited`, ou `ready` vazio com o aviso), para o GET async e o SSE saírem de `loading`/`refreshing`.
+    */
+   async runJob(data: MetaSyncJobData): Promise<BundleEnvelope> {
+-    const accounts = await this.accounts(data.companyId, data.accountIds)
++    const area = data.businessAreaId ?? null
++    const accounts = data.accountIds.length ? await this.accounts(data.companyId, data.accountIds, area) : []
+     try {
+       const blockedUntil = await this.blockedUntil(accounts)
+       if (blockedUntil > this.now().getTime()) throw new MetaRateLimitedError(blockedUntil, 'conta em espera de limite de uso')
+-      return await this.build(data.companyId, data.bundleKey, data.params, accounts)
++      return await this.build(data.companyId, data.bundleKey, data.params, accounts, area)
+     } catch (err) {
+       if (err instanceof MetaRateLimitedError) {
+         const env = await this.rateLimitedFallback(data.bundleKey, data.params, accounts.length)
+         const ttl = Math.min(BUNDLE_STATE_TTL_S, Math.max(1, Math.ceil((err.retryAt - this.now().getTime()) / 1000)))
+         await this.save('state', data.bundleKey, env, ttl)
+-        await this.publish(data.companyId, env)
++        if (!area) await this.publish(data.companyId, env)
+       }
+       throw err
+     }
+@@ -249,7 +253,7 @@ export class MetaBundleService {
+   /** Limpa o cache dos bundles da empresa (ex.: conta incluída/excluída do dashboard). Não há índice: expira em 5 min. */
+   async invalidate(companyId: string, req: BundleRequest): Promise<void> {
+     const params = await this.params(companyId, req)
+-    const accounts = await this.accounts(companyId, params.adAccountIds)
++    const accounts = await this.accounts(companyId, params.adAccountIds, req.businessAreaId)
+     const key = bundleKey(companyId, params, accounts.map((a) => a.id))
+     await this.redis.del(this.k('bundle', key))
+     await this.redis.del(await this.bundleCacheKey(companyId, key))
+@@ -257,14 +261,14 @@ export class MetaBundleService {
+ 
+   // ---------------------------------------------------------------- montagem
+ 
+-  private async build(companyId: string, key: string, params: BundleParams, accounts: AccountRow[]): Promise<BundleEnvelope> {
++  private async build(companyId: string, key: string, params: BundleParams, accounts: AccountRow[], area: string | null): Promise<BundleEnvelope> {
+     // T103: geração lida no início — uma edição durante a montagem não deixa este bundle (anterior a ela) no cache novo.
+     const cacheKey = await this.bundleCacheKey(companyId, key)
+     const env = this.empty(key, params, 'loading', accounts.length)
+     const fxMissing = new Set<string>()
+     for (const [i, a] of accounts.entries()) {
+       try {
+-        const graph = this.opts.profiles.graph(await this.opts.profiles.accessToken(companyId, a.profileId))
++        const graph = this.opts.profiles.graph(await this.opts.profiles.accessToken(companyId, a.profileId, area))
+         const rows = await fetchAccountRows(graph, a, { since: params.since, until: params.until, statusFilter: params.statusFilter, displayCurrency: params.displayCurrency, fx: this.fx, now: () => this.now().getTime() })
+         env.campaign.push(...rows.campaign)
+         env.adset.push(...rows.adset)
+@@ -282,13 +286,13 @@ export class MetaBundleService {
+       if (i + 1 < accounts.length) {
+         env.status = 'partial'
+         await this.save('state', key, env, BUNDLE_STATE_TTL_S)
+-        await this.publish(companyId, env)
++        if (!area) await this.publish(companyId, env)
+       }
+     }
+     // T105: vendas internas por `source_id`; falha no cruzamento não derruba o bundle (aviso `internal_sales_failed`).
+     if (this.opts.internalSales) {
+       try {
+-        const joined = await this.opts.internalSales.apply(companyId, { since: params.since, until: params.until, displayCurrency: params.displayCurrency }, env)
++        const joined = await this.opts.internalSales.apply(companyId, { since: params.since, until: params.until, displayCurrency: params.displayCurrency, ...(area ? { businessAreaId: area } : {}) }, env)
+         for (const w of joined.warnings) fxMissing.add(w)
+       } catch (err) {
+         fxMissing.add('internal_sales_failed')
+@@ -305,7 +309,7 @@ export class MetaBundleService {
+     // sem reler em laço); ao expirar, o próximo GET enfileira um job novo.
+     if (env.errors.length === 0) await this.redis.del(this.k('state', key))
+     else await this.save('state', key, env, BUNDLE_ERROR_TTL_S)
+-    await this.publish(companyId, env)
++    if (!area) await this.publish(companyId, env)
+     return env
+   }
+ 
+@@ -320,9 +324,9 @@ export class MetaBundleService {
+    * T129: jobId único por geração. O fixo `bundle-<key>` colidia com o job concluído que o BullMQ retém (24 h): o
+    * `add` era ignorado e o estado ficava em `loading`. A dedupe de concorrência é a trava do estado (`claimState`).
+    */
+-  private async enqueue(companyId: string, key: string, params: BundleParams, accounts: AccountRow[], force: boolean, jobId?: string): Promise<void> {
++  private async enqueue(companyId: string, key: string, params: BundleParams, accounts: AccountRow[], force: boolean, area: string | null, jobId?: string): Promise<void> {
+     const id = jobId ?? `bundle-${key}-${this.now().getTime().toString(36)}${randomBytes(3).toString('hex')}`
+-    await this.opts.enqueue!({ companyId, bundleKey: key, params, accountIds: accounts.map((a) => a.id), force }, { jobId: id })
++    await this.opts.enqueue!({ companyId, bundleKey: key, params, accountIds: accounts.map((a) => a.id), force, ...(area ? { businessAreaId: area } : {}) }, { jobId: id })
+   }
+ 
+   private async claimState(key: string, state: BundleEnvelope): Promise<boolean> {
+@@ -367,8 +371,8 @@ export class MetaBundleService {
+   }
+ 
+   /** Contas efetivas: incluídas no dashboard ∩ filtro (ids locais); ordenadas. */
+-  private async accounts(companyId: string, filter: string[]): Promise<AccountRow[]> {
+-    const where = [eq(metaAdAccounts.companyId, companyId), eq(metaAdAccounts.includedInDashboard, true)]
++  private async accounts(companyId: string, filter: string[], area: string | null = null): Promise<AccountRow[]> {
++    const where = [eq(metaAdAccounts.companyId, companyId), eq(metaAdAccounts.includedInDashboard, true), metaAreaFilter(metaAdAccounts.businessAreaId, area)]
+     const uuids = filter.filter((id) => /^[0-9a-f-]{36}$/i.test(id))
+     if (filter.length) where.push(uuids.length ? inArray(metaAdAccounts.id, uuids) : eq(metaAdAccounts.id, '00000000-0000-0000-0000-000000000000'))
+     const rows = await this.db
+diff --git a/packages/core/src/meta-capi/pixels.ts b/packages/core/src/meta-capi/pixels.ts
+index 40d9d0efb61ecc7afcd6c52f29a1c72aa4997635..b578390c1da1dd88120a93176742948a2b6f9005 100644
+--- a/packages/core/src/meta-capi/pixels.ts
++++ b/packages/core/src/meta-capi/pixels.ts
+@@ -6,7 +6,7 @@ import { isOfferDestinationLocked } from '../offers/service'
+ // `action_source: business_messaging`), `test_event_code` por pixel, país padrão e Lead automático de anúncio.
+ // Doc: https://developers.facebook.com/docs/marketing-api/conversions-api/business-messaging
+ import { randomUUID } from 'node:crypto'
+-import { and, asc, eq } from 'drizzle-orm'
++import { and, asc, eq, sql } from 'drizzle-orm'
+ import { pixelConfigs, type Database } from '@crm/db'
+ import { getCredentialsCipher, parseEncrypted, serializeEncrypted, type CredentialCipher } from '@crm/node-kit'
+ 
+@@ -91,13 +91,15 @@ export class PixelConfigService {
+     return this.opts.now?.() ?? new Date()
+   }
+ 
+-  async list(companyId: string): Promise<PixelConfigDto[]> {
+-    const rows = await this.opts.db.select().from(pixelConfigs).where(eq(pixelConfigs.companyId, companyId)).orderBy(asc(pixelConfigs.name), asc(pixelConfigs.createdAt))
++  async list(companyId: string, area: string | null = null): Promise<PixelConfigDto[]> {
++    const rows = await this.opts.db.select().from(pixelConfigs).where(and(eq(pixelConfigs.companyId, companyId), sql`${pixelConfigs.businessAreaId} is not distinct from ${area}::uuid`)).orderBy(asc(pixelConfigs.name), asc(pixelConfigs.createdAt))
+     return rows.map((r) => this.dto(r, false))
+   }
+ 
+-  async get(companyId: string, id: string, opts: { includeAccessToken?: boolean } = {}): Promise<PixelConfigDto> {
+-    return this.dto(await this.row(companyId, id), opts.includeAccessToken ?? false)
++  async get(companyId: string, id: string, opts: { includeAccessToken?: boolean; area?: string | null } = {}): Promise<PixelConfigDto> {
++    const row = await this.row(companyId, id, opts.area)
++    const data = this.dto(row, !opts.area && (opts.includeAccessToken ?? false))
++    return opts.area && opts.includeAccessToken ? { ...data, pixel_id: row.pixelId } : data
+   }
+ 
+   async create(companyId: string, input: PixelConfigInput): Promise<PixelConfigDto> {
+@@ -124,8 +126,11 @@ export class PixelConfigService {
+   }
+ 
+   /** Token vazio/ausente na edição = manter o atual. */
+-  async update(companyId: string, id: string, input: PixelConfigInput): Promise<PixelConfigDto> {
+-    const cur = await this.row(companyId, id)
++  async update(companyId: string, id: string, input: PixelConfigInput, area: string | null = null): Promise<PixelConfigDto> {
++    const cur = await this.row(companyId, id, area)
++    if (area && ((input.pixel_id !== undefined && String(input.pixel_id) !== cur.pixelId) || input.auto_send_sales || input.auto_lead_on_ad)) {
++      throw new PixelConfigError('validation', 'O vínculo define o Pixel ID. Eventos automáticos globais ficam desativados para pixels de workspace.')
++    }
+     const v = this.validate(input, false)
+     const [row] = await this.opts.db
+       .update(pixelConfigs)
+@@ -151,8 +156,8 @@ export class PixelConfigService {
+     return this.dto(row!, false)
+   }
+ 
+-  async remove(companyId: string, id: string): Promise<void> {
+-    const cur = await this.row(companyId, id)
++  async remove(companyId: string, id: string, area: string | null = null): Promise<void> {
++    const cur = await this.row(companyId, id, area)
+     await this.opts.db.delete(pixelConfigs).where(eq(pixelConfigs.id, cur.id)).catch(error=>{if(isOfferDestinationLocked(error)) throw new PixelConfigError('validation','Pixel referenciado por oferta: preserve este registro e crie um novo registro.');throw error})
+   }
+ 
+@@ -161,9 +166,9 @@ export class PixelConfigService {
+     return this.cipher().decrypt<string>(parseEncrypted<string>(row.accessTokenEnc), tokenAad(row.id))
+   }
+ 
+-  private async row(companyId: string, id: string): Promise<Row> {
++  private async row(companyId: string, id: string, area: string | null = null): Promise<Row> {
+     if (!UUID_RE.test(id)) throw new PixelConfigError('not_found', 'Pixel não encontrado')
+-    const [row] = await this.opts.db.select().from(pixelConfigs).where(and(eq(pixelConfigs.companyId, companyId), eq(pixelConfigs.id, id))).limit(1)
++    const [row] = await this.opts.db.select().from(pixelConfigs).where(and(eq(pixelConfigs.companyId, companyId), eq(pixelConfigs.id, id), sql`${pixelConfigs.businessAreaId} is not distinct from ${area}::uuid`)).limit(1)
+     if (!row) throw new PixelConfigError('not_found', 'Pixel não encontrado')
+     return row
+   }
+@@ -211,7 +216,7 @@ export class PixelConfigService {
+   }
+ 
+   private dto(r: Row, includeToken: boolean): PixelConfigDto {
+-    const token = this.accessToken(r)
++    const token = r.businessAreaId && !includeToken ? '' : this.accessToken(r)
+     return {
+       id: r.id,
+       name: r.name,
+diff --git a/packages/core/src/offers/service.ts b/packages/core/src/offers/service.ts
+index 82872dfa9197577ea4e1719b1b76f9070b3874a3..696a94294a6ee96c8a28a99796b0394456e6c101 100644
+--- a/packages/core/src/offers/service.ts
++++ b/packages/core/src/offers/service.ts
+@@ -81,8 +81,8 @@ export class OffersService {
+         ${area !== undefined ? sql`and ${workspaceFlowFilter(company, area, sql`f.id`)}` : sql``}`,
+       connections: sql`select id,name from crm.connections where company_id=${company}`,
+       integrations: sql`select id,label as name from crm.payment_integrations where company_id=${company} and gateway='xpag'`,
+-      accounts: sql`select id,coalesce(name,fb_account_id) as name,currency from crm.meta_ad_accounts where company_id=${company}`,
+-      pixels: sql`select id,name from crm.pixel_configs where company_id=${company}`,
++      accounts: sql`select id,coalesce(name,fb_account_id) as name,currency from crm.meta_ad_accounts where company_id=${company} and business_area_id is not distinct from ${area ?? null}::uuid`,
++      pixels: sql`select id,name,meta_ad_account_id from crm.pixel_configs where company_id=${company} and business_area_id is not distinct from ${area ?? null}::uuid`,
+       links: sql`select id,name from crm.tracked_links where company_id=${company}`,
+     }))
+       result[key] = (await this.db.execute(query)).rows
+@@ -120,7 +120,7 @@ export class OffersService {
+       throw new OfferError('Origem inválida')
+     if (c.cost_cents != null && (!Number.isSafeInteger(c.cost_cents) || c.cost_cents < 0 || !c.cost_label?.trim()))
+       throw new OfferError('Identifique o custo informado (centavos, não negativo)')
+-    const resources = (await this.resources(company,area)) as Record<string, { id: string; currency?: string }[]>
++    const resources = (await this.resources(company,area)) as Record<string, { id: string; currency?: string; meta_ad_account_id?: string | null }[]>
+     for (const [key, group] of [
+       ['owner_user_id', 'members'],
+       ['product_id', 'products'],
+@@ -133,6 +133,8 @@ export class OffersService {
+         throw new OfferError(`Recurso não pertence à empresa ou não está disponível: ${key}`)
+     if (resources.products!.find((x) => x.id === c.product_id)?.currency !== c.currency)
+       throw new OfferError('Moeda incompatível com produto')
++    if (area && resources.pixels!.find(x => x.id === c.pixel_id)?.meta_ad_account_id !== c.ad_account_id)
++      throw new OfferError('O pixel precisa estar vinculado à conta de anúncio escolhida')
+     for (const conn of c.connection_ids)
+       if (!resources.connections!.some((x) => x.id === conn)) throw new OfferError('Chip de outra empresa')
+     for (const origin of c.origins)
+diff --git a/packages/db/drizzle/crm/0047_workspace_meta.sql b/packages/db/drizzle/crm/0047_workspace_meta.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..0a14d63c1a9b471269fabf69ae34cfc0a3a2974a
+--- /dev/null
++++ b/packages/db/drizzle/crm/0047_workspace_meta.sql
+@@ -0,0 +1,30 @@
++ALTER TABLE crm.meta_profiles ADD COLUMN business_area_id uuid;
++--> statement-breakpoint
++ALTER TABLE crm.meta_profiles
++  ADD CONSTRAINT meta_profiles_area_fk FOREIGN KEY (company_id, business_area_id) REFERENCES crm.business_areas(company_id,id),
++  ADD CONSTRAINT meta_profiles_area_identity_uq UNIQUE (company_id,business_area_id,id);
++--> statement-breakpoint
++DROP INDEX crm.meta_profiles_company_fb_user_uq;
++--> statement-breakpoint
++CREATE UNIQUE INDEX meta_profiles_company_fb_user_uq ON crm.meta_profiles(company_id,fb_user_id) WHERE business_area_id IS NULL;
++--> statement-breakpoint
++CREATE UNIQUE INDEX meta_profiles_workspace_fb_user_uq ON crm.meta_profiles(company_id,business_area_id,fb_user_id) WHERE business_area_id IS NOT NULL;
++--> statement-breakpoint
++ALTER TABLE crm.meta_ad_accounts ADD COLUMN business_area_id uuid;
++--> statement-breakpoint
++ALTER TABLE crm.meta_ad_accounts
++  ADD CONSTRAINT meta_ad_accounts_area_profile_fk FOREIGN KEY (company_id,business_area_id,profile_id) REFERENCES crm.meta_profiles(company_id,business_area_id,id),
++  ADD CONSTRAINT meta_ad_accounts_area_identity_uq UNIQUE (company_id,business_area_id,id);
++--> statement-breakpoint
++CREATE UNIQUE INDEX meta_ad_accounts_workspace_identity_uq ON crm.meta_ad_accounts(company_id,fb_account_id) WHERE business_area_id IS NOT NULL;
++--> statement-breakpoint
++ALTER TABLE crm.pixel_configs ADD COLUMN business_area_id uuid, ADD COLUMN meta_ad_account_id uuid;
++--> statement-breakpoint
++ALTER TABLE crm.pixel_configs
++  ADD CONSTRAINT pixel_configs_area_account_fk FOREIGN KEY (company_id,business_area_id,meta_ad_account_id) REFERENCES crm.meta_ad_accounts(company_id,business_area_id,id),
++  ADD CONSTRAINT pixel_configs_workspace_ck CHECK (
++    (business_area_id IS NULL AND meta_ad_account_id IS NULL) OR
++    (business_area_id IS NOT NULL AND meta_ad_account_id IS NOT NULL AND NOT auto_send_sales AND NOT auto_lead_on_ad)
++  );
++--> statement-breakpoint
++CREATE UNIQUE INDEX pixel_configs_workspace_identity_uq ON crm.pixel_configs(company_id,pixel_id) WHERE business_area_id IS NOT NULL;
+diff --git a/packages/db/drizzle/crm/meta/_journal.json b/packages/db/drizzle/crm/meta/_journal.json
+index 920272262b69af9a5bfe478c179f4cd4cf129e1e..265680ff22f7d19a9c9fd2cd82a11082ee2674bf 100644
+--- a/packages/db/drizzle/crm/meta/_journal.json
++++ b/packages/db/drizzle/crm/meta/_journal.json
+@@ -330,6 +330,13 @@
+       "when": 1795023000000,
+       "tag": "0046_workspace_flow_sharing",
+       "breakpoints": true
++    },
++    {
++      "idx": 47,
++      "version": "7",
++      "when": 1795037400000,
++      "tag": "0047_workspace_meta",
++      "breakpoints": true
+     }
+   ]
+ }
+diff --git a/packages/db/src/schema/crm/meta-ads.ts b/packages/db/src/schema/crm/meta-ads.ts
+index 03ec780883e648ec23a0dc6f40c0056d668aac9b..c0ed23a5bafa7cfde163523198bff06c534201ae 100644
+--- a/packages/db/src/schema/crm/meta-ads.ts
++++ b/packages/db/src/schema/crm/meta-ads.ts
+@@ -1,5 +1,7 @@
+-import { boolean, index, integer, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core'
++import { sql } from 'drizzle-orm'
++import { boolean, foreignKey, index, integer, text, timestamp, unique, uniqueIndex, uuid } from 'drizzle-orm/pg-core'
+ import { companies, users } from './base.js'
++import { businessAreas } from './business-areas.js'
+ import { createdAt, crm, updatedAt } from './schema.js'
+ 
+ // Meta Ads (T99; 11 §3.1–3.2): perfis Meta conectados por OAuth (um login por perfil, N por empresa) e as contas de
+@@ -15,6 +17,7 @@ export const metaProfiles = crm.table(
+   {
+     id: uuid('id').primaryKey().defaultRandom(),
+     companyId: companyId(),
++    businessAreaId: uuid('business_area_id'),
+     /** Id do usuário na Meta (`/me.id`). */
+     fbUserId: text('fb_user_id').notNull(),
+     fbUserName: text('fb_user_name'),
+@@ -27,7 +30,13 @@ export const metaProfiles = crm.table(
+     createdAt: createdAt(),
+     updatedAt: updatedAt(),
+   },
+-  (t) => [uniqueIndex('meta_profiles_company_fb_user_uq').on(t.companyId, t.fbUserId), index('meta_profiles_company_idx').on(t.companyId, t.createdAt)],
++  (t) => [
++    foreignKey({ name: 'meta_profiles_area_fk', columns: [t.companyId,t.businessAreaId], foreignColumns: [businessAreas.companyId,businessAreas.id] }),
++    unique('meta_profiles_area_identity_uq').on(t.companyId,t.businessAreaId,t.id),
++    uniqueIndex('meta_profiles_company_fb_user_uq').on(t.companyId, t.fbUserId).where(sql`${t.businessAreaId} is null`),
++    uniqueIndex('meta_profiles_workspace_fb_user_uq').on(t.companyId,t.businessAreaId,t.fbUserId).where(sql`${t.businessAreaId} is not null`),
++    index('meta_profiles_company_idx').on(t.companyId,t.createdAt),
++  ],
+ )
+ 
+ export const metaAdAccounts = crm.table(
+@@ -35,6 +44,7 @@ export const metaAdAccounts = crm.table(
+   {
+     id: uuid('id').primaryKey().defaultRandom(),
+     companyId: companyId(),
++    businessAreaId: uuid('business_area_id'),
+     profileId: uuid('profile_id')
+       .notNull()
+       .references(() => metaProfiles.id, { onDelete: 'cascade' }),
+@@ -49,5 +59,11 @@ export const metaAdAccounts = crm.table(
+     createdAt: createdAt(),
+     updatedAt: updatedAt(),
+   },
+-  (t) => [uniqueIndex('meta_ad_accounts_profile_account_uq').on(t.profileId, t.fbAccountId), index('meta_ad_accounts_company_idx').on(t.companyId, t.profileId)],
++  (t) => [
++    foreignKey({ name: 'meta_ad_accounts_area_profile_fk', columns: [t.companyId,t.businessAreaId,t.profileId], foreignColumns: [metaProfiles.companyId,metaProfiles.businessAreaId,metaProfiles.id] }),
++    unique('meta_ad_accounts_area_identity_uq').on(t.companyId,t.businessAreaId,t.id),
++    uniqueIndex('meta_ad_accounts_workspace_identity_uq').on(t.companyId,t.fbAccountId).where(sql`${t.businessAreaId} is not null`),
++    uniqueIndex('meta_ad_accounts_profile_account_uq').on(t.profileId,t.fbAccountId),
++    index('meta_ad_accounts_company_idx').on(t.companyId,t.profileId),
++  ],
+ )
+diff --git a/packages/db/src/schema/crm/meta-pixels.ts b/packages/db/src/schema/crm/meta-pixels.ts
+index 1d5f43644660f6a0a3d84be9882ab7411f429ad6..e14a99da5d210a3245553215fa665ff4ce7bfb8a 100644
+--- a/packages/db/src/schema/crm/meta-pixels.ts
++++ b/packages/db/src/schema/crm/meta-pixels.ts
+@@ -1,8 +1,9 @@
+ import { sql } from 'drizzle-orm'
+-import { boolean, check, index, integer, jsonb, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core'
++import { boolean, check, foreignKey, index, integer, jsonb, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core'
+ import { companies } from './base.js'
+ import { connections } from './connections.js'
+ import { contacts } from './contacts.js'
++import { metaAdAccounts } from './meta-ads.js'
+ import { createdAt, crm, updatedAt } from './schema.js'
+ 
+ // Pixel / Conversions API da Meta (T104; 11 §3.3, §5.4; STACK E §1.7): configurações de pixel (token CAPI só cifrado,
+@@ -30,6 +31,8 @@ export const pixelConfigs = crm.table(
+   {
+     id: uuid('id').primaryKey().defaultRandom(),
+     companyId: companyId(),
++    businessAreaId: uuid('business_area_id'),
++    metaAdAccountId: uuid('meta_ad_account_id'),
+     name: text('name').notNull(),
+     platform: text('platform').$type<PixelPlatform>().notNull().default('facebook'),
+     /** Id numérico do pixel/dataset. */
+@@ -60,6 +63,9 @@ export const pixelConfigs = crm.table(
+     updatedAt: updatedAt(),
+   },
+   (t) => [
++    foreignKey({ name: 'pixel_configs_area_account_fk', columns: [t.companyId,t.businessAreaId,t.metaAdAccountId], foreignColumns: [metaAdAccounts.companyId,metaAdAccounts.businessAreaId,metaAdAccounts.id] }),
++    uniqueIndex('pixel_configs_workspace_identity_uq').on(t.companyId,t.pixelId).where(sql`${t.businessAreaId} is not null`),
++    check('pixel_configs_workspace_ck', sql`(${t.businessAreaId} is null and ${t.metaAdAccountId} is null) or (${t.businessAreaId} is not null and ${t.metaAdAccountId} is not null and not ${t.autoSendSales} and not ${t.autoLeadOnAd})`),
+     index('pixel_configs_company_idx').on(t.companyId, t.createdAt),
+     check('pixel_configs_pixel_id_ck', sql`${t.pixelId} ~ '^[0-9]+$'`),
+     check('pixel_configs_name_ck', sql`char_length(${t.name}) between 2 and 255`),
+diff --git a/tests/acceptance/T125/business-areas.test.ts b/tests/acceptance/T125/business-areas.test.ts
+index b97411ddd7a80982edc43387596fcde25cea0559..1a908884d837d35c5dc8f6b24e184692e5444e66 100644
+--- a/tests/acceptance/T125/business-areas.test.ts
++++ b/tests/acceptance/T125/business-areas.test.ts
+@@ -8,7 +8,7 @@ import { chromium, type Browser } from '@playwright/test'
+ import { afterAll, beforeAll, expect, it } from 'vitest'
+ import { startSystem, tenant, connectMeta, salesPixel, type System, type Tenant } from './setup'
+ 
+-let sys: System, t: Tenant, foreign: Tenant, areas: any[], bundles: any[], oldOffer: any, writer: string, reader: string
++let sys: System, t: Tenant, foreign: Tenant, areas: any[], bundles: any[], oldOffer: any, legacyBundle: any, writer: string, reader: string
+ let server: Server, browser: Browser
+ const previousGate = process.env.SHARED_OFFERS_COMPANY_ID
+ const fixtureSecret = 'synthetic-area-xpag-never-contact-provider'
+@@ -43,6 +43,7 @@ beforeAll(async () => {
+   }
+   const made = await t.c.post('/api/offers', { name: 'Existing unassigned offer', active: false, config: bundles[2] })
+   expect(made.status).toBe(201); oldOffer = made.body.offer
++  legacyBundle = { ...bundles[2] }
+   writer = (await t.c.post('/api/mcp_credentials', { name: 'Area writer', access: 'write' })).body.token
+   reader = (await t.c.post('/api/mcp_credentials', { name: 'Area reader', access: 'read' })).body.token
+ }, 180000)
+@@ -72,29 +73,95 @@ it('names/BMs are explicit, scoped by company, unique and validated without cont
+   expect((await call('GET', '/api/business-areas', undefined, undefined, foreign)).status).toBe(404)
+   expect((await call('GET', '/api/offers', randomUUID())).status).toBe(404)
+ })
+-it('shares one resource catalog, OAuth and payment accounts across all three workspaces', async () => {
+-  for (const workspace of areas) {
++it('authorizes one Facebook profile separately in three workspaces and binds distinct ad accounts and pixels via MCP', async () => {
++  const user = 'workspace-fb-owner'
++  const accountIds = ['act_551001', 'act_551002', 'act_551003']
++  const datasetIds = ['651001', '651002', '651003']
++  sys.fakeMeta.addUser({ id: user, name: 'Workspace Facebook', adAccounts: accountIds.map((id, i) => ({ id, name: 'Workspace Ads ' + (i+1), currency: 'BRL' })) })
++  for (let i = 0; i < 3; i++) sys.fakeMeta.setAdAccountPixels(accountIds[i]!, [{ id: datasetIds[i], name: 'Workspace Pixel ' + (i+1) }])
++  const profiles: string[] = []
++  for (let i = 0; i < 3; i++) {
++    const business_area_id = areas[i].id
++    const workspace = { business_area_id }
++    expect((await tool(reader, 'start_workspace_meta_oauth', workspace)).error).toBe(true)
++    expect((await tool(reader, 'get_workspace_meta_status', {})).error).toBe(true)
++    const before = await tool(reader, 'get_workspace_meta_status', workspace)
++    expect(before.data).toMatchObject({ configured: true, profiles: [], provider_access_verified: false })
++    const start = await tool(writer, 'start_workspace_meta_oauth', workspace)
++    expect(start.error, JSON.stringify(start.data)).toBe(false)
++    const state = new URL(start.data.oauth_url).searchParams.get('state')!
++    const open = (state: string, visitor = t, header?: string) => sys.app.request(
++      '/api/meta/oauth/callback?' + new URLSearchParams({ state, code: sys.fakeMeta.issueCode(user) }),
++      { headers: { cookie: 'crm_session=' + visitor.token, ...(header ? { 'x-business-area-id': header } : {}) } },
++    )
++    if (i === 0) {
++      expect((await open(state, foreign)).headers.get('location')).toContain('meta_oauth=error')
++      const [body, sig] = state.split('.')
++      const modified = { ...JSON.parse(Buffer.from(body!, 'base64url').toString('utf8')), businessAreaId: areas[1].id }
++      expect((await open(Buffer.from(JSON.stringify(modified)).toString('base64url') + '.' + sig)).headers.get('location')).toContain('meta_oauth=error')
++    }
++    expect((await open(state, t, areas[(i+1)%3].id)).headers.get('location')).toContain('meta_oauth=success')
++    expect((await open(state)).headers.get('location')).toContain('meta_oauth=error')
++    const connected = await tool(reader, 'get_workspace_meta_status', workspace)
++    expect(connected.data.profiles).toHaveLength(1)
++    const p = connected.data.profiles[0]
++    expect(p).toMatchObject({ fb_user_id: user, ad_accounts: [] })
++    expect(JSON.stringify(connected.data)).not.toContain('access_token')
++    profiles.push(p.id)
++    const profile_id = p.id
++    const candidates = await tool(reader, 'list_workspace_meta_ad_accounts', { ...workspace, profile_id })
++    expect(candidates.data.items.map((a: any) => a.fb_account_id)).toEqual(accountIds.slice(i))
++    if (i) {
++      expect((await tool(reader, 'list_workspace_meta_ad_accounts', { ...workspace, profile_id: profiles[0] })).data.status).toBe(404)
++      expect((await tool(writer, 'link_workspace_meta_ad_account', { ...workspace, profile_id, fb_account_id: accountIds[0] })).data.status).toBe(404)
++    }
++    const link = { ...workspace, profile_id, fb_account_id: accountIds[i] }
++    const ad = await tool(writer, 'link_workspace_meta_ad_account', link)
++    expect(ad.error, JSON.stringify(ad.data)).toBe(false)
++    const ad_account_id = ad.data.ad_account.id
++    expect((await tool(writer, 'link_workspace_meta_ad_account', link)).data.ad_account.id).toBe(ad_account_id)
++    expect((await tool(reader, 'list_workspace_meta_pixels', { ...workspace, ad_account_id })).data.items).toEqual([{ pixel_id: datasetIds[i], name: 'Workspace Pixel ' + (i+1) }])
++    expect((await tool(writer, 'link_workspace_meta_pixel', { ...workspace, ad_account_id, pixel_id: '7777' })).data.status).toBe(404)
++    const config = { ...workspace, ad_account_id, pixel_id: datasetIds[i] }
++    const pixel = await tool(writer, 'link_workspace_meta_pixel', config)
++    expect(pixel.error, JSON.stringify(pixel.data)).toBe(false)
++    expect(pixel.data).toMatchObject({ capi_delivery_verified: false, pixel: { ad_account_id, pixel_id: datasetIds[i] } })
++    expect((await tool(writer, 'link_workspace_meta_pixel', config)).data.pixel.id).toBe(pixel.data.pixel.id)
++    expect((await call('GET', '/api/meta/pixels/' + pixel.data.pixel.id + '?include_access_token=true', business_area_id)).body.pixel).not.toHaveProperty('access_token')
++    expect((await call('PUT', '/api/meta/pixels/' + pixel.data.pixel.id, business_area_id, { auto_send_sales: true })).status).toBe(422)
++    bundles[i] = { ...bundles[i], ad_account_id, pixel_id: pixel.data.pixel.id }
++  }
++  expect(new Set(profiles).size).toBe(3)
++  expect((await call('GET', '/api/meta/profiles')).body.items.some((p: any) => p.fb_user_id === user)).toBe(false)
++  expect((await tool(reader, 'list_workspace_meta_pixels', { business_area_id: areas[1].id, ad_account_id: bundles[0].ad_account_id })).data.status).toBe(404)
++  expect((await call('GET', '/api/meta/pixels/' + bundles[0].pixel_id + '/events', areas[1].id)).status).toBe(404)
++  expect((await call('GET', '/api/meta/pixels/' + bundles[0].pixel_id)).status).toBe(404)
++  expect(sys.fakeMeta.capiEvents).toHaveLength(0)
++})
++it('shares chips, flows and payment accounts while filtering Meta resources by workspace', async () => {
++  for (const [i, workspace] of areas.entries()) {
+     const response = await call('GET', '/api/offers/resources', workspace.id)
+     expect(response.status).toBe(200)
+     for (const bundle of bundles) {
+       expect(response.body.integrations.map((item: any) => item.id)).toContain(bundle.integration_id)
+-      expect(response.body.accounts.map((item: any) => item.id)).toContain(bundle.ad_account_id)
+       expect(response.body.flows.map((item: any) => item.id)).toContain(bundle.flow_id)
+     }
++    expect(response.body.accounts.map((item: any) => item.id)).toEqual([bundles[i].ad_account_id])
++    expect(response.body.pixels.map((item: any) => item.id)).toEqual([bundles[i].pixel_id])
+     expect(response.body.connections.map((item: any) => item.id)).toContain(t.connectionId)
+     expect(JSON.stringify(response.body)).not.toContain(fixtureSecret)
+   }
+   expect((await call('GET', '/api/payment-integrations/' + bundles[1].integration_id, areas[0].id)).status).toBe(200)
+   expect((await call('POST', '/api/meta/oauth/start', areas[0].id, {})).status).toBe(200)
+-  expect((await call('GET', '/api/meta/profiles', areas[1].id)).body.items).toEqual(
+-    (await call('GET', '/api/meta/profiles', areas[0].id)).body.items,
+-  )
+-  expect((await call('PUT', '/api/meta/ad-accounts/' + bundles[1].ad_account_id, areas[0].id, { included_in_dashboard: false })).status).toBe(200)
++  expect((await call('PUT', '/api/meta/ad-accounts/' + bundles[1].ad_account_id, areas[0].id, { included_in_dashboard: false })).status).toBe(404)
++  const filtered = await call('GET', '/api/meta/structure-bundle?ad_account_ids=' + bundles[1].ad_account_id, areas[0].id)
++  expect(filtered.body).toMatchObject({ warnings: ['no_ad_accounts'], targets_total: 0 })
+   expect((await call('POST', '/api/business-areas/' + areas[1].id + '/resources', undefined, { kind: 'integration', resource_id: bundles[0].integration_id })).status).toBe(409)
+ })
+-it('keeps offers separate while two workspaces can use the exact same resources', async () => {
++it('keeps offers separate while two workspaces use shared operational resources and their own Meta assets', async () => {
+   for (let i = 0; i < 2; i++) {
+-    const created = await call('POST', '/api/offers', areas[i].id, { name: 'Business offer ' + i, config: bundles[0] })
++    const { ad_account_id, pixel_id } = bundles[i]
++    const created = await call('POST', '/api/offers', areas[i].id, { name: 'Business offer ' + i, config: { ...bundles[0], ad_account_id, pixel_id } })
+     expect(created.status, JSON.stringify(created.body)).toBe(201)
+     bundles[i].offerId = created.body.offer.id
+     expect(created.body.offer).toMatchObject({ active: false, business_area_id: areas[i].id })
+@@ -103,6 +170,7 @@ it('keeps offers separate while two workspaces can use the exact same resources'
+   expect((await call('GET', '/api/offers/' + bundles[1].offerId, areas[0].id)).status).toBe(404)
+   for (const key of ['integration_id', 'ad_account_id', 'pixel_id', 'flow_id', 'product_id'])
+     expect((await call('POST', '/api/offers', areas[0].id, { name: 'Unknown resource', config: { ...bundles[0], [key]: randomUUID() } })).status).toBe(422)
++  expect((await call('POST', '/api/offers', areas[0].id, { name: 'Wrong Meta area', config: { ...bundles[0], pixel_id: bundles[1].pixel_id } })).status).toBe(422)
+   expect((await call('GET', '/api/offers')).body.items.map((r: any) => r.id)).toEqual([oldOffer.id])
+ })
+ it('MCP carries an explicit area on each call without leaking state to the next caller, and retains read/write permissions', async () => {
+@@ -146,7 +214,7 @@ it('adoption moves only a general offer and preserves its activation, shared res
+   expect(await sys.q('select id from crm.payment_charges')).toHaveLength(0)
+ })
+ it('simultaneous moves cannot give the same offer to two workspaces', async () => {
+-  const created = await call('POST', '/api/offers', undefined, { name: 'Concurrent general offer', config: bundles[2] })
++  const created = await call('POST', '/api/offers', undefined, { name: 'Concurrent general offer', config: legacyBundle })
+   expect(created.status).toBe(201)
+   const offerId = created.body.offer.id
+   const results = await Promise.all(areas.slice(0,2).map(area =>
+@@ -223,7 +291,7 @@ it('flows start private, can be shared deliberately and keep editing in the owne
+   expect((await call('GET','/api/flows/'+id,b)).status).toBe(404)
+   expect((await call('GET','/api/flows/names',b)).body.items.map((f:any)=>f.id)).not.toContain(id)
+   await sys.q("update crm.flows set status='active',published_version=1 where id=$1", [id])
+-  const candidate = {name:'Offer using a workspace flow',config:{...bundles[0],flow_id:id}}
++  const candidate = {name:'Offer using a workspace flow',config:{...bundles[1],flow_id:id}}
+   expect((await call('POST','/api/offers',b,candidate)).status).toBe(422)
+   expect((await call('GET','/api/offers/resources',a)).body.flows.map((f:any)=>f.id)).toContain(id)
+   expect((await call('POST','/api/flows/'+id+'/share-workspace',b,{})).status).toBe(404)
+diff --git a/tests/acceptance/T125/setup.ts b/tests/acceptance/T125/setup.ts
+index d38387e82c14b5a79177ca0567ee73adeb9ca4b7..b08bbf6b6880f9db0e09b98bec7133a10ed66388 100644
+--- a/tests/acceptance/T125/setup.ts
++++ b/tests/acceptance/T125/setup.ts
+@@ -51,7 +51,7 @@ export async function startSystem(): Promise<System> {
+     META_GRAPH_URL: metaUrl,
+     META_APP_ID,
+     META_APP_SECRET,
+-    META_OAUTH_REDIRECT_URI: 'http://api.t125.test/api/meta/oauth/callback',
++    META_OAUTH_REDIRECT_URI: 'https://api.t125.test/api/meta/oauth/callback',
+     META_OAUTH_DIALOG_URL: 'http://facebook.t125.test/dialog/oauth',
+     WEB_PUBLIC_URL: 'http://web.t125.test',
+     META_FX_RATES: JSON.stringify({ 'USD:BRL': 5 }),
+@@ -64,8 +64,8 @@ export async function startSystem(): Promise<System> {
+   const { createDb }: Any = await import('@crm/db')
+   const { createTempDatabase }: Any = await import('@crm/db/testing')
+   const kit: Any = await import('@crm/node-kit')
+-  const core: Any = await import('@crm/core')
+-  const rpc: Any = await import('@crm/wa-gateway-rpc')
++  await import('@crm/core')
++  await import('@crm/wa-gateway-rpc')
+   const wk: Any = await import('@crm/worker')
+   const api: Any = await import('@crm/api')
+   kit.resetCredentialsCrypto?.()

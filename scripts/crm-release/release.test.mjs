@@ -57,7 +57,7 @@ function fixture(t) {
   fs.writeFileSync(path.join(legacy, 'tracked.ts'), 'representative source\n')
   fs.writeFileSync(path.join(root, 'deploy-ai-manager.sh'), 'previous bootstrap')
   for (const f of ['images.tar.gz', 'spa.tar.gz']) fs.writeFileSync(path.join(artifact, f), 'mock artifact ' + f)
-  const m = { format: 1, release: revision, source_tree: TREE, image: 'crm-shared-offers:' + revision, image_id: image, runtime: 'node:22-alpine', platform: 'linux/amd64', images_sha256: hashFile(path.join(artifact, 'images.tar.gz')), spa_sha256: hashFile(path.join(artifact, 'spa.tar.gz')), migrations: Array.from({ length: 47 }, (_, i) => ({ idx: i, when: 1000 + i, tag: i >= 39 ? ['0039_shared_offers', '0040_offer_delivery_recovery', '0041_offer_block_push', '0042_offer_tenant_scope', '0043_business_areas', '0044_chat_wa_identity', '0045_pending_message_status', '0046_workspace_flow_sharing'][i - 39] : 'old_' + i, hash: sha('migration ' + i) })) }
+  const m = { format: 1, release: revision, source_tree: TREE, image: 'crm-shared-offers:' + revision, image_id: image, runtime: 'node:22-alpine', platform: 'linux/amd64', images_sha256: hashFile(path.join(artifact, 'images.tar.gz')), spa_sha256: hashFile(path.join(artifact, 'spa.tar.gz')), migrations: Array.from({ length: 48 }, (_, i) => ({ idx: i, when: 1000 + i, tag: i >= 39 ? ['0039_shared_offers', '0040_offer_delivery_recovery', '0041_offer_block_push', '0042_offer_tenant_scope', '0043_business_areas', '0044_chat_wa_identity', '0045_pending_message_status', '0046_workspace_flow_sharing', '0047_workspace_meta'][i - 39] : 'old_' + i, hash: sha('migration ' + i) })) }
   fs.writeFileSync(path.join(artifact, 'release.json'), JSON.stringify(m))
   const receipt = { observed_at: new Date().toISOString(), approved_panel_sha: revision, legacy_crm: legacy, crm_head: 'c'.repeat(40), source_sha256: sha(JSON.stringify([['tracked.ts', sha('representative source\n')]])), storage_volume: 'preserved_storage', required_free_bytes: 1, ack_shared_database_rpo: true }
   const receiptFile = path.join(root, 'receipt.json'), saveReceipt = () => fs.writeFileSync(receiptFile, JSON.stringify(receipt)); saveReceipt()
@@ -88,6 +88,7 @@ function fixture(t) {
     if (label === 'verify-message-identity-schema') return JSON.stringify({scoped:true,old_global:false,column:true,trigger:true,fk:'FOREIGN KEY (company_id, chat_id, connection_id) REFERENCES crm.chats(company_id, id, connection_id) ON DELETE CASCADE'})
     if (label === 'verify-pending-message-status-schema') return JSON.stringify({table:true,connection_index:true,expiry:true,fk:'FOREIGN KEY (company_id, connection_id) REFERENCES crm.connections(company_id, id) ON DELETE CASCADE'})
     if (label === 'verify-business-area-schema') return JSON.stringify({ areas:true,resources:true,offer_column:true,flow_share_column:true })
+    if (label === 'verify-workspace-meta-schema') return JSON.stringify({ constraints:4,indexes:3 })
     if (label === 'verify-offer-schema') return JSON.stringify({ column: true, trigger: true, indexes: 2 })
     if (label === 'backup-legacy-source') fs.writeFileSync(args[1], 'mock private source backup')
     if (label === 'backup-storage') { const mount = args.find(x => x.endsWith(':/backup')); fs.writeFileSync(path.join(mount.slice(0, -8), 'storage.tgz'), 'mock storage') }
@@ -118,7 +119,7 @@ test('upgrading an activated historical release preserves company, storage and p
   assert.equal(read(path.join(f.state, 'releases', revision, 'result.json')).gate_empty, false)
   assert.equal(read(path.join(f.state, 'releases', revision, 'result.json')).activation_preserved, true)
   assert.equal(f.calls.filter(c => c.label === 'journal-43').length, 2)
-  assert.equal(f.calls.filter(c => c.label === 'journal-47').length, 1)
+    assert.equal(f.calls.filter(c => c.label === 'journal-48').length, 1)
   assert.equal(fs.existsSync(path.join(f.state, 'maintenance.json')), false)
 })
 for (const mismatch of ['api-running', 'worker-config', 'candidate', 'persisted-tree', 'persisted-uuid', 'api-image', 'worker-image']) test('upgrade refuses activation/state drift before stopping CRM: ' + mismatch, t => {
@@ -151,7 +152,7 @@ test('successful deployment executes backups, CRM-only migration/cutover and per
   const labels = f.calls.map(c => c.label), index = x => labels.indexOf(x)
   assert.ok(index('principal-health') < index('stop-only-crm'))
   for (const name of ['backup-database', 'verify-database-backup', 'backup-legacy-source', 'backup-storage', 'backup-redis-snapshot', 'copy-redis-backup']) assert.ok(index(name) < index('migrate-only-crm'))
-  assert.ok(index('migrate-only-crm') < index('journal-47') && index('journal-47') < index('cutover-crm-api'))
+  assert.ok(index('migrate-only-crm') < index('journal-48') && index('journal-48') < index('cutover-crm-api'))
   assert.deepEqual(read(path.join(f.state, 'active.json')), f.spec)
   assert.equal(fs.existsSync(path.join(f.state, 'maintenance.json')), false)
   assert.ok(fs.readFileSync(path.join(f.root, 'deploy-ai-manager.sh'), 'utf8').includes('export CRM_RELEASE_STATE_DIR='))
@@ -202,7 +203,7 @@ for (const [name, change] of negatives) test(name + ' refuses before CRM stop/mi
 for (const label of ['stop-only-crm', 'backup-database', 'verify-database-backup', 'backup-legacy-source', 'backup-storage', 'backup-redis-snapshot', 'copy-redis-backup']) test(label + ' failure restores only old CRM before migration', t => {
   const f = fixture(t); f.faults.set(label, 1); assert.throws(() => deploy(f.options, f.run)); assert.ok(f.calls.some(x => x.label === 'restore-old-crm-before-migration')); assert.ok(!f.calls.some(x => x.label === 'migrate-only-crm')); assert.equal(fs.existsSync(path.join(f.state, 'active.json')), false)
 })
-for (const label of ['migrate-only-crm', 'journal-47', 'verify-offer-schema', 'verify-business-area-schema', 'verify-pending-message-status-schema', 'cutover-crm-worker-web', 'verify-state-crm-worker', 'verify-spa-http', 'verify-mounts-crm-api', 'verify-image-crm-worker']) test(label + ' failure keeps maintenance, pauses CRM and never restores shared DB or old runtime', t => {
+for (const label of ['migrate-only-crm', 'journal-48', 'verify-offer-schema', 'verify-business-area-schema', 'verify-workspace-meta-schema', 'verify-pending-message-status-schema', 'cutover-crm-worker-web', 'verify-state-crm-worker', 'verify-spa-http', 'verify-mounts-crm-api', 'verify-image-crm-worker']) test(label + ' failure keeps maintenance, pauses CRM and never restores shared DB or old runtime', t => {
   const f = fixture(t); f.faults.set(label, 1); assert.throws(() => deploy(f.options, f.run)); assert.ok(fs.existsSync(path.join(f.state, 'maintenance.json'))); assert.ok(f.calls.some(x => x.label === 'pause-new-crm-in-maintenance')); assert.ok(!f.calls.some(x => x.label === 'restore-old-crm-before-migration')); assert.throws(() => invoke(f.repo, f.state, ['up', '-d', 'worker'], f.run), /maintenance/)
 })
 test('API health transient failure retries same immutable release', t => { const f = fixture(t); f.faults.set('cutover-crm-api', 1); deploy(f.options, f.run); assert.equal(f.calls.filter(x => x.label === 'cutover-crm-api').length, 2) })
@@ -336,7 +337,8 @@ for (const [sourceTree, journalCount] of [
   ['d0489b7ae0b69fcd0adcb1d8db36ddcf5028bff4', 47],
   ['62ef8c2a0223928bc41e62046de59dea708197f7', 47],
   ['af9c8482823fb72833a14041af6183027e21a6f2', 47],
-  [TREE, 47],
+  ['acc2a3c3e355958be0fb5feed6214cd94c2088f6', 47],
+  [TREE, 48],
 ]) test('release accepts the exact installed migration prefix: '+sourceTree, t => {
   const f=installedFixture(t); f.old.source_tree=sourceTree;
   fs.writeFileSync(path.join(f.state,'active.json'),JSON.stringify(f.old));

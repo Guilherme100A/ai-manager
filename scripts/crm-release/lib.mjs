@@ -2,11 +2,12 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-export const TREE = 'acc2a3c3e355958be0fb5feed6214cd94c2088f6'
+export const TREE = 'd2ebd86493f4a1a5ad79298c91b75247a766c695'
 // Historical immutable release accepted only as the currently installed source.
 // New artifacts must match TREE exactly; never accept arbitrary historical trees.
 export const INSTALLED_CRM_JOURNALS = new Map([
-  [TREE, 47],
+  [TREE, 48],
+  ['acc2a3c3e355958be0fb5feed6214cd94c2088f6', 47],
   ['af9c8482823fb72833a14041af6183027e21a6f2', 47],
   ['62ef8c2a0223928bc41e62046de59dea708197f7', 47],
   ['d0489b7ae0b69fcd0adcb1d8db36ddcf5028bff4', 47],
@@ -34,6 +35,7 @@ export function availableMemoryBytes(meminfo, freeBytes) {
   return Number.isSafeInteger(bytes) && bytes >= 0 ? bytes : freeBytes
 }
 export const secrets = ['DATABASE_URL', 'REDIS_URL', 'CREDENTIALS_KEY', 'CRM_SSO_SECRET', 'INTERNAL_TOKEN']
+export const metaEnvironment = ['META_APP_ID', 'META_APP_SECRET', 'META_OAUTH_REDIRECT_URI']
 export function command(label, executable, args, io = {}) {
   const descriptors = []
   try {
@@ -90,10 +92,10 @@ export function validateManifest(m) {
   requireThat(m.image === `crm-shared-offers:${m.release}` && /^sha256:[a-f0-9]{64}$/.test(m.image_id), 'Invalid image identity')
   requireThat(m.platform === 'linux/amd64' && m.runtime === 'node:22-alpine', 'Release must use Alpine/musl dependencies')
   for (const k of ['images_sha256', 'spa_sha256']) requireThat(/^[a-f0-9]{64}$/.test(m[k]), 'Missing artifact checksum')
-  requireThat(Array.isArray(m.migrations) && m.migrations.length === 47, 'Full CRM migration contract required')
+  requireThat(Array.isArray(m.migrations) && m.migrations.length === 48, 'Full CRM migration contract required')
   m.migrations.forEach((x, i) => requireThat(x.idx === i && /^[a-f0-9]{64}$/.test(x.hash) && Number.isSafeInteger(x.when) && typeof x.tag === 'string', 'Invalid migration contract'))
-  requireThat(new Set(m.migrations.map(x => x.when)).size === 47 && new Set(m.migrations.map(x => x.tag)).size === 47, 'Duplicate migrations')
-  requireThat(m.migrations.slice(39).map(x => x.tag).join(',') === '0039_shared_offers,0040_offer_delivery_recovery,0041_offer_block_push,0042_offer_tenant_scope,0043_business_areas,0044_chat_wa_identity,0045_pending_message_status,0046_workspace_flow_sharing', 'Unexpected migrations')
+  requireThat(new Set(m.migrations.map(x => x.when)).size === 48 && new Set(m.migrations.map(x => x.tag)).size === 48, 'Duplicate migrations')
+  requireThat(m.migrations.slice(39).map(x => x.tag).join(',') === '0039_shared_offers,0040_offer_delivery_recovery,0041_offer_block_push,0042_offer_tenant_scope,0043_business_areas,0044_chat_wa_identity,0045_pending_message_status,0046_workspace_flow_sharing,0047_workspace_meta', 'Unexpected migrations')
   return m
 }
 export function specFor(m, storage) {
@@ -117,7 +119,7 @@ export function composeArgs(repo, stateDir, explicitOverride) {
   const active = path.join(stateDir, 'active.json')
   if (!file && fs.existsSync(active)) {
     const spec = read(active)
-  requireThat(INSTALLED_CRM_JOURNALS.has(spec.source_tree) && /^[a-f0-9]{40}$/.test(spec.release), 'Invalid persisted release')
+    requireThat(INSTALLED_CRM_JOURNALS.has(spec.source_tree) && /^[a-f0-9]{40}$/.test(spec.release), 'Invalid persisted release')
     requireThat(specFor({ release: spec.release, image_id: spec.image_id }, spec.storage).deps === spec.deps, 'Invalid deps state')
     requireThat(spec.spa === `crm_so_${spec.release}_spa` && /^sha256:[a-f0-9]{64}$/.test(spec.image_id), 'Invalid SPA/image state')
     file = path.join(stateDir, 'releases', spec.release, 'override.yml')
@@ -134,6 +136,7 @@ export function validateConfig(before, after, spec) {
     const company = spec.company_id ?? ''
     requireThat(a && b && a.image === spec.image_id && a.environment?.SHARED_OFFERS_COMPANY_ID === company, 'Image/gate mismatch')
     for (const key of [...secrets, 'WA_GATEWAY', 'WA_RPC_PROFILE', 'WA_RPC_URL', 'WA_EVENTS_STREAM', 'CRM_QUEUE_PREFIX']) requireThat(typeof a.environment[key] === 'string' && a.environment[key].length > 0 && a.environment[key] === b.environment[key], 'Runtime secret/RPC drift')
+    for (const key of metaEnvironment) requireThat((a.environment[key] ?? '') === (b.environment[key] ?? ''), 'Meta configuration drift')
     requireThat((b.environment.SHARED_OFFERS_COMPANY_ID ?? '') === company && a.environment.WA_GATEWAY === 'rpc' && a.environment.WA_RPC_PROFILE === 'ai-manager', 'Company gate/RPC must remain unchanged')
     requireThat(a.volumes?.length === 2 && !a.volumes.some(v => v.type === 'bind' || v.target === '/crm'), 'Mutable source mount forbidden')
     const deps = a.volumes.find(v => v.target === '/crm/node_modules'), storage = a.volumes.find(v => v.target === '/data/storage')
