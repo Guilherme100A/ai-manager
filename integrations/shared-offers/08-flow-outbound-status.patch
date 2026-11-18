@@ -436,10 +436,10 @@ index e37d0aefd05ba5510d8bf9cd63cb21809d0e686f..e447513eead5d71a6aac87a716cd5611
      await this.publish(companyId, 'chat.updated', { chat_id: chat.id, chat: toChatDto(result.chat) as never }, result.chat)
 diff --git a/packages/core/src/chats/send/status-race.db.unit.test.ts b/packages/core/src/chats/send/status-race.db.unit.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..c9d5d29ddcfeae4adc34fd55f16a16502d3be72d
+index 0000000000000000000000000000000000000000..3211e2fd08eac60ab07a23209fc1d2a682f5f390
 --- /dev/null
 +++ b/packages/core/src/chats/send/status-race.db.unit.test.ts
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,203 @@
 +// Runs only on disposable PostgreSQL in CI. All sends below use the fake gateway.
 +import { randomUUID } from 'node:crypto'
 +import { tmpdir } from 'node:os'
@@ -537,7 +537,9 @@ index 0000000000000000000000000000000000000000..c9d5d29ddcfeae4adc34fd55f16a1650
 +    expect(await s.row()).toBeUndefined()
 +    expect(await s.pending()).toMatchObject([{ status: 'read', waMessageId: s.waId }])
 +    const recorded = await s.makeService().recordOutbound(s.input())
-+    expect(recorded).toMatchObject({ status: 'read', wa_message_id: s.waId, sent_at: AT, delivered_at: AT, read_at: AT })
++    expect(recorded).toMatchObject({ status: 'read', wa_message_id: s.waId })
++    // These private timestamps are persisted on the row, not exposed by MessageDto.
++    expect(await s.row()).toMatchObject({ sentAt: new Date(AT), deliveredAt: new Date(AT), readAt: new Date(AT) })
 +    expect(await s.pending()).toHaveLength(0)
 +    await s.makeService().recordOutbound(s.input())
 +    await s.makeIngest().handle(s.event('delivered'))
