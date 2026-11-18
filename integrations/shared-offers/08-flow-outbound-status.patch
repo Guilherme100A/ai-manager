@@ -259,7 +259,7 @@ index d0857298f4cd76e600923195e116d7aa83075a9a..3ad1fd53b1693a52600b71678f713b1d
      expect(await s.svc.recordOutbound({ companyId: s.companyId, contactId: s.contactId, sessionId: 'outra', senderType: 'flow', actor: 'flow:x', content: { text: 'oi' }, view: view('p-none') })).toBeNull()
    })
 diff --git a/packages/core/src/chats/send/service.ts b/packages/core/src/chats/send/service.ts
-index e37d0aefd05ba5510d8bf9cd63cb21809d0e686f..d16e98de29d33d29c3d61b1b0bafc93f7654b132 100644
+index e37d0aefd05ba5510d8bf9cd63cb21809d0e686f..e447513eead5d71a6aac87a716cd56112e72b871 100644
 --- a/packages/core/src/chats/send/service.ts
 +++ b/packages/core/src/chats/send/service.ts
 @@ -2,12 +2,13 @@
@@ -326,15 +326,6 @@ index e37d0aefd05ba5510d8bf9cd63cb21809d0e686f..d16e98de29d33d29c3d61b1b0bafc93f
      await this.publish(companyId, 'message.status', { chat_id: chat.id, message_id: msg.id, status: sent!.status, error: null }, chat)
      return toMessageDto(sent!)
    }
-@@ -303,7 +287,7 @@ export class ChatSendService {
-     try {
-       const message = await this.doSend(companyId, chatId, sender, input, idempotencyKey ?? null)
-       if (key) await this.opts.idempotency?.complete(key, message.id)
--      return { message, replay: false }
-+      return { message, replay: false, changed: false }
-     } catch (err) {
-       // Nada foi criado (validação, sessão desconectada): a mesma chave pode tentar de novo.
-       if (key && !(err instanceof FailedSend)) await this.opts.idempotency?.release(key)
 @@ -325,11 +309,13 @@ export class ChatSendService {
      const db = input.executor ?? this.db
      const chat = await this.chatForRecord(input, db)

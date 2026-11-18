@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-export const TREE = '829e94e1ea2385ec3cbb5d25e5c03ff56a82b0ff'
+export const TREE = '428965aea5f097868a7d2b90e341e49e9718ed4c'
 // Historical immutable release accepted only as the currently installed source.
 // New artifacts must match TREE exactly; never accept arbitrary historical trees.
 export const INSTALLED_TREES = new Set([TREE, '91134a774990fb63abf05764e508f315f1944664', '7158e6027f11a6a4e77910d5a9c536109848a6c9', 'e39405197247f463dec69388a29d43c187a22332', '6844b56c32af325ff203014afa0a2bcdc5ea9688', '24cec7d30f200818e64cd9693bfe8ff38ed1d0c3'])
