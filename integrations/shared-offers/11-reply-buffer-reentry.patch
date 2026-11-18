@@ -1,0 +1,275 @@
+diff --git a/docs/flow-reply-buffer.md b/docs/flow-reply-buffer.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..b70a05e0abaed16e3b9578afeeeabad81d647554
+--- /dev/null
++++ b/docs/flow-reply-buffer.md
+@@ -0,0 +1,19 @@
++# Consumo da janela de respostas
++
++O timer de um buffer de `wait_response` segue `source`. Antes de avançar, o controle
++consome `__await` e `__replies` da janela concluída, dentro da mesma transação e
++somente depois dos guardas de status, sequência e geração do timer.
++
++A limpeza exige espera `reply` com `reentry`, timeout `source`, sem retry, marcador
++do mesmo nó/seq e `buffer_until` válido. Preserva a resposta salva, `reply`,
++`last_user_message`, `response` e todas as demais variáveis. Assim, ao retornar ao
++mesmo nó depois da IA, ele aguarda uma pergunta nova em vez de consumir a anterior.
++
++Uma pausa pode rebasear `deadline_at` sem mudar o timestamp histórico do marcador;
++a limpeza não exige igualdade entre eles. Timers antigos continuam recusados pelos
++guardas de seq/gen. Timeouts comuns, outros nós e retry não recebem essa limpeza.
++
++Não há migration, mudança de snapshot ou reconciliação de consumo anterior de IA.
++O corretivo não envia, reprocessa ou altera mensagens já entregues. A validação real
++continua separada: após publicação e preflight, Farol coordena uma única pergunta
++nova no run existente e comprova uma execução de IA e uma nova resposta.
+diff --git a/packages/core/src/flows/engine/control.ts b/packages/core/src/flows/engine/control.ts
+index 769ae91d4d8fd459d87492623a04bc76d1913ba3..97afc260241a225d75c79999bbde363bbf74195b 100644
+--- a/packages/core/src/flows/engine/control.ts
++++ b/packages/core/src/flows/engine/control.ts
+@@ -10,6 +10,7 @@ import type { FlowDefinition } from '@crm/shared'
+ import type { EngineHooks, FlowStepJobData } from './runner'
+ import { FlowTimers, type FlowTimerJobData, type TimerScheduler } from './timers'
+ import { parseWait, type FlowWait } from './waits'
++import { consumedReplyBufferVars } from './reply-buffer'
+ 
+ export interface InboundReply {
+   text?: string | null
+@@ -136,7 +137,11 @@ export class FlowControl {
+     return this.advance(
+       data.runId,
+       // `retry` (envio barrado pelo limite do chip): refaz o mesmo nó em vez de seguir aresta.
+-      (_run, wait) => ({ handle: wait.handles.timeout ?? 'timeout', stay: wait.retry === true }),
++      (run, wait) => ({
++        handle: wait.handles.timeout ?? 'timeout',
++        stay: wait.retry === true,
++        vars: consumedReplyBufferVars(run, wait),
++      }),
+       { seq: data.seq, gen: data.gen ?? 0 },
+     )
+   }
+diff --git a/packages/core/src/flows/engine/reply-buffer.db.unit.test.ts b/packages/core/src/flows/engine/reply-buffer.db.unit.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2564a77020ecfac37e16ac8ce2668d1ee1de288e
+--- /dev/null
++++ b/packages/core/src/flows/engine/reply-buffer.db.unit.test.ts
+@@ -0,0 +1,149 @@
++import { randomBytes } from 'node:crypto'
++import { afterAll, beforeAll, describe, expect, it } from 'vitest'
++import { eq } from 'drizzle-orm'
++import { companies, contacts, createDb, flowRuns, flowVersions, type Database } from '@crm/db'
++import { createTempDatabase, type TempDatabase } from '@crm/db/testing'
++import { FakeLlm, output } from '@crm/ai/testing'
++import { FakeWaGateway } from '@crm/wa-port/testing'
++import type { FlowDefinition, FlowNode } from '@crm/shared'
++import { FlowStore } from '../store/store'
++import { productionNodeRegistry } from '../nodes/messaging/production'
++import { registerInteractiveNodes } from '../nodes/interactive'
++import { FlowControl, type AdvanceResult } from './control'
++import { FlowEngine } from './runner'
++import type { FlowTimerJobData, TimerScheduler } from './timers'
++import type { FlowWait } from './waits'
++
++let db: Database, temp: TempDatabase
++beforeAll(async () => { temp = await createTempDatabase({ migrate: true }); db = createDb(temp.url, { max: 6 }) }, 60000)
++afterAll(async () => { await db?.$client.end(); await temp?.drop() }, 60000)
++
++const node = (id: string, type: FlowNode['type'], actions: FlowNode['actions'] = []): FlowNode => ({ id, type, name: id, position: { x: 0, y: 0 }, actions })
++const edge = (from: string, handle: string, to: string) => ({ id: `${from}-${handle}-${to}`, from, handle, to })
++const runOf = async (id: string) => (await db.select().from(flowRuns).where(eq(flowRuns.id, id)))[0]!
++const snapshotOf = async (id: string) => JSON.stringify((await db.select({ definition: flowVersions.definition }).from(flowVersions).where(eq(flowVersions.id, id)))[0]!.definition)
++
++async function setup() {
++  const suffix = randomBytes(6).toString('hex')
++  const [co] = await db.insert(companies).values({ name: 'Reply buffer', slug: 'reply-buffer-' + suffix }).returning()
++  const [contact] = await db.insert(contacts).values({ companyId: co!.id, name: 'Customer', phoneE164: '+5511999990001' }).returning()
++  const ctx = { companyId: co!.id }, store = new FlowStore(db)
++  const flow = await store.createFlow(ctx, { name: 'Wait AI wait loop' })
++  const definition: FlowDefinition = { schema: 'crm.flow/v1', entry: 'START', refs: {}, variables: [], nodes: [
++    node('START', 'start'),
++    node('W', 'wait_response', [
++      { id: 'QUESTION', type: 'send_message', order: 0, config: { message_text: '{ai.response}' } },
++      { id: 'WAIT', type: 'wait_for_response', order: 1, config: { timeout_value: 2, timeout_unit: 'hours', buffer_enabled: true, buffer_value: 5 } },
++      { id: 'SAVE', type: 'save_user_data', order: 2, config: { field_name: 'resposta', save_empty: true } },
++    ]),
++    node('AI', 'ai', [{ id: 'CLASSIFY', type: 'ai_call', order: 0, config: { provider: 'gpt', model: 'gpt-5.6-luna', user_message: '{resposta}',
++      response_variable: 'ai.response', output_conditions: [{ output_key: 'RESPONDER', prompt: 'Duda común' }], fallback_output_key: 'FALLBACK' } }]),
++    node('END', 'message', [{ id: 'END_MESSAGE', type: 'send_message', order: 0, config: { message_text: 'Timeout' } }]),
++  ], edges: [edge('START', 'source', 'W'), edge('W', 'source', 'AI'), edge('W', 'timeout', 'END'), edge('AI', 'output:RESPONDER', 'W'), edge('AI', 'output:FALLBACK', 'END'), edge('AI', 'failure', 'END')] }
++  await store.fromDefinition(ctx, flow.id, definition)
++  for (let i = 0; i < 6; i++) await store.publish(ctx, flow.id)
++  const clock = { t: new Date('2026-11-18T10:00:00.000Z') }, now = () => clock.t
++  const scheduled: Array<{ data: FlowTimerJobData; delayMs: number }> = [], cancelled: FlowTimerJobData[] = []
++  const timers: TimerScheduler = { schedule: async (data, delayMs) => void scheduled.push({ data: { ...data }, delayMs }), cancel: async data => void cancelled.push(data) }
++  const control = new FlowControl({ db, timers, shortDelayMs: 0, now })
++  const wa = new FakeWaGateway({ sessions: [{ id: 'fake-session', name: 'fake', state: 'STABLE' }] })
++  const llm = new FakeLlm([output({ output_key: 'RESPONDER', response: 'Es un pago único.' }), output({ output_key: 'RESPONDER', response: 'No hay mensualidad.' })])
++  const messaging = { resolveTarget: async () => ({ sessionId: 'fake-session', phone: '+5511999990001' }), sleep: async () => undefined }
++  const registry = registerInteractiveNodes(productionNodeRegistry(messaging), { ...messaging, now })
++  const engine = new FlowEngine({ db, wa, llm, registry, hooks: control.engineHooks(), now })
++  const { runId } = await engine.startRun(ctx, { flowId: flow.id, contactId: contact!.id, vars: { 'ai.response': 'Initial question', preserved: { value: 'same' } } })
++  await engine.step(runId, 0)
++  const initial = await runOf(runId), snapshot = await snapshotOf(initial.versionId!)
++  const step = async (result: AdvanceResult) => { expect(result.advanced).toBe(true); if (!result.advanced) throw Error('Did not advance'); return engine.step(runId, result.expectedSeq) }
++  const reply = async (text: string, message_id: string) => step(await control.resolveReply(runId, { text, message_id }))
++  const timer = () => scheduled.at(-1)!.data
++  const expire = async () => { const data = { ...timer() }, row = await runOf(runId); clock.t = new Date((row.wait as FlowWait).deadline_at!); await step(await control.fireTimer(data)); return data }
++  return { ctx, flow, clock, control, engine, wa, llm, runId, initial, snapshot, scheduled, cancelled, reply, timer, expire, step }
++}
++
++describe('reply buffer expiry through real FlowControl and FlowEngine', () => {
++  it('one inbound and duplicate timer/step jobs produce one AI call and one new send, then await another inbound', async () => {
++    const s = await setup()
++    expect(s.initial.version).toBe(6)
++    await s.reply('¿Hay mensualidad?', 'm1')
++    const buffered = await runOf(s.runId), data = { ...s.timer() }
++    expect(s.llm.calls).toHaveLength(0)
++    expect(s.wa.sent).toHaveLength(1)
++    expect((buffered.vars.__await as { seq: number }).seq).toBe(buffered.seq)
++    s.clock.t = new Date((buffered.wait as FlowWait).deadline_at!)
++    const results = await Promise.all([s.control.fireTimer(data), s.control.fireTimer(data)])
++    expect(results.filter(r => r.advanced)).toHaveLength(1)
++    const winner = results.find(r => r.advanced)!
++    const consumed = await runOf(s.runId)
++    expect(consumed.vars).toMatchObject({ __await: null, __replies: [], reply: { message_id: 'm1' }, last_user_message: '¿Hay mensualidad?', response: '¿Hay mensualidad?', resposta: '¿Hay mensualidad?', preserved: { value: 'same' } })
++    await s.step(winner)
++    const waiting = await runOf(s.runId)
++    expect(waiting).toMatchObject({ status: 'waiting', currentNodeKey: 'W', version: 6, versionId: s.initial.versionId })
++    expect(s.llm.calls).toHaveLength(1)
++    expect(s.wa.sent).toHaveLength(2)
++    expect(s.wa.sent[1]!.content).toEqual({ text: 'Es un pago único.' })
++    expect(waiting.vars.__await).toMatchObject({ node: 'W', seq: waiting.seq })
++    expect(waiting.vars.__replies).toEqual([])
++    expect(await s.control.fireTimer(data)).toMatchObject({ advanced: false, reason: 'stale' })
++    if (!winner.advanced) throw Error('No timer winner')
++    expect(await s.engine.step(s.runId, winner.expectedSeq)).toMatchObject({ executed: false })
++    expect((await runOf(s.runId)).vars).toEqual(waiting.vars)
++    expect(s.llm.calls).toHaveLength(1)
++    await s.reply('¿Es para siempre?', 'm2')
++    expect(s.llm.calls).toHaveLength(1)
++    await s.expire()
++    expect(s.llm.calls).toHaveLength(2)
++    expect(s.wa.sent).toHaveLength(3)
++    expect(await snapshotOf(waiting.versionId!)).toBe(s.snapshot)
++  })
++
++  it('combines multiple new inbound chunks in the same buffer and preserves the saved customer input', async () => {
++    const s = await setup()
++    await s.reply('Primera parte', 'm1')
++    const oldTimer = { ...s.timer() }
++    s.clock.t = new Date(s.clock.t.getTime() + 1000)
++    await s.reply('Segunda parte', 'm2')
++    expect(await s.control.fireTimer(oldTimer)).toMatchObject({ advanced: false, reason: 'stale' })
++    await s.expire()
++    expect(s.llm.calls).toHaveLength(1)
++    expect(s.llm.calls[0]!.messages.at(-1)).toMatchObject({ content: [{ type: 'text', text: 'Primera parte\nSegunda parte' }] })
++    const row = await runOf(s.runId)
++    expect(row.vars).toMatchObject({ resposta: 'Primera parte\nSegunda parte', last_user_message: 'Primera parte\nSegunda parte', response: 'Primera parte\nSegunda parte', reply: { message_id: 'm2' }, __replies: [] })
++    expect(s.wa.sent).toHaveLength(2)
++  })
++
++  it('preserves pause/resume, accepts a historical buffer marker and rejects the prior timer generation', async () => {
++    const s = await setup()
++    await s.reply('Pregunta', 'm1')
++    const buffered = await runOf(s.runId), oldTimer = { ...s.timer() }
++    const originalUntil = (buffered.vars.__await as { buffer_until: string }).buffer_until
++    s.clock.t = new Date(s.clock.t.getTime() + 1000)
++    expect(await s.control.pauseFlow(s.ctx, s.flow.id)).toEqual({ paused_runs: 1 })
++    expect(await s.control.fireTimer(oldTimer)).toMatchObject({ advanced: false, reason: 'paused' })
++    s.clock.t = new Date(s.clock.t.getTime() + 3600000)
++    expect(await s.control.resumeFlow(s.ctx, s.flow.id)).toEqual({ resumed_runs: 1 })
++    const resumed = await runOf(s.runId), wait = resumed.wait as FlowWait
++    expect(wait.timer_gen).toBe(1)
++    expect(wait.deadline_at).toBe(new Date(s.clock.t.getTime() + 4000).toISOString())
++    expect(wait.deadline_at).not.toBe(originalUntil)
++    expect((resumed.vars.__await as { buffer_until: string }).buffer_until).toBe(originalUntil)
++    expect(await s.control.fireTimer(oldTimer)).toMatchObject({ advanced: false, reason: 'stale' })
++    expect((await runOf(s.runId)).vars).toEqual(resumed.vars)
++    await s.expire()
++    expect(s.llm.calls).toHaveLength(1)
++    expect(s.wa.sent).toHaveLength(2)
++    expect((await runOf(s.runId)).versionId).toBe(s.initial.versionId)
++    expect(await snapshotOf(s.initial.versionId!)).toBe(s.snapshot)
++  })
++
++  it('keeps an ordinary reply timeout on its original edge without invoking AI', async () => {
++    const s = await setup(), before = await runOf(s.runId)
++    expect((before.wait as FlowWait).handles.timeout).toBe('timeout')
++    await s.expire()
++    const after = await runOf(s.runId)
++    expect(after.status).toBe('completed')
++    expect(s.llm.calls).toHaveLength(0)
++    expect(s.wa.sent.map(m => m.content)).toEqual([{ text: 'Initial question' }, { text: 'Timeout' }])
++    expect(after.vars.__await).toEqual(before.vars.__await)
++  })
++})
+diff --git a/packages/core/src/flows/engine/reply-buffer.ts b/packages/core/src/flows/engine/reply-buffer.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..46fdb9e96681f9ab8eb20095d30355537ac7f7fc
+--- /dev/null
++++ b/packages/core/src/flows/engine/reply-buffer.ts
+@@ -0,0 +1,21 @@
++import type { FlowWait } from './waits'
++
++interface BufferedRun {
++  currentNodeKey: string | null
++  seq: number
++  vars: Record<string, unknown> | null
++}
++
++/** Called only after advance() has accepted the status/seq/gen guards. */
++export function consumedReplyBufferVars(run: BufferedRun, wait: FlowWait): Record<string, unknown> | undefined {
++  if (wait.kind !== 'reply' || wait.reentry !== true || wait.retry === true || wait.handles.timeout !== 'source') return
++  const vars = run.vars ?? {}
++  const mark = vars.__await
++  if (!mark || typeof mark !== 'object' || Array.isArray(mark)) return
++  const buffered = mark as Record<string, unknown>
++  if (buffered.node !== run.currentNodeKey || buffered.seq !== run.seq) return
++  if (typeof buffered.buffer_until !== 'string' || !Number.isFinite(Date.parse(buffered.buffer_until))) return
++  // A resumed timer can have a rebased deadline while this marker retains its old timestamp.
++  // Consume only the buffer markers; keep the saved input and all business/run variables.
++  return { ...vars, __await: null, __replies: [] }
++}
+diff --git a/packages/core/src/flows/engine/reply-buffer.unit.test.ts b/packages/core/src/flows/engine/reply-buffer.unit.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..1ff99953c6d18f40a713764efed6d517005c690e
+--- /dev/null
++++ b/packages/core/src/flows/engine/reply-buffer.unit.test.ts
+@@ -0,0 +1,37 @@
++import { describe, expect, it } from 'vitest'
++import { consumedReplyBufferVars } from './reply-buffer'
++import type { FlowWait } from './waits'
++
++const vars = () => ({ __await: { node: 'W', seq: 18, buffer_until: '2026-11-18T18:43:56.000Z' }, __replies: [{ text: 'one', message_id: 'm1' }],
++  reply: { text: 'one', message_id: 'm1' }, last_user_message: 'one', response: 'one', resposta: 'one', ai: { response: 'prior' }, custom: { preserved: true } })
++const wait = (): FlowWait => ({ kind: 'reply', reentry: true, handles: { reply: 'source', timeout: 'source' }, deadline_at: '2026-11-18T18:43:56.000Z', timer_gen: 0 })
++
++describe('consumedReplyBufferVars', () => {
++  it('consumes only the old buffer markers without mutating the input', () => {
++    const original = vars(), before = JSON.stringify(original)
++    const result = consumedReplyBufferVars({ currentNodeKey: 'W', seq: 18, vars: original }, wait())
++    expect(result).toEqual({ ...original, __await: null, __replies: [] })
++    expect(JSON.stringify(original)).toBe(before)
++    expect(result?.reply).toBe(original.reply)
++    expect(result?.custom).toBe(original.custom)
++  })
++
++  it('accepts the valid historical marker after resume rebases the deadline', () => {
++    expect(consumedReplyBufferVars({ currentNodeKey: 'W', seq: 18, vars: vars() }, { ...wait(), timer_gen: 1, deadline_at: '2026-11-19T10:00:04.000Z' })?.__await).toBeNull()
++  })
++
++  it.each([
++    { kind: 'timer' as const }, { kind: 'payment' as const }, { reentry: false }, { retry: true }, { handles: { timeout: 'timeout' } },
++  ])('preserves other waits: %j', patch => {
++    expect(consumedReplyBufferVars({ currentNodeKey: 'W', seq: 18, vars: vars() }, { ...wait(), ...patch })).toBeUndefined()
++  })
++
++  it.each([
++    null, [], {}, { node: 'OTHER', seq: 18, buffer_until: '2026-11-18T18:43:56Z' },
++    { node: 'W', seq: 16, buffer_until: '2026-11-18T18:43:56Z' },
++    { node: 'W', seq: 18 }, { node: 'W', seq: 18, buffer_until: 'invalid' },
++  ])('preserves unrelated or invalid await markers: %j', mark => {
++    const original = { ...vars(), __await: mark }
++    expect(consumedReplyBufferVars({ currentNodeKey: 'W', seq: 18, vars: original }, wait())).toBeUndefined()
++  })
++})
