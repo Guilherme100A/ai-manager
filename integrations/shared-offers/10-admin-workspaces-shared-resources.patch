@@ -402,7 +402,7 @@ index 91a97cde936ca64050b8ab8ffde6d286468d1e5b..841344b07abda8b9473255b316380a61
        </div>
  
 diff --git a/apps/web/src/features/business-areas/areas.tsx b/apps/web/src/features/business-areas/areas.tsx
-index 606b5742d240ada1cd867cf0bc9689600daac2da..5e70197709969898c285178e5aa0b0cdefa70c00 100644
+index 606b5742d240ada1cd867cf0bc9689600daac2da..04fe364653130665eaefbe67bbaafe82106e5411 100644
 --- a/apps/web/src/features/business-areas/areas.tsx
 +++ b/apps/web/src/features/business-areas/areas.tsx
 @@ -1,40 +1,19 @@
@@ -487,8 +487,9 @@ index 606b5742d240ada1cd867cf0bc9689600daac2da..5e70197709969898c285178e5aa0b0cd
            </select>
            <button type="button" disabled={busy || !adopt} onClick={() => void run(async () => {
 -            await api.post(`/api/business-areas/${selected}/adopt-offer`, { offer_id: adopt, confirm: true }); setAdopt(''); await load(); setNotice('Oferta e recursos atribuídos à área selecionada')
+-          })}>Confirmar atribuição da oferta e recursos</button>
 +            await api.post(`/api/business-areas/${selected}/adopt-offer`, { offer_id: adopt, confirm: true }); setAdopt(''); await load(); setNotice('Oferta movida para o workspace')
-           })}>Confirmar atribuição da oferta e recursos</button>
++          })}>Mover oferta para o workspace</button>
          </fieldset>
 -        {Object.entries(labels).map(([kind, label]) => <fieldset key={kind}><legend>{label}</legend>
 -          <p>Cadastros atribuídos a outra área não são transferidos.</p>
@@ -631,18 +632,34 @@ index 0000000000000000000000000000000000000000..c27ceaa28400dbc4507bd36aa4665394
 +  )
 +}
 diff --git a/apps/web/src/features/offers/page.tsx b/apps/web/src/features/offers/page.tsx
-index dedfb476305d5bde44f515a3a278db9367c51dfd..12266bdd1a1e1e101385571c61a1d704927e24dc 100644
+index dedfb476305d5bde44f515a3a278db9367c51dfd..43aa605970e3371d55d74bcc3f8d89d069bb6938 100644
 --- a/apps/web/src/features/offers/page.tsx
 +++ b/apps/web/src/features/offers/page.tsx
 @@ -1,7 +1,6 @@
  import { useEffect, useState } from 'react'
  import { useSession } from '@/features/settings-company/ui'
- import { api } from '@/lib/http'
+-import { api } from '@/lib/http'
 -import { BusinessAreaManager } from '../business-areas/areas'
++import { activeBusinessArea, api } from '@/lib/http'
  import './style.css'
  type Item = { id: string; name: string; currency?: string }
  type Config = {
-@@ -129,7 +128,6 @@ function AuthorizedOffersPage() {
+@@ -50,6 +49,7 @@ export function OffersPage() {
+ }
+ function AuthorizedOffersPage() {
+   const session = useSession()
++  const inWorkspace = activeBusinessArea() !== null
+   const [resources, setResources] = useState<Resources>(),
+     [offers, setOffers] = useState<Offer[]>([]),
+     [id, setId] = useState(''),
+@@ -124,12 +124,11 @@ function AuthorizedOffersPage() {
+     <section className="offers-page" data-testid="page-offers">
+       <header>
+         <div>
+-          <h1>Ofertas compartilhadas</h1>
+-          <p>Uma empresa, todos os chips. A oferta define responsável, conta recebedora e destino dos eventos.</p>
++          <h1>{inWorkspace ? 'Ofertas do workspace' : 'Ofertas compartilhadas'}</h1>
++          <p>{inWorkspace ? 'Crie ofertas deste workspace usando os recursos compartilhados da empresa.' : 'Uma empresa, todos os chips. A oferta define responsável, conta recebedora e destino dos eventos.'}</p>
          </div>
          <button onClick={reset}>Nova oferta</button>
        </header>
@@ -898,7 +915,7 @@ index 8401786506f286f92a1dfe0e2a2a14c68bcfa82b..e247e74834ecfcd568c49f0a6c2bccb9
    }
    async save(company: string, input: { name: string; active?: boolean; config: OfferConfig }, id?: string, area?: string | null) {
 diff --git a/tests/acceptance/T125/business-areas.test.ts b/tests/acceptance/T125/business-areas.test.ts
-index baf66768195d3694a24418c2020c8629831287a2..e4039343613864a9aff2393173083a5dbf65efeb 100644
+index baf66768195d3694a24418c2020c8629831287a2..11330a4d71febf2374a94ced06c77e5142841d79 100644
 --- a/tests/acceptance/T125/business-areas.test.ts
 +++ b/tests/acceptance/T125/business-areas.test.ts
 @@ -72,26 +72,29 @@ it('names/BMs are explicit, scoped by company, unique and validated without cont
@@ -1079,7 +1096,7 @@ index baf66768195d3694a24418c2020c8629831287a2..e4039343613864a9aff2393173083a5d
    expect((await tool(reader,'get_conversation_flow_runs',{id:chat.id,business_area_id:b})).data.items).toHaveLength(1)
  })
  it('desktop/mobile navigation selects the actual business area, filters offers and shows its declared BM', async () => {
-@@ -265,17 +279,30 @@ it('desktop/mobile navigation selects the actual business area, filters offers a
+@@ -265,17 +279,46 @@ it('desktop/mobile navigation selects the actual business area, filters offers a
      try {
        await context.addCookies([{name:'crm_session',value:t.token,url:base,httpOnly:true,sameSite:'Lax'}])
        const page=await context.newPage(),errors:string[]=[];page.on('pageerror',e=>errors.push(e.message))
@@ -1092,17 +1109,33 @@ index baf66768195d3694a24418c2020c8629831287a2..e4039343613864a9aff2393173083a5d
 +      expect(await page.getByRole('heading',{name:'Ofertas compartilhadas'}).count()).toBe(0)
 +      await page.getByTestId('workspace-enter-1').click()
 +      await page.getByTestId('workspace-current').waitFor()
-+      await page.getByRole('heading',{name:'Ofertas compartilhadas'}).waitFor()
++      await page.getByRole('heading',{name:'Ofertas do workspace'}).waitFor()
        await expect.poll(()=>page.getByRole('button',{name:/Business offer 0/}).isVisible()).toBe(true)
        expect(await page.getByRole('button',{name:/Business offer 1/}).isVisible()).toBe(false)
        expect(await page.getByTestId('business-area-bm').textContent()).toContain('111000')
 -      await page.getByLabel('Área de negócio',{exact:true}).selectOption(areas[1].id)
++      const form = page.locator('form').filter({ has: page.getByRole('button', { name: 'Salvar oferta' }) })
++      const offerName = 'Workspace browser offer ' + width
++      await form.getByLabel('Nome da oferta').fill(offerName)
++      const shared = bundles[0]
++      for (const [label, id] of Object.entries({
++        'Responsável': shared.owner_user_id,
++        'Produto': shared.product_id,
++        'Fluxo publicado': shared.flow_id,
++        'Conta recebedora XPag': shared.integration_id,
++        'Conta de anúncios': shared.ad_account_id,
++        'Pixel de destino': shared.pixel_id,
++      })) await form.getByLabel(label, { exact: true }).selectOption(String(id))
++      await form.getByRole('group', { name: /Chips permitidos/ }).getByRole('checkbox').first().check()
++      await form.getByRole('button', { name: 'Salvar oferta' }).click()
++      await page.getByRole('button', { name: new RegExp(offerName) }).waitFor()
 +      await page.reload()
 +      await expect.poll(()=>page.getByRole('button',{name:/Business offer 0/}).isVisible()).toBe(true)
 +      await page.getByRole('button',{name:'Trocar workspace'}).click()
 +      await page.getByTestId('workspace-enter-2').click()
        await expect.poll(()=>page.getByRole('button',{name:/Business offer 1/}).isVisible()).toBe(true)
        expect(await page.getByRole('button',{name:/Business offer 0/}).isVisible()).toBe(false)
++      expect(await page.getByRole('button',{name:new RegExp(offerName)}).count()).toBe(0)
        expect(await page.getByTestId('business-area-bm').textContent()).toContain('222000')
 +      await page.getByRole('button',{name:'Trocar workspace'}).click()
 +      await page.getByTestId('workspace-enter-3').click()
