@@ -50,10 +50,10 @@ index 769ae91d4d8fd459d87492623a04bc76d1913ba3..97afc260241a225d75c79999bbde363b
    }
 diff --git a/packages/core/src/flows/engine/reply-buffer.db.unit.test.ts b/packages/core/src/flows/engine/reply-buffer.db.unit.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..2564a77020ecfac37e16ac8ce2668d1ee1de288e
+index 0000000000000000000000000000000000000000..a5df4fb024b41e33573cf5c028adcabb52f8d767
 --- /dev/null
 +++ b/packages/core/src/flows/engine/reply-buffer.db.unit.test.ts
-@@ -0,0 +1,149 @@
+@@ -0,0 +1,150 @@
 +import { randomBytes } from 'node:crypto'
 +import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 +import { eq } from 'drizzle-orm'
@@ -107,9 +107,10 @@ index 0000000000000000000000000000000000000000..2564a77020ecfac37e16ac8ce2668d1e
 +  const messaging = { resolveTarget: async () => ({ sessionId: 'fake-session', phone: '+5511999990001' }), sleep: async () => undefined }
 +  const registry = registerInteractiveNodes(productionNodeRegistry(messaging), { ...messaging, now })
 +  const engine = new FlowEngine({ db, wa, llm, registry, hooks: control.engineHooks(), now })
-+  const { runId } = await engine.startRun(ctx, { flowId: flow.id, contactId: contact!.id, vars: { 'ai.response': 'Initial question', preserved: { value: 'same' } } })
++  const { runId } = await engine.startRun(ctx, { flowId: flow.id, contactId: contact!.id, vars: { ai: { response: 'Initial question' }, preserved: { value: 'same' } } })
 +  await engine.step(runId, 0)
 +  const initial = await runOf(runId), snapshot = await snapshotOf(initial.versionId!)
++  expect({ status: initial.status, node: initial.currentNodeKey, error: initial.error }).toEqual({ status: 'waiting', node: 'W', error: null })
 +  const step = async (result: AdvanceResult) => { expect(result.advanced).toBe(true); if (!result.advanced) throw Error('Did not advance'); return engine.step(runId, result.expectedSeq) }
 +  const reply = async (text: string, message_id: string) => step(await control.resolveReply(runId, { text, message_id }))
 +  const timer = () => scheduled.at(-1)!.data
