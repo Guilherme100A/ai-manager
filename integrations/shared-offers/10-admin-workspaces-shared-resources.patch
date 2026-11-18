@@ -1,0 +1,1116 @@
+diff --git a/apps/api/src/middleware/business-area.ts b/apps/api/src/middleware/business-area.ts
+index 4a1e46e..e1736ab 100644
+--- a/apps/api/src/middleware/business-area.ts
++++ b/apps/api/src/middleware/business-area.ts
+@@ -1,24 +1,14 @@
+ import type { MiddlewareHandler } from 'hono'
+-import { BusinessAreasService, BusinessAreaError, isSharedOffersCompany, type AreaResourceKind } from '@crm/core'
++import { BusinessAreasService, BusinessAreaError, isSharedOffersCompany } from '@crm/core'
+ import { sql } from 'drizzle-orm'
+ import type { AppEnv, ResolvedDeps } from '../lib/types'
+ import { ApiError } from '../lib/errors'
+ import { setAudit } from './audit'
+ 
+ export const BUSINESS_AREA_HEADER = 'x-business-area-id'
+-const groups: [RegExp, AreaResourceKind, string][] = [
+-  [/^\/api\/flows(?:\/([^/]+))?/, 'flow', 'flow'],
+-  [/^\/api\/products(?:\/([^/]+))?/, 'product', 'product'],
+-  [/^\/api\/payment-integrations(?:\/([^/]+))?/, 'integration', 'integration'],
+-  [/^\/api\/meta\/pixels(?:\/([^/]+))?/, 'pixel', 'pixel'],
+-  [/^\/api\/meta\/tracked-links(?:\/([^/]+))?/, 'link', 'link'],
+-  [/^\/api\/meta\/ad-accounts(?:\/([^/]+))?/, 'account', 'ad_account'],
+-]
+-const staticNames = new Set(['names', 'import', 'import-json'])
+-const scopedPath = (path: string) => groups.find(([re]) => re.test(path))
+ class RollbackResponse extends Error {}
+ 
+-/** Absent header = legacy resources that have not been assigned. Shared chips are not partitioned. */
++/** Absent header = offers in Geral. Company resources are shared between workspaces. */
+ export function businessAreaContext(deps: ResolvedDeps): MiddlewareHandler<AppEnv> {
+   return async (c, next) => {
+     const ctx = c.get('ctx'), company = ctx?.companyId
+@@ -37,56 +27,30 @@ export function businessAreaContext(deps: ResolvedDeps): MiddlewareHandler<AppEn
+       const area = resolved?.id ?? null
+       c.set('businessArea', area)
+       setAudit(c, { detail: { business_area_id: area } })
+-      const group = scopedPath(c.req.path)
++      const flowWrite = /^\/api\/flows(?:\/|$)/.test(c.req.path) && !['GET', 'HEAD', 'DELETE'].includes(c.req.method)
+       const apply = async () => {
+-        const run = /^\/api\/flow-runs\/([^/]+)(?:\/|$)/.exec(c.req.path)
+-        if (run) {
+-          if (!/^[a-f\d]{8}(-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(run[1]!)) throw new ApiError('NOT_FOUND','Execução não encontrada')
+-          const [row] = (await deps.db.execute(sql`select flow_id from crm.flow_runs where company_id=${company} and id=${run[1]}`)).rows as {flow_id:string}[]
+-          if (!row) throw new ApiError('NOT_FOUND','Execução não encontrada')
+-          await svc.assertResource(company,area,'flow',row.flow_id)
+-        }
+-        if (group) {
+-          const [pattern, kind, key] = group, id = pattern.exec(c.req.path)?.[1]
+-          if (id && !staticNames.has(id)) await svc.assertResource(company, area, kind, id)
+-          if (kind === 'flow' && !['GET', 'HEAD', 'DELETE'].includes(c.req.method)) {
+-            const raw = await c.req.raw.clone().text()
+-            if (raw) {
+-              let body: unknown
+-              try { body = JSON.parse(raw) } catch { throw new ApiError('MALFORMED_REQUEST', 'JSON inválido') }
+-              await svc.assertReferences(company, area, body)
+-            }
+-          }
+-          await next()
+-          if (c.res.status >= 400 || c.res.status === 204 || !c.res.headers.get('content-type')?.includes('application/json')) return
+-          const body = await c.res.clone().json() as Record<string, unknown>
+-          if (c.req.method === 'GET' && (!id || staticNames.has(id)) && Array.isArray(body.items)) {
+-            body.items = await svc.filter(company, area, kind, body.items as { id: string }[])
+-            c.res = new Response(JSON.stringify(body), c.res)
++        if (flowWrite) {
++          const raw = await c.req.raw.clone().text()
++          if (raw) {
++            let body: unknown
++            try { body = JSON.parse(raw) } catch { throw new ApiError('MALFORMED_REQUEST', 'JSON inválido') }
++            await svc.assertReferences(company, area, body)
+           }
+-          if (c.req.method === 'POST' && (!id || (kind === 'flow' && (['import','import-json'].includes(id) || c.req.path.endsWith('/duplicate'))))) {
+-            const created = [body[key],...(kind==='flow' && id==='import' && Array.isArray(body.items) ? body.items.map(item=>(item as {flow:unknown}).flow) : [])]
+-              .filter((item):item is {id:string} => !!item && typeof item==='object' && 'id' in item && typeof item.id==='string')
+-            for (const item of created) if (area) await deps.db.execute(sql`insert into crm.business_area_resources(company_id,area_id,kind,resource_id)
+-              values(${company},${area},${kind},${item.id})`)
+-            if (kind==='flow') for (const item of created) await svc.assertFlowReferences(company,area,item.id)
+-          }
+-          return
+         }
+-        // Meta profiles are credentials shared by accounts. Scoped mutation would affect other areas.
+-        if (area && /^\/api\/meta\/profiles\/[^/]+/.test(c.req.path) && c.req.method !== 'GET')
+-          throw new ApiError('CONFLICT', 'Gerencie credenciais Meta no cadastro geral; esta operação afeta todas as áreas')
+         await next()
+-        if (/^\/api\/chats\/[^/]+\/flow-runs$/.test(c.req.path) && c.req.method==='GET' && c.res.status===200) {
+-          const body=await c.res.clone().json() as {items:{id:string;flow_id:string}[]}
+-          const filtered=await svc.filter(company,area,'flow',body.items.map(run=>({id:run.flow_id,run})))
+-          c.res=new Response(JSON.stringify({...body,items:filtered.map(x=>x.run)}),c.res)
+-        }
++        // Imports and paste may materialize resource IDs omitted from the request body.
++        if (!flowWrite || c.res.status >= 400 || !c.res.headers.get('content-type')?.includes('application/json')) return
++        const path = c.req.path
++        if (!/^\/api\/flows\/?$/.test(path) && !/\/(import|import-json|duplicate|paste-nodes)$/.test(path)) return
++        const response = await c.res.clone().json() as { flow?: { id: string }; items?: { flow?: { id: string } }[] }
++        const ids = [response.flow?.id, ...(response.items ?? []).map(item => item.flow?.id)]
++        if (path.endsWith('/paste-nodes')) ids.push(path.split('/')[3])
++        for (const id of ids) if (id) await svc.assertFlowReferences(company, area, id)
+       }
+-      // Hold assignment lock through the API mutation so destinations cannot change area mid-edit.
++      // Serialize offer mutations with moves out of Geral.
+       // These handlers enqueue work after their own DB commit. Never delay that commit until after enqueueing.
+       const lifecycle = /\/flows\/[^/]+\/(activate|pause|archive|unarchive|trigger)$/.test(c.req.path)
+-      if ((group || c.req.path.startsWith('/api/offers')) && !lifecycle && !['GET', 'HEAD'].includes(c.req.method)) {
++      if ((flowWrite || c.req.path.startsWith('/api/offers')) && !lifecycle && !['GET', 'HEAD'].includes(c.req.method)) {
+         try {
+           await deps.areaTransaction(async tx => {
+             await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`business-areas:${company}`},0))`)
+diff --git a/apps/api/src/routes/business-areas/index.ts b/apps/api/src/routes/business-areas/index.ts
+index 3c80645..1826da3 100644
+--- a/apps/api/src/routes/business-areas/index.ts
++++ b/apps/api/src/routes/business-areas/index.ts
+@@ -1,6 +1,6 @@
+ import { Hono } from 'hono'
+ import { z } from 'zod'
+-import { BusinessAreasService, BusinessAreaError, AREA_RESOURCE_TABLES, isSharedOffersCompany } from '@crm/core'
++import { BusinessAreasService, BusinessAreaError, isSharedOffersCompany } from '@crm/core'
+ import type { AppEnv, ResolvedDeps } from '../../lib/types'
+ import { getCompanyCtx } from '../../lib/context'
+ import { ApiError } from '../../lib/errors'
+@@ -35,12 +35,9 @@ export function businessAreasRoutes(deps: ResolvedDeps) {
+       setAudit(c, { action: 'business_areas.update', targetType: 'business_area', targetId: area.id })
+       return c.json({ area })
+     })
+-  app.post('/api/business-areas/:id/resources', requirePerm('settings.products.edit'), validate('param', z.object({ id: z.uuid() })),
+-    validate('json', z.object({ kind: z.enum(Object.keys(AREA_RESOURCE_TABLES) as ['product', 'flow', 'integration', 'account', 'pixel', 'link']), resource_id: z.uuid() })), async c => {
+-      const b = c.req.valid('json'), binding = await svc.assign(company(c), c.req.param('id'), b.kind, b.resource_id)
+-      setAudit(c, { action: 'business_areas.assign', targetType: b.kind, targetId: b.resource_id, detail: { business_area_id: binding.area_id } })
+-      return c.json({ binding }, 201)
+-    })
++  app.post('/api/business-areas/:id/resources', requirePerm('settings.products.edit'), async () => {
++    throw new ApiError('CONFLICT', 'Os recursos são compartilhados entre os workspaces')
++  })
+   app.post('/api/business-areas/:id/adopt-offer', requirePerm('settings.products.edit'), validate('param', z.object({ id: z.uuid() })),
+     validate('json', z.object({ offer_id: z.uuid(), confirm: z.literal(true) })), async c => {
+       const result = await svc.adoptOffer(company(c), c.req.param('id'), c.req.valid('json').offer_id)
+diff --git a/apps/api/src/routes/flow-runs/funnel.ts b/apps/api/src/routes/flow-runs/funnel.ts
+index 13db565..cebb8eb 100644
+--- a/apps/api/src/routes/flow-runs/funnel.ts
++++ b/apps/api/src/routes/flow-runs/funnel.ts
+@@ -5,7 +5,17 @@ import { and, countDistinct, eq, gte, inArray, lte, sql, type SQL } from 'drizzl
+ import { FLOW_RUN_STATUSES, chats, flowRunSteps, flowRuns, type Database, type FlowRunStatus } from '@crm/db'
+ import type { FlowDefinition } from '@crm/shared/flows'
+ 
++export function offerRunScope(area: string | null | undefined): SQL | undefined {
++  if (area === undefined) return undefined
++  return sql`(not ${flowRuns.offerScoped} or exists (
++    select 1 from crm.offer_opportunities o
++    where o.company_id=${flowRuns.companyId} and o.id::text=${flowRuns.trigger}->>'opportunity_id'
++      and o.snapshot->>'business_area_id' is not distinct from ${area}::text
++  ))`
++}
++
+ export interface FlowFunnelFilter {
++  businessArea?: string | null
+   from: Date
+   to: Date
+   connectionId?: string
+@@ -45,7 +55,7 @@ export async function flowFunnel(db: Database, companyId: string, flowId: string
+   const where: SQL[] = [eq(flowRuns.companyId, companyId), eq(flowRuns.flowId, flowId), gte(flowRuns.startedAt, f.from), lte(flowRuns.startedAt, f.to)]
+   if (f.connectionId)
+     where.push(inArray(flowRuns.chatId, db.select({ id: chats.id }).from(chats).where(and(eq(chats.companyId, companyId), eq(chats.connectionId, f.connectionId)))))
+-  const runs = and(...where)
++  const runs = and(...where, offerRunScope(f.businessArea))
+ 
+   const byStatus = await db.select({ status: flowRuns.status, n: sql<number>`count(*)::int` }).from(flowRuns).where(runs).groupBy(flowRuns.status)
+   const stopped = await db
+diff --git a/apps/api/src/routes/flow-runs/index.ts b/apps/api/src/routes/flow-runs/index.ts
+index 5ca67a0..a32f052 100644
+--- a/apps/api/src/routes/flow-runs/index.ts
++++ b/apps/api/src/routes/flow-runs/index.ts
+@@ -14,7 +14,7 @@ import { validate } from '../../lib/validate'
+ import type { AppEnv, ResolvedDeps } from '../../lib/types'
+ import { requirePerm } from '../../middleware/authorize'
+ import { setAudit } from '../../middleware/audit'
+-import { flowFunnel } from './funnel'
++import { flowFunnel, offerRunScope } from './funnel'
+ import { flowServices } from './services'
+ 
+ export { flowServices, registerConnectionNameSource, type ConnectionNameSource, type FlowServices } from './services'
+@@ -64,9 +64,9 @@ export function flowRunsRoutes(deps: ResolvedDeps) {
+       .innerJoin(flows, eq(flows.id, flowRuns.flowId))
+       .where(where)
+ 
+-  const runOf = async (companyId: string, id: string) => {
++  const runOf = async (companyId: string, id: string, area?: string | null) => {
+     if (!UUID_RE.test(id)) throw new ApiError('NOT_FOUND', 'Execução não encontrada')
+-    const [row] = await runsWithName(and(eq(flowRuns.id, id), eq(flowRuns.companyId, companyId)))
++    const [row] = await runsWithName(and(eq(flowRuns.id, id), eq(flowRuns.companyId, companyId), offerRunScope(area)))
+     if (!row) throw new ApiError('NOT_FOUND', 'Execução não encontrada')
+     return row
+   }
+@@ -112,7 +112,7 @@ export function flowRunsRoutes(deps: ResolvedDeps) {
+     const active = await deps.db
+       .select({ id: flowRuns.id })
+       .from(flowRuns)
+-      .where(and(eq(flowRuns.companyId, ctx.companyId), eq(flowRuns.contactId, chat.contactId), sql`(${flowRuns.chatId}=${chat.id} or ${flowRuns.chatId} is null)`, inArray(flowRuns.status, [...CANCELLABLE_RUN_STATUSES])))
++      .where(and(eq(flowRuns.companyId, ctx.companyId), eq(flowRuns.contactId, chat.contactId), sql`(${flowRuns.chatId}=${chat.id} or ${flowRuns.chatId} is null)`, offerRunScope(c.get('businessArea')), inArray(flowRuns.status, [...CANCELLABLE_RUN_STATUSES])))
+     const cancelled = await cancelRuns(ctx.companyId, active.map((r) => r.id))
+ 
+     let runId: string
+@@ -146,7 +146,7 @@ export function flowRunsRoutes(deps: ResolvedDeps) {
+       throw err
+     })
+     const q = c.req.valid('query')
+-    const where = and(eq(flowRuns.companyId, ctx.companyId), eq(flowRuns.flowId, flow.id), q.status ? eq(flowRuns.status, q.status) : undefined)
++    const where = and(eq(flowRuns.companyId, ctx.companyId), eq(flowRuns.flowId, flow.id), offerRunScope(c.get('businessArea')), q.status ? eq(flowRuns.status, q.status) : undefined)
+     const [total] = await deps.db.select({ n: count() }).from(flowRuns).where(where)
+     const rows = await runsWithName(where).orderBy(desc(flowRuns.startedAt)).limit(q.limit).offset(pageOffset(q))
+     return c.json({ items: rows.map((r) => toRunDto(r.run, r.flowName)), page: buildPageMeta(q, { total: Number(total?.n ?? 0) }) })
+@@ -166,12 +166,12 @@ export function flowRunsRoutes(deps: ResolvedDeps) {
+     if (to.getTime() - from.getTime() > FUNNEL_MAX_DAYS * 86_400_000)
+       throw new ApiError('VALIDATION_ERROR', 'Período inválido', { fields: [{ path: 'from', message: `no máximo ${FUNNEL_MAX_DAYS} dias` }] })
+     const def = await store.toDefinition(ctx, flow.id)
+-    return c.json({ funnel: await flowFunnel(deps.db, ctx.companyId, flow.id, def, { from, to, ...(q.connection_id ? { connectionId: q.connection_id } : {}) }) })
++    return c.json({ funnel: await flowFunnel(deps.db, ctx.companyId, flow.id, def, { from, to, ...(c.get('businessArea') !== undefined ? { businessArea: c.get('businessArea') ?? null } : {}), ...(q.connection_id ? { connectionId: q.connection_id } : {}) }) })
+   })
+ 
+   app.get('/api/flow-runs/:id', requirePerm('flows.view'), async (c) => {
+     const ctx = ctxOf(c)
+-    const { run, flowName } = await runOf(ctx.companyId, c.req.param('id'))
++    const { run, flowName } = await runOf(ctx.companyId, c.req.param('id'), c.get('businessArea'))
+     const steps = await deps.db
+       .select()
+       .from(flowRunSteps)
+@@ -193,7 +193,7 @@ export function flowRunsRoutes(deps: ResolvedDeps) {
+ 
+   app.post('/api/flow-runs/:id/cancel', requirePerm('flows.run'), async (c) => {
+     const ctx = ctxOf(c)
+-    const { run } = await runOf(ctx.companyId, c.req.param('id'))
++    const { run } = await runOf(ctx.companyId, c.req.param('id'), c.get('businessArea'))
+     const done = await cancelRuns(ctx.companyId, [run.id])
+     if (!done.length) throw new ApiError('CONFLICT', 'A execução já terminou', { error_code: 'run_not_active' })
+     const after = await runOf(ctx.companyId, run.id)
+@@ -209,7 +209,7 @@ export function flowRunsRoutes(deps: ResolvedDeps) {
+     if (!chat) throw new ApiError('NOT_FOUND', 'Chat não encontrado')
+     const activeOnly = ['1', 'true'].includes(c.req.valid('query').active ?? '')
+     const rows = await runsWithName(
+-      and(eq(flowRuns.companyId, ctx.companyId), eq(flowRuns.chatId, chat.id), activeOnly ? inArray(flowRuns.status, [...CANCELLABLE_RUN_STATUSES]) : undefined),
++      and(eq(flowRuns.companyId, ctx.companyId), eq(flowRuns.chatId, chat.id), offerRunScope(c.get('businessArea')), activeOnly ? inArray(flowRuns.status, [...CANCELLABLE_RUN_STATUSES]) : undefined),
+     ).orderBy(desc(flowRuns.startedAt))
+     return c.json({ items: rows.map((r) => toRunDto(r.run, r.flowName)) })
+   })
+@@ -230,7 +230,7 @@ export function flowRunsRoutes(deps: ResolvedDeps) {
+       .select({ id: flowRuns.id })
+       .from(flowRuns)
+       .innerJoin(chats, eq(chats.id, flowRuns.chatId))
+-      .where(and(eq(flowRuns.companyId, ctx.companyId), eq(chats.connectionId, connectionId), inArray(flowRuns.status, [...CANCELLABLE_RUN_STATUSES])))
++      .where(and(eq(flowRuns.companyId, ctx.companyId), eq(chats.connectionId, connectionId), offerRunScope(c.get('businessArea')), inArray(flowRuns.status, [...CANCELLABLE_RUN_STATUSES])))
+     const done = await cancelRuns(ctx.companyId, runs.map((r) => r.id))
+     setAudit(c, { action: 'flow_run.cancel_all', targetType: 'connection', targetId: connectionId, detail: { cancelled: done.length } })
+     return c.json({ cancelled: done.length })
+diff --git a/apps/api/src/routes/meta-entities/index.ts b/apps/api/src/routes/meta-entities/index.ts
+index 3858e7c..0f6e48d 100644
+--- a/apps/api/src/routes/meta-entities/index.ts
++++ b/apps/api/src/routes/meta-entities/index.ts
+@@ -2,8 +2,6 @@
+ // `{ level, fb_ad_account_id, status?, name?, daily_budget?, lifetime_budget? }` → `{ success: true, entity }`.
+ // Permissão `facebook.campaigns`. Erro da Meta → 502 "Não foi possível atualizar na Meta."; limite de uso → 429.
+ // Depois de editar, o cache de 5 min dos bundles da empresa é invalidado.
+-import { BusinessAreasService } from '@crm/core'
+-import { sql } from 'drizzle-orm'
+ import { MetaBundleService, MetaMutationError, MetaMutationsService } from '@crm/core'
+ import { InternalSalesService } from '@crm/core'
+ import { Hono } from 'hono'
+@@ -44,13 +42,6 @@ export function metaEntitiesRoutes(deps: ResolvedDeps) {
+       const { companyId } = getCompanyCtx(c)
+       const id = c.req.param('id')
+       const body = c.req.valid('json')
+-      const area = c.get('businessArea')
+-      if (area !== undefined) {
+-        const fb = String(body.fb_ad_account_id ?? '').replace(/^act_/, '')
+-        const accounts = (await deps.db.execute(sql`select id from crm.meta_ad_accounts where company_id=${companyId} and (fb_account_id=${fb} or fb_account_id=${'act_'+fb})`)).rows as {id:string}[]
+-        const allowed = await new BusinessAreasService(deps.db).filter(companyId,area,'account',accounts)
+-        if (!allowed.length) throw new ApiError('NOT_FOUND','Conta de anúncios não pertence à área selecionada')
+-      }
+       const result = await metaDomain(async () => {
+         try {
+           return await svc().update(companyId, id, body)
+diff --git a/apps/api/src/routes/meta-oauth/index.ts b/apps/api/src/routes/meta-oauth/index.ts
+index 7789a2a..2db6294 100644
+--- a/apps/api/src/routes/meta-oauth/index.ts
++++ b/apps/api/src/routes/meta-oauth/index.ts
+@@ -31,7 +31,7 @@ export function metaOAuthRoutes(deps: ResolvedDeps) {
+ 
+   app.get('/api/meta/oauth/callback', async (c) => {
+     const back = (status: 'success' | 'error', message?: string) => {
+-      const url = new URL('/facebook/profiles', webUrl())
++      const url = new URL('facebook/profiles', webUrl().replace(/\/+$/, '') + '/')
+       url.searchParams.set('meta_oauth', status)
+       if (message) url.searchParams.set('meta_message', short(message))
+       return c.redirect(url.toString(), 302)
+diff --git a/apps/api/src/routes/meta-profiles/index.ts b/apps/api/src/routes/meta-profiles/index.ts
+index c006c07..431949d 100644
+--- a/apps/api/src/routes/meta-profiles/index.ts
++++ b/apps/api/src/routes/meta-profiles/index.ts
+@@ -8,8 +8,6 @@ import { validate } from '../../lib/validate'
+ import { setAudit } from '../../middleware/audit'
+ import { requirePerm } from '../../middleware/authorize'
+ import { metaDomain, metaProfilesServiceFor, requireMetaManager } from './shared'
+-import { BusinessAreasService, type MetaProfileDto } from '@crm/core'
+-import { ApiError } from '../../lib/errors'
+ 
+ const adAccountSchema = z.preprocess(
+   (v) => (v && typeof v === 'object' && !Array.isArray(v) && 'meta_ad_account' in v ? (v as { meta_ad_account: unknown }).meta_ad_account : v),
+@@ -20,26 +18,15 @@ export function metaProfilesRoutes(deps: ResolvedDeps) {
+   const svc = () => metaProfilesServiceFor(deps)
+   const app = new Hono<AppEnv>()
+   const view = requirePerm('facebook.profiles')
+-  const scoped = async (company: string, area: string | null | undefined, profiles: MetaProfileDto[]) => {
+-    if (area === undefined) return profiles
+-    const svc = new BusinessAreasService(deps.db), result: MetaProfileDto[] = []
+-    for (const profile of profiles) {
+-      const accounts = await svc.filter(company,area,'account',profile.ad_accounts)
+-      if (accounts.length) result.push({ ...profile, ad_accounts:accounts, ad_accounts_count:accounts.length, ad_accounts_included_count:accounts.filter(a=>a.included_in_dashboard).length })
+-    }
+-    return result
+-  }
+-
+   app.get('/api/meta/profiles', view, async (c) => {
+     const { companyId } = getCompanyCtx(c)
+-    return c.json({ items: await scoped(companyId,c.get('businessArea'),await metaDomain(() => svc().list(companyId))) }, 200)
++    return c.json({ items: await metaDomain(() => svc().list(companyId)) }, 200)
+   })
+ 
+   app.get('/api/meta/profiles/:id', view, async (c) => {
+     const { companyId } = getCompanyCtx(c)
+-    const profiles = await scoped(companyId,c.get('businessArea'),[await metaDomain(() => svc().get(companyId, c.req.param('id')))])
+-    if (!profiles[0]) throw new ApiError('NOT_FOUND','Perfil sem conta na área selecionada')
+-    return c.json({ profile: profiles[0] }, 200)
++    const profile = await metaDomain(() => svc().get(companyId, c.req.param('id')))
++    return c.json({ profile }, 200)
+   })
+ 
+   app.delete('/api/meta/profiles/:id', view, requireMetaManager, async (c) => {
+diff --git a/apps/api/src/routes/meta-structure/index.ts b/apps/api/src/routes/meta-structure/index.ts
+index 87280ad..352ed5c 100644
+--- a/apps/api/src/routes/meta-structure/index.ts
++++ b/apps/api/src/routes/meta-structure/index.ts
+@@ -3,8 +3,6 @@
+ // `meta.bundle.progress` e relê a mesma URL (pronto em cache → 200). Sem `async`, monta na hora (200).
+ import { Hono } from 'hono'
+ import { defineQueue, META_SYNC_QUEUE, MetaBundleError, MetaBundleService, RealtimePublisher, type MetaSyncJobData } from '@crm/core'
+-import { BusinessAreasService } from '@crm/core'
+-import { sql } from 'drizzle-orm'
+ import { InternalSalesService } from '@crm/core'
+ import { getCompanyCtx } from '../../lib/context'
+ import { ApiError } from '../../lib/errors'
+@@ -49,16 +47,7 @@ export function metaStructureRoutes(deps: ResolvedDeps) {
+     const { companyId } = getCompanyCtx(c)
+     const q = c.req.query()
+     // `ad_account_ids[]=a&ad_account_ids[]=b`, `ad_account_ids=a,b` ou repetido.
+-    let ids = [...(c.req.queries('ad_account_ids[]') ?? []), ...(c.req.queries('ad_account_ids') ?? [])].flatMap((v) => v.split(','))
+-    const area = c.get('businessArea')
+-    if (area !== undefined) {
+-      const svcAreas = new BusinessAreasService(deps.db)
+-      const accounts = (await deps.db.execute(sql`select id from crm.meta_ad_accounts where company_id=${companyId}`)).rows as {id:string}[]
+-      const allowed = (await svcAreas.filter(companyId,area,'account',accounts)).map(a=>a.id)
+-      if (ids.some(id=>!allowed.includes(id))) throw new ApiError('NOT_FOUND','Conta de anúncios não pertence à área selecionada')
+-      ids = ids.length ? ids : allowed
+-      if (!ids.length) throw new ApiError('VALIDATION_ERROR','Atribua uma conta de anúncios à área selecionada primeiro')
+-    }
++    const ids = [...(c.req.queries('ad_account_ids[]') ?? []), ...(c.req.queries('ad_account_ids') ?? [])].flatMap((v) => v.split(','))
+     const async = flag(q.async)
+     const bundle = await metaDomain(async () => {
+       try {
+diff --git a/apps/web/src/app/shell/app-shell.tsx b/apps/web/src/app/shell/app-shell.tsx
+index 91a97cd..841344b 100644
+--- a/apps/web/src/app/shell/app-shell.tsx
++++ b/apps/web/src/app/shell/app-shell.tsx
+@@ -5,7 +5,7 @@ import { Menu as MenuIcon, MoreHorizontal, PanelLeftClose, PanelLeftOpen, X } fr
+ import { useEffect, useState, type ReactNode } from 'react'
+ // T100: pop-up do aviso ativo da plataforma (fechar só oculta localmente).
+ import { AnnouncementPopup } from '@/features/admin/announcement-popup'
+-import { BusinessAreaSwitcher } from '@/features/business-areas/areas'
++import { WorkspaceBoundary } from '@/features/business-areas/workspace'
+ import { CompanySwitcher } from '@/features/company-switcher/company-switcher'
+ // T84: sino/central de notificações; import ESTÁTICO (registra message.created/notification.created antes do SSE abrir).
+ import { NotificationBell } from '@/features/notifications/bell'
+@@ -126,7 +126,6 @@ export function AppShell({ session, children }: { session: Session; children: Re
+             </button>
+           </div>
+           <CompanySwitcher session={session} collapsed={collapsed} />
+-          {session.company?.business_areas_admin && !collapsed && <BusinessAreaSwitcher companyId={session.company.id} />}
+           <WalletChip session={session} collapsed={collapsed} />
+           <div className="-mx-1 min-h-0 flex-1 overflow-y-auto px-1">
+             <NavList session={session} collapsed={collapsed} />
+@@ -137,7 +136,6 @@ export function AppShell({ session, children }: { session: Session; children: Re
+       ) : null}
+ 
+       <div className="flex min-w-0 flex-1 flex-col">
+-        {!isDesktop && session.company?.business_areas_admin && <BusinessAreaSwitcher companyId={session.company.id} />}
+         {/* Header mobile. */}
+         {isDesktop ? null : (
+           <header
+@@ -164,7 +162,9 @@ export function AppShell({ session, children }: { session: Session; children: Re
+ 
+         <main id="main" className="min-w-0 flex-1 px-4 pt-4 pb-24 lg:px-6 lg:pb-6">
+           <Breadcrumbs />
+-          {children}
++          {session.company?.business_areas_admin && session.perms.has('settings.products.view') ? (
++            <WorkspaceBoundary key={session.company.id} session={session}>{children}</WorkspaceBoundary>
++          ) : children}
+         </main>
+       </div>
+ 
+diff --git a/apps/web/src/features/business-areas/areas.tsx b/apps/web/src/features/business-areas/areas.tsx
+index 606b574..b8b86fc 100644
+--- a/apps/web/src/features/business-areas/areas.tsx
++++ b/apps/web/src/features/business-areas/areas.tsx
+@@ -1,40 +1,18 @@
+ import { useEffect, useState } from 'react'
+-import { api, activeBusinessArea, selectBusinessArea } from '@/lib/http'
+-import { appPath } from '@/lib/base'
++import { api } from '@/lib/http'
+ 
+ interface Area { id: string; slot: number; name: string; bm_id: string | null }
+-interface Resource { id: string; name: string; area_id: string | null }
+-const labels: Record<string, string> = { product: 'Produtos', integration: 'Contas XPag / pagamentos', account: 'Contas de anúncios', pixel: 'Pixels', link: 'Links rastreáveis', flow: 'Fluxos' }
+-
+-export function BusinessAreaSwitcher({ companyId }: { companyId: string }) {
+-  const [areas, setAreas] = useState<Area[]>([]), [error, setError] = useState('')
+-  useEffect(() => { void api.get<{ items: Area[] }>('/api/business-areas').then(r => setAreas(r.items)).catch(() => setError('Não foi possível carregar as áreas')) }, [companyId])
+-  if (!areas.length) return error ? <p role="alert">{error}</p> : null
+-  return <label className="block px-2 text-sm" data-testid="business-area-switcher">
+-    Área de negócio
+-    <select aria-label="Área de negócio" className="mt-1 w-full rounded border bg-background p-2" value={activeBusinessArea() ?? ''} onChange={e => {
+-      selectBusinessArea(e.target.value || null)
+-      // Clears all query/editor caches and pending unsaved forms from the previous area.
+-      window.location.assign(appPath('/offers') + window.location.search)
+-    }}>
+-      <option value="">Sem área (cadastros existentes)</option>
+-      {areas.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+-    </select>
+-    {activeBusinessArea() && <small className="block" data-testid="business-area-bm">BM declarada: {areas.find(a => a.id === activeBusinessArea())?.bm_id ?? 'não informada'}</small>}
+-  </label>
+-}
+ 
+ export function BusinessAreaManager() {
+-  const [areas, setAreas] = useState<Area[]>([]), [catalog, setCatalog] = useState<Record<string, Resource[]>>({}),
+-    [selected, setSelected] = useState(activeBusinessArea() ?? ''), [name, setName] = useState(''), [bm, setBm] = useState(''),
++  const [areas, setAreas] = useState<Area[]>([]),
++    [selected, setSelected] = useState(''), [name, setName] = useState(''), [bm, setBm] = useState(''),
+     [offers, setOffers] = useState<{ id: string; name: string }[]>([]), [adopt, setAdopt] = useState(''),
+     [error, setError] = useState(''), [notice, setNotice] = useState(''), [busy, setBusy] = useState(false)
+   const load = async () => {
+-    const [a, c, o] = await Promise.all([
+-      api.get<{ items: Area[] }>('/api/business-areas'), api.get<Record<string, Resource[]>>('/api/business-areas/catalog'),
++    const [a, o] = await Promise.all([
+       api.get<{ items: { id: string; name: string }[] }>('/api/offers', { headers: { 'X-Business-Area-Id': '' } }),
+     ])
+-    setAreas(a.items); setCatalog(c); setOffers(o.items)
++    setAreas(a.items); setOffers(o.items)
+   }
+   const run = async (fn: () => Promise<void>) => {
+     setError(''); setNotice(''); setBusy(true)
+@@ -43,41 +21,31 @@ export function BusinessAreaManager() {
+   useEffect(() => { void run(load) }, [])
+   useEffect(() => { const a = areas.find(a => a.id === selected); setName(a?.name ?? ''); setBm(a?.bm_id ?? '') }, [selected, areas])
+   return <details data-testid="business-area-manager">
+-    <summary>Organizar Admin 1 / Admin 2 / Admin 3</summary>
+-    <p>Uma conta e três áreas de negócio. O mesmo chip pode ser compartilhado. A área define quais ofertas, fluxos, pagamentos e contas de anúncios podem ser combinados.</p>
+-    <p>Todos continuam administradores da mesma conta e podem trocar de área. Esta seleção não identifica pessoas nem cria senhas ou usuários.</p>
++    <summary>Configurar workspaces e mover ofertas antigas</summary>
+     {error && <p role="alert">{error}</p>}{notice && <p role="status">{notice}</p>}
+     {!areas.length ? <button type="button" disabled={busy} onClick={() => void run(async () => {
+       await api.post('/api/business-areas/initialize', {}); window.location.reload()
+     })}>Criar as três áreas sem mover cadastros</button> : <>
+-      <label>Área a configurar<select aria-label="Área a configurar" value={selected} onChange={e => { setSelected(e.target.value); setAdopt('') }}>
++      <label>Workspace a configurar<select aria-label="Área a configurar" value={selected} onChange={e => { setSelected(e.target.value); setAdopt('') }}>
+         <option value="">Selecione uma área</option>{areas.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+       </select></label>
+       {selected && <>
+-        <label>Nome da área<input aria-label="Nome da área" maxLength={80} value={name} onChange={e => setName(e.target.value)} /></label>
++        <label>Nome do workspace<input aria-label="Nome da área" maxLength={80} value={name} onChange={e => setName(e.target.value)} /></label>
+         <label>ID da BM<input aria-label="ID da BM" inputMode="numeric" maxLength={32} value={bm} onChange={e => setBm(e.target.value)} /></label>
+-        <p>Identificação declarada da BM. Não concede acesso à Meta nem verifica sua propriedade. Vincule abaixo a conta de anúncios já conectada.</p>
++        <p>Identificação declarada da BM. Não concede acesso à Meta nem verifica sua propriedade. As contas conectadas estão disponíveis em todos os workspaces.</p>
+         <button type="button" disabled={busy || !name.trim()} onClick={() => void run(async () => {
+-          await api.put('/api/business-areas/' + selected, { name, bm_id: bm || null }); await load(); setNotice('Área salva')
++          await api.put('/api/business-areas/' + selected, { name, bm_id: bm || null }); await load(); setNotice('Workspace salvo')
+         })}>Salvar nome e BM</button>
+-        <fieldset><legend>Atribuir oferta existente com seus recursos</legend>
+-          <p>Atribui o conjunto completo sem alterar destinos, ativação ou históricos. Recursos de outra área impedem a operação inteira.</p>
++        <fieldset><legend>Mover oferta de Geral</legend>
++          <p>Mova apenas a oferta. Os recursos continuam compartilhados e o histórico mantém o contexto original.</p>
+           <select aria-label="Oferta existente sem área" value={adopt} onChange={e => setAdopt(e.target.value)}>
+             <option value="">Selecione uma oferta sem área</option>{offers.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+           </select>
+           <button type="button" disabled={busy || !adopt} onClick={() => void run(async () => {
+-            await api.post(`/api/business-areas/${selected}/adopt-offer`, { offer_id: adopt, confirm: true }); setAdopt(''); await load(); setNotice('Oferta e recursos atribuídos à área selecionada')
++            await api.post(`/api/business-areas/${selected}/adopt-offer`, { offer_id: adopt, confirm: true }); setAdopt(''); await load(); setNotice('Oferta movida para o workspace')
+           })}>Confirmar atribuição da oferta e recursos</button>
+         </fieldset>
+-        {Object.entries(labels).map(([kind, label]) => <fieldset key={kind}><legend>{label}</legend>
+-          <p>Cadastros atribuídos a outra área não são transferidos.</p>
+-          {(catalog[kind] ?? []).map(r => <div key={r.id} className="origin-row">
+-            <span>{r.name} · {areas.find(a => a.id === r.area_id)?.name ?? 'Sem área'}</span>
+-            {!r.area_id && <button type="button" disabled={busy} onClick={() => void run(async () => {
+-              await api.post(`/api/business-areas/${selected}/resources`, { kind, resource_id: r.id }); await load(); setNotice('Recurso atribuído')
+-            })}>Atribuir a {areas.find(a => a.id === selected)?.name}</button>}
+-          </div>)}
+-        </fieldset>)}
++
+       </>}
+     </>}
+   </details>
+diff --git a/apps/web/src/features/business-areas/workspace.tsx b/apps/web/src/features/business-areas/workspace.tsx
+new file mode 100644
+index 0000000..c27ceaa
+--- /dev/null
++++ b/apps/web/src/features/business-areas/workspace.tsx
+@@ -0,0 +1,121 @@
++import { useEffect, useState, type ReactNode } from 'react'
++import { ArrowRight, Building2, Layers3 } from 'lucide-react'
++import { Link, useRouterState } from '@tanstack/react-router'
++import { appPath, stripAppBase } from '@/lib/base'
++import { api, BUSINESS_AREA_HEADER, selectBusinessArea, selectedWorkspace } from '@/lib/http'
++import type { Session } from '@/lib/session'
++import { BusinessAreaManager } from './areas'
++
++type Workspace = { id: string; slot: number; name: string; bm_id: string | null }
++type WorkspaceList = { items: Workspace[] }
++const unscoped = { headers: { [BUSINESS_AREA_HEADER]: '' } }
++
++export function WorkspaceBoundary({ session, children }: { session: Session; children: ReactNode }) {
++  const [workspaces, setWorkspaces] = useState<Workspace[] | null>(null)
++  const [choice] = useState(selectedWorkspace)
++  const [choosing, setChoosing] = useState(false)
++  const [legacy, setLegacy] = useState(false)
++  const [error, setError] = useState('')
++  const [attempt, setAttempt] = useState(0)
++  const [initializing, setInitializing] = useState(false)
++  const canEdit = session.perms.has('settings.products.edit')
++  const pathname = useRouterState({ select: state => state.location.pathname })
++  useEffect(() => { setLegacy(false) }, [pathname])
++
++  useEffect(() => {
++    let cancelled = false
++    void api.get<WorkspaceList>('/api/business-areas', unscoped).then(result => {
++      if (!cancelled) setWorkspaces(result.items)
++    }).catch(() => {
++      if (!cancelled) setError('Não foi possível carregar os workspaces.')
++    })
++    return () => { cancelled = true }
++  }, [attempt])
++
++  const current = workspaces?.find(item => item.id === choice)
++  const hasWorkspace = choice === null || Boolean(current) || (choice === undefined && workspaces?.length === 0)
++
++  function enter(id: string | null) {
++    if (!selectBusinessArea(id)) {
++      setError('Habilite o armazenamento de sessão do navegador para entrar no workspace.')
++      return
++    }
++    // A troca precisa descartar cache de consultas e editores do workspace anterior.
++    const path = stripAppBase(window.location.pathname)
++    const scopedDeepLink = /^\/(offers|flows|connections|settings|facebook)(\/|$)/.test(path)
++    if (!choosing && scopedDeepLink) window.location.reload()
++    else window.location.replace(appPath('/offers'))
++  }
++
++  async function initialize() {
++    setInitializing(true)
++    setError('')
++    try {
++      const result = await api.post<WorkspaceList>('/api/business-areas/initialize', {}, unscoped)
++      setWorkspaces(result.items)
++    } catch {
++      setError('Não foi possível criar os workspaces.')
++    } finally {
++      setInitializing(false)
++    }
++  }
++
++  const ready = workspaces !== null && hasWorkspace
++  const chooser = (!ready || choosing) ? (
++      <section className="mx-auto max-w-5xl py-6 lg:py-12" data-testid="workspace-entry" aria-labelledby="workspace-entry-heading">
++        <div className="mb-7 flex items-start justify-between gap-4">
++          <div>
++            <h1 id="workspace-entry-heading" className="text-3xl font-semibold tracking-tight">Escolher workspace</h1>
++            <p className="mt-2 text-muted-foreground">Entre no espaço onde quer trabalhar nesta sessão.</p>
++          </div>
++          {choosing && hasWorkspace && <button type="button" className="rounded-md border px-3 py-2 text-sm" onClick={() => { setError(''); setChoosing(false) }}>Voltar</button>}
++        </div>
++        {error && <p role="alert" className="mb-4 text-sm text-destructive">{error}</p>}
++        {!workspaces ? (
++          error ? <button type="button" onClick={() => { setError(''); setAttempt(attempt + 1) }}>Tentar novamente</button> : <p role="status">Carregando workspaces…</p>
++        ) : (
++          <>
++            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
++              {[...workspaces].sort((a, b) => a.slot - b.slot).map(item => (
++                <button key={item.id} type="button" data-testid={'workspace-enter-' + item.slot} onClick={() => enter(item.id)}
++                  className="flex min-h-32 flex-col justify-between rounded-xl border bg-card p-5 text-left text-card-foreground hover:border-primary">
++                  <Building2 className="size-5 text-primary" aria-hidden />
++                  <span className="flex w-full items-center justify-between gap-2 text-lg font-semibold">{item.name}<ArrowRight className="size-4" aria-hidden /></span>
++                </button>
++              ))}
++            </div>
++            {!workspaces.length && canEdit && <button type="button" className="mb-2 rounded-md bg-primary px-4 py-2 text-primary-foreground" disabled={initializing} onClick={() => void initialize()}>Criar Admin 1, Admin 2 e Admin 3</button>}
++            <button type="button" data-testid="workspace-enter-general" onClick={() => enter(null)} className="mt-4 flex w-full items-center justify-between gap-4 rounded-lg border px-4 py-3 text-left hover:bg-accent">
++              <span><strong className="block">Geral</strong><span className="text-sm text-muted-foreground">Ofertas que ainda estão fora dos workspaces</span></span>
++              <ArrowRight className="size-4 shrink-0" aria-hidden />
++            </button>
++          </>
++        )}
++      </section>
++  ) : null
++
++  return (
++    <>
++      {chooser}
++      {ready && <div hidden={choosing}>
++      <section className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-card p-3" data-testid="business-area-switcher" aria-label="Workspace atual">
++        <div className="flex min-w-0 flex-wrap items-center gap-2">
++          <Layers3 className="size-5 shrink-0 text-primary" aria-hidden />
++          <span className="truncate font-semibold" data-testid="workspace-current">{current?.name ?? 'Geral'}</span>
++          {current?.bm_id && <span className="text-xs text-muted-foreground" data-testid="business-area-bm">BM cadastrada: {current.bm_id}</span>}
++          <button type="button" className="rounded-md border px-2 py-1 text-sm hover:bg-accent" onClick={() => { setLegacy(false); setChoosing(true) }}>Trocar workspace</button>
++        </div>
++        <nav aria-label="Ofertas e recursos compartilhados" className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
++          <Link to="/offers" className="font-semibold" onClick={() => setLegacy(false)}>Ofertas</Link>
++          {session.perms.has('flows.view') && <Link to="/flows" onClick={() => setLegacy(false)}>Fluxos</Link>}
++          {session.perms.has('connections.view') && <Link to="/connections" onClick={() => setLegacy(false)}>Chips</Link>}
++          {session.perms.has('settings.view') && session.perms.has('settings.integrations.view') && <Link to="/settings" search={{ tab: 'integrations' }} onClick={() => setLegacy(false)}>Integrações</Link>}
++          {session.perms.has('facebook.profiles') && <Link to="/facebook/profiles" onClick={() => setLegacy(false)}>Meta</Link>}
++          {hasWorkspace && !current && canEdit && <button type="button" onClick={() => setLegacy(open => !open)} aria-expanded={legacy}>Mover ofertas de Geral</button>}
++        </nav>
++      </section>
++      {legacy && !current ? <BusinessAreaManager /> : children}
++      </div>}
++    </>
++  )
++}
+diff --git a/apps/web/src/features/offers/page.tsx b/apps/web/src/features/offers/page.tsx
+index dedfb47..12266bd 100644
+--- a/apps/web/src/features/offers/page.tsx
++++ b/apps/web/src/features/offers/page.tsx
+@@ -1,7 +1,6 @@
+ import { useEffect, useState } from 'react'
+ import { useSession } from '@/features/settings-company/ui'
+ import { api } from '@/lib/http'
+-import { BusinessAreaManager } from '../business-areas/areas'
+ import './style.css'
+ type Item = { id: string; name: string; currency?: string }
+ type Config = {
+@@ -129,7 +128,6 @@ function AuthorizedOffersPage() {
+         </div>
+         <button onClick={reset}>Nova oferta</button>
+       </header>
+-      {session?.company?.business_areas_admin && session.perms.has('settings.products.edit') && <BusinessAreaManager />}
+       {error && <p role="alert">{error}</p>}
+       {notice && <p role="status">{notice}</p>}
+       <details>
+diff --git a/apps/web/src/lib/http.ts b/apps/web/src/lib/http.ts
+index 18469b2..3a80692 100644
+--- a/apps/web/src/lib/http.ts
++++ b/apps/web/src/lib/http.ts
+@@ -78,16 +78,25 @@ export const activeCompany = (): string | null => state.companyId
+ 
+ /** Per-tab partition. Another person's device/tab never changes this selection. */
+ export function activeBusinessArea(): string | null {
+-  if (!state.companyId) return null
+-  try { return sessionStorage.getItem('crm.business-area.' + state.companyId) || null } catch { return null }
++  return selectedWorkspace() ?? null
+ }
+-export function selectBusinessArea(id: string | null): void {
+-  if (!state.companyId) return
++
++/** Undefined awaits a selection. Null is the explicit Geral choice. */
++export function selectedWorkspace(): string | null | undefined {
++  if (!state.companyId) return undefined
++  try {
++    const stored = sessionStorage.getItem('crm.business-area.' + state.companyId)
++    return stored === 'general' ? null : stored || undefined
++  } catch { return undefined }
++}
++
++export function selectBusinessArea(id: string | null): boolean {
++  if (!state.companyId) return false
+   try {
+-    if (id) sessionStorage.setItem('crm.business-area.' + state.companyId, id)
+-    else sessionStorage.removeItem('crm.business-area.' + state.companyId)
+-  } catch { /* blocked storage stays in the unassigned view */ }
++    sessionStorage.setItem('crm.business-area.' + state.companyId, id ?? 'general')
++  } catch { return false }
+   state.inflight.clear()
++  return true
+ }
+ 
+ /** Para onde ir quando a sessão acabou (o main liga ao router: limpa o cache e navega ao login). */
+diff --git a/packages/core/src/business-areas/service.ts b/packages/core/src/business-areas/service.ts
+index 9bc696b..f1e7f50 100644
+--- a/packages/core/src/business-areas/service.ts
++++ b/packages/core/src/business-areas/service.ts
+@@ -59,22 +59,10 @@ export class BusinessAreasService {
+       return (await rows<BusinessArea>(db, sql`update crm.business_areas set name=${input.name.trim()},bm_id=${input.bm_id} where company_id=${company} and id=${id} returning *`))[0]!
+     })
+   }
+-  async owner(company: string, kind: AreaResourceKind, id: string) {
+-    return (await rows<{ area_id: string }>(this.db, sql`select area_id from crm.business_area_resources where company_id=${company} and kind=${kind} and resource_id=${id}`))[0]?.area_id ?? null
+-  }
+-  async allowed(company: string, area: string | null, kind: AreaResourceKind, id: string) {
++  async ownsResource(company: string, kind: AreaResourceKind, id: string) {
+     if (!uuid(id)) return false
+     const table = AREA_RESOURCE_TABLES[kind]
+-    if (!(await rows(this.db, sql`select 1 from crm.${sql.raw(table)} where company_id=${company} and id=${id}`)).length) return false
+-    return (await this.owner(company, kind, id)) === area
+-  }
+-  async assertResource(company: string, area: string | null, kind: AreaResourceKind, id: string) {
+-    if (!await this.allowed(company, area, kind, id)) throw new BusinessAreaError('not_found', 'Recurso não pertence à área selecionada')
+-  }
+-  async filter<T extends { id: string }>(company: string, area: string | null, kind: AreaResourceKind, items: T[]) {
+-    const bindings = await rows<{ resource_id: string; area_id: string }>(this.db, sql`select resource_id,area_id from crm.business_area_resources where company_id=${company} and kind=${kind}`)
+-    const owners = new Map(bindings.map(r => [r.resource_id, r.area_id]))
+-    return items.filter(item => (owners.get(item.id) ?? null) === area)
++    return (await rows(this.db, sql`select 1 from crm.${sql.raw(table)} where company_id=${company} and id=${id}`)).length > 0
+   }
+   async assertReferences(company: string, area: string | null, value: unknown, depth = 0): Promise<void> {
+     if (depth > 30) throw new BusinessAreaError('validation', 'Configuração excede o limite de profundidade')
+@@ -84,53 +72,29 @@ export class BusinessAreasService {
+       const kind = refs[key]
+       if (key === 'product_public_id' && v !== null && v !== undefined && v !== '') {
+         const product = uuid(v) ? (await rows<{ id: string }>(this.db, sql`select id from crm.products where company_id=${company} and public_id=${v}`))[0] : null
+-        if (!product || !await this.allowed(company,area,'product',product.id)) throw new BusinessAreaError('validation','Produto da venda não pertence à área selecionada')
++        if (!product || !await this.ownsResource(company,'product',product.id)) throw new BusinessAreaError('validation','Produto da venda não pertence à empresa')
+       } else if (area && ['note_issuer_id','utmify_integration_id'].includes(key) && v) {
+         throw new BusinessAreaError('validation','Integrações de nota fiscal/UTMify globais não podem ser usadas como destino de uma área')
+       } else if (kind && v !== null && v !== undefined && v !== '') {
+         // Expressions may be evaluated later by a flow: never accept a dynamic payment/pixel destination in a partition.
+-        if (!uuid(v) || !await this.allowed(company, area, kind, v))
+-          throw new BusinessAreaError('validation', `Referência ${key} não pertence à área selecionada`)
++        if (!uuid(v) || !await this.ownsResource(company, kind, v))
++          throw new BusinessAreaError('validation', `Referência ${key} não pertence à empresa`)
+       } else if (typeof v === 'object') await this.assertReferences(company, area, v, depth + 1)
+     }
+   }
+-  async assign(company: string, area: string, kind: AreaResourceKind, id: string) {
+-    requireSharedOffersCompany(company)
+-    return this.db.transaction(async tx => {
+-      const db = tx as unknown as Database, svc = new BusinessAreasService(db)
+-      // Serialize assignments with offer/flow edits using the same company advisory lock.
+-      await db.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`business-areas:${company}`},0))`)
+-      area = (await svc.get(company, area)).id
+-      const table = AREA_RESOURCE_TABLES[kind]
+-      if (!table || !uuid(id) || !(await rows(db, sql`select 1 from crm.${sql.raw(table)} where company_id=${company} and id=${id} for update`)).length)
+-        throw new BusinessAreaError('not_found', 'Recurso não encontrado nesta empresa')
+-      const owner = await svc.owner(company, kind, id)
+-      if (owner && owner !== area) throw new BusinessAreaError('conflict', 'Recurso já atribuído a outra área; não será transferido')
+-      // Existing offers must be explicitly adopted together with their complete resource bundle.
+-      const key = Object.entries(refs).find(([k, v]) => v === kind && k !== 'target_flow_id')?.[0]
+-      if (key && (await rows(db, sql`select 1 from crm.offers where company_id=${company} and config->>${key}=${id} and business_area_id is distinct from ${area}::uuid limit 1`)).length)
+-        throw new BusinessAreaError('conflict', 'Recurso em oferta existente. Atribua a oferta completa pela opção de adoção explícita')
+-      if (kind === 'link' && (await rows(db, sql`select 1 from crm.offers o where o.company_id=${company} and o.business_area_id is distinct from ${area}::uuid
+-        and exists(select 1 from jsonb_array_elements(o.config->'origins') origin where origin->>'type'='link' and origin->>'value'=${id}) limit 1`)).length)
+-        throw new BusinessAreaError('conflict', 'Link em oferta existente. Atribua a oferta completa pela opção de adoção explícita')
+-      await db.execute(sql`insert into crm.business_area_resources(company_id,area_id,kind,resource_id) values(${company},${area},${kind},${id}) on conflict(company_id,kind,resource_id) do nothing`)
+-      if (kind === 'flow') await svc.assertFlowReferences(company,area,id)
+-      return { kind, resource_id: id, area_id: area }
+-    })
+-  }
+-  async assertFlowReferences(company: string, area: string | null, id: string) {
+-    const actions = await rows<{ config: unknown }>(this.db, sql`select a.config from crm.flow_node_actions a join crm.flow_nodes n on n.id=a.node_id where a.company_id=${company} and n.flow_id=${id}`)
+-    const versions = await rows<{ definition: unknown }>(this.db, sql`select v.definition from crm.flow_versions v join crm.flows f on f.id=v.flow_id and f.published_version=v.version where v.company_id=${company} and v.flow_id=${id}`)
+-    for (const a of actions) await this.assertReferences(company,area,a.config)
+-    for (const v of versions) await this.assertReferences(company,area,v.definition)
++  async assertFlowReferences(company: string, workspace: string | null, id: string) {
++    const actions = await rows<{config: unknown}>(this.db, sql`select a.config from crm.flow_node_actions a join crm.flow_nodes n on n.id=a.node_id where n.flow_id=${id} and n.company_id=${company}`)
++    const versions = await rows<{definition: unknown}>(this.db, sql`select definition from crm.flow_versions where flow_id=${id} and company_id=${company}`)
++    for (const action of actions) await this.assertReferences(company,workspace,action.config)
++    for (const version of versions) await this.assertReferences(company,workspace,version.definition)
+   }
++
+   async catalog(company: string) {
+     requireSharedOffersCompany(company)
+     const result: Record<string, unknown> = {}
+     for (const [kind, table] of Object.entries(AREA_RESOURCE_TABLES)) {
+       const name = kind === 'integration' ? sql.raw('r.label') : kind === 'account' ? sql.raw('coalesce(r.name,r.fb_account_id)') : sql.raw('r.name')
+-      result[kind] = await rows(this.db, sql`select r.id,${name} as name,b.area_id from crm.${sql.raw(table)} r
+-        left join crm.business_area_resources b on b.company_id=r.company_id and b.resource_id=r.id and b.kind=${kind}
++      result[kind] = await rows(this.db, sql`select r.id,${name} as name,null::uuid as area_id from crm.${sql.raw(table)} r
+         where r.company_id=${company} order by name`)
+     }
+     return result
+@@ -141,19 +105,10 @@ export class BusinessAreasService {
+       await db.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`business-areas:${company}`},0))`)
+       area = (await svc.get(company, area)).id
+       if (!uuid(offerId)) throw new BusinessAreaError('not_found', 'Oferta não encontrada')
+-      const [offer] = await rows<{ config: Record<string, unknown>; business_area_id: string | null }>(db, sql`select config,business_area_id from crm.offers where company_id=${company} and id=${offerId} for update`)
++      const [offer] = await rows<{ business_area_id: string | null }>(db, sql`select business_area_id from crm.offers where company_id=${company} and id=${offerId} for update`)
+       if (!offer) throw new BusinessAreaError('not_found', 'Oferta não encontrada')
+       if (offer.business_area_id && offer.business_area_id !== area) throw new BusinessAreaError('conflict', 'Oferta já atribuída a outra área')
+       await db.execute(sql`update crm.offers set business_area_id=${area},version=version+1,updated_at=now() where company_id=${company} and id=${offerId} and business_area_id is null`)
+-      // Assign non-flow resources first so the existing flow's references can be checked.
+-      for (const [key, kind] of Object.entries(refs).filter(([key, kind]) => kind !== 'flow' && key !== 'pixel_config_id' && key !== 'payment_integration_id')) {
+-        const id = offer.config[key]
+-        if (uuid(id)) await svc.assign(company, area, kind, id)
+-      }
+-      for (const origin of (offer.config.origins ?? []) as { type: string; value: string }[])
+-        if (origin.type === 'link') await svc.assign(company, area, 'link', origin.value)
+-      if (uuid(offer.config.flow_id)) await svc.assign(company, area, 'flow', offer.config.flow_id)
+-      await svc.assertReferences(company, area, offer.config)
+       return { offer_id: offerId, business_area_id: area }
+     })
+   }
+diff --git a/packages/core/src/mcp/server.ts b/packages/core/src/mcp/server.ts
+index 7e1d353..aae6939 100644
+--- a/packages/core/src/mcp/server.ts
++++ b/packages/core/src/mcp/server.ts
+@@ -4,7 +4,7 @@
+ // funil, vendas, conversas e métricas), que chamam a API como esse usuário; as que gravam só com `access = 'write'`.
+ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+ import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
+-import { and, asc, desc, eq, ilike, or, sql, type SQL } from 'drizzle-orm'
++import { and, asc, desc, eq, ilike, or, type SQL } from 'drizzle-orm'
+ import { z } from 'zod'
+ import { CHAT_STATUSES, chats, connections, contacts, FLOW_STATUSES, flows, type Database } from '@crm/db'
+ import { registerAllApiTools } from './tools/index'
+@@ -101,7 +101,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
+   server.registerTool(
+     'list_flows',
+     { title: 'Listar fluxos', description: 'Fluxos de automação da empresa; filtro por status e busca por nome.', inputSchema: { status: z.enum(FLOW_STATUSES).optional(), search: z.string().max(200).optional(), ...page,
+-      ...(ctx.api?.businessAreasAdmin ? { business_area_id:z.uuid().optional().describe('Área de negócio da conta admin; omitido lista somente fluxos sem área.') } : {}) }, annotations: READ_ONLY },
++      ...(ctx.api?.businessAreasAdmin ? { business_area_id:z.uuid().optional().describe('Workspace administrativo. Os fluxos são compartilhados na empresa.') } : {}) }, annotations: READ_ONLY },
+     async (args) => {
+       const { status, search, limit, offset } = args
+       const where: SQL[] = [eq(flows.companyId, companyId)]
+@@ -109,9 +109,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
+       if (await areas.enabled(companyId)) {
+         if (!ctx.api?.businessAreasAdmin || !ctx.api.perms.has('flows.view')) return json({flows:[]})
+         const requested = 'business_area_id' in args ? args.business_area_id : undefined
+-        const area = typeof requested === 'string' ? (await areas.get(companyId,requested)).id : null
+-        where.push(area ? sql`exists(select 1 from crm.business_area_resources b where b.company_id=${companyId} and b.kind='flow' and b.resource_id=${flows.id} and b.area_id=${area})`
+-          : sql`not exists(select 1 from crm.business_area_resources b where b.company_id=${companyId} and b.kind='flow' and b.resource_id=${flows.id})`)
++        if (typeof requested === 'string') await areas.get(companyId, requested)
+       }
+       if (status) where.push(eq(flows.status, status))
+       if (search?.trim()) where.push(ilike(flows.name, like(search.trim())))
+diff --git a/packages/core/src/mcp/tools/business-areas.ts b/packages/core/src/mcp/tools/business-areas.ts
+index 51c4e95..6604231 100644
+--- a/packages/core/src/mcp/tools/business-areas.ts
++++ b/packages/core/src/mcp/tools/business-areas.ts
+@@ -3,7 +3,7 @@ import { fromApi, tool, UUID } from './shared'
+ 
+ export const businessAreasTools = [
+   tool({ name: 'list_business_areas', title: 'Listar áreas Admin 1/2/3', perm: 'settings.products.view',
+-    description: 'Três áreas de negócio dentro da MESMA conta. Retorna IDs, nomes e BM declarada; não são identidades pessoais ou novos logins. Use business_area_id nas ferramentas de Ofertas, fluxos, XPag e pixels.',
++    description: 'Três áreas de negócio dentro da MESMA conta. Retorna IDs, nomes e BM declarada; não são identidades pessoais ou novos logins. Use business_area_id nas ferramentas de ofertas; os recursos são compartilhados.',
+     run: async (_, api) => fromApi(await api.request('GET', '/api/business-areas')) }),
+   tool({ name: 'initialize_business_areas', title: 'Criar três áreas de negócio', perm: 'settings.products.edit', kind: 'write',
+     description: 'Cria Admin 1/2/3 sem mover cadastros existentes. Idempotente; não cria usuários, chips ou credenciais externas.',
+@@ -12,15 +12,11 @@ export const businessAreasTools = [
+     description: 'Salva nome e ID numérico DECLARADO da BM. Não conecta à Meta nem comprova propriedade ou permissão da BM.',
+     input: { id: UUID, name: z.string().trim().min(1).max(80), bm_id: z.string().regex(/^\d{1,32}$/).nullable() },
+     run: async ({ id, ...body }, api) => fromApi(await api.request('PUT', `/api/business-areas/${id}`, { body })) }),
+-  tool({ name: 'get_business_area_resource_catalog', title: 'Recursos e suas áreas', perm: 'settings.products.edit',
+-    description: 'Catálogo administrativo para atribuição explícita de produtos, fluxos, XPag, contas de anúncio, pixels e links já cadastrados. IDs e nomes, sem segredos. Cadastros sem área permanecem sem área.',
++  tool({ name: 'get_business_area_resource_catalog', title: 'Recursos compartilhados', perm: 'settings.products.edit',
++    description: 'Catálogo dos recursos compartilhados. Retorna IDs e nomes.',
+     run: async (_, api) => fromApi(await api.request('GET', '/api/business-areas/catalog')) }),
+-  tool({ name: 'assign_business_area_resource', title: 'Atribuir recurso à área', perm: 'settings.products.edit', kind: 'write',
+-    description: 'Vincula um cadastro da empresa a uma área. Recusa recurso de outra área; nunca transfere silenciosamente. Para recursos de oferta existente use adopt_offer_business_area.',
+-    input: { id: UUID, kind: z.enum(['product', 'flow', 'integration', 'account', 'pixel', 'link']), resource_id: UUID },
+-    run: async ({ id, ...body }, api) => fromApi(await api.request('POST', `/api/business-areas/${id}/resources`, { body })) }),
+   tool({ name: 'adopt_offer_business_area', title: 'Atribuir oferta existente à área', perm: 'settings.products.edit', kind: 'write',
+-    description: 'Com confirmação explícita, atribui uma oferta sem área e seu conjunto completo de recursos. Operação atômica; recusa conflitos. Preserva destinos, status, execuções e snapshots históricos; não inicia fluxo nem envia mensagens.',
++    description: 'Com confirmação explícita, move apenas uma oferta de Geral ao workspace escolhido. Os recursos continuam compartilhados. Operação atômica; recusa conflitos. Preserva destinos, status, execuções e snapshots históricos; não inicia fluxo nem envia mensagens.',
+     input: { id: UUID, offer_id: UUID, confirm: z.literal(true) },
+     run: async ({ id, ...body }, api) => fromApi(await api.request('POST', `/api/business-areas/${id}/adopt-offer`, { body })) }),
+ ]
+diff --git a/packages/core/src/mcp/tools/shared.ts b/packages/core/src/mcp/tools/shared.ts
+index eddc705..97e8481 100644
+--- a/packages/core/src/mcp/tools/shared.ts
++++ b/packages/core/src/mcp/tools/shared.ts
+@@ -84,7 +84,7 @@ export function registerApiTools(server: McpServer, ctx: McpApiContext, tools: r
+       // Defesa extra: ferramenta de leitura nunca grava, mesmo que a rota aceite.
+       request: (method, path, req) => ctx.api.request(method, path, { ...req, ...(businessAreaId ? { businessAreaId } : {}), write: kind !== 'read' && (req?.write ?? true) }),
+     })
+-    const inputSchema = t.areaScoped && ctx.businessAreasAdmin ? { ...t.input, business_area_id: UUID.optional().describe('Área Admin 1/2/3 obtida com list_business_areas. Informe em CADA chamada; omitido usa somente cadastros sem área após configurar as áreas.') } : t.input ?? {}
++    const inputSchema = t.areaScoped && ctx.businessAreasAdmin ? { ...t.input, business_area_id: UUID.optional().describe('Workspace Admin 1/2/3 obtido com list_business_areas. Para ofertas e seus resultados, omitir usa Geral. O catálogo de recursos é compartilhado.') } : t.input ?? {}
+     server.registerTool(t.name, { title: t.title, description: t.description, inputSchema, annotations }, ((args: Record<string, unknown>) => {
+       if (t.areaScoped && args?.business_area_id && !ctx.businessAreasAdmin) return fail({ error: 'business_area_forbidden' })
+       const input = { ...args }, area = t.areaScoped ? input.business_area_id as string | undefined : undefined
+diff --git a/packages/core/src/offers/service.ts b/packages/core/src/offers/service.ts
+index 8401786..e247e74 100644
+--- a/packages/core/src/offers/service.ts
++++ b/packages/core/src/offers/service.ts
+@@ -91,12 +91,7 @@ export class OffersService {
+         sql`select connection_id from crm.offer_connections where company_id=${company}`,
+       )
+     ).map((x) => x.connection_id)
+-    if (area !== undefined) {
+-      const svc = new BusinessAreasService(this.db)
+-      for (const [group,kind] of Object.entries({ products:'product',flows:'flow',integrations:'integration',accounts:'account',pixels:'pixel',links:'link' } as const))
+-        result[group] = await svc.filter(company,area,kind,result[group] as { id:string }[])
+-      result.business_area = area ? await svc.get(company,area) : null
+-    }
++    if (area !== undefined) result.business_area = area ? await new BusinessAreasService(this.db).get(company,area) : null
+     return result
+   }
+   async save(company: string, input: { name: string; active?: boolean; config: OfferConfig }, id?: string, area?: string | null) {
+diff --git a/tests/acceptance/T125/business-areas.test.ts b/tests/acceptance/T125/business-areas.test.ts
+index baf6676..e403934 100644
+--- a/tests/acceptance/T125/business-areas.test.ts
++++ b/tests/acceptance/T125/business-areas.test.ts
+@@ -72,26 +72,29 @@ it('names/BMs are explicit, scoped by company, unique and validated without cont
+   expect((await call('GET', '/api/business-areas', undefined, undefined, foreign)).status).toBe(404)
+   expect((await call('GET', '/api/offers', randomUUID())).status).toBe(404)
+ })
+-it('assigns independent resource sets and scopes resources, lists, direct IDs and shared chips', async () => {
+-  for (let i = 0; i < 2; i++) {
+-    for (const [key, kind] of [['product_id','product'],['integration_id','integration'],['pixel_id','pixel'],['ad_account_id','account'],['flow_id','flow']]) {
+-      const assigned = await call('POST', `/api/business-areas/${areas[i].id}/resources`, undefined, { kind, resource_id: bundles[i][key] })
+-      expect(assigned.status, JSON.stringify(assigned.body)).toBe(201)
++it('shares one resource catalog, OAuth and payment accounts across all three workspaces', async () => {
++  for (const workspace of areas) {
++    const response = await call('GET', '/api/offers/resources', workspace.id)
++    expect(response.status).toBe(200)
++    for (const bundle of bundles) {
++      expect(response.body.integrations.map((item: any) => item.id)).toContain(bundle.integration_id)
++      expect(response.body.accounts.map((item: any) => item.id)).toContain(bundle.ad_account_id)
++      expect(response.body.flows.map((item: any) => item.id)).toContain(bundle.flow_id)
+     }
+-    const resources = (await call('GET', '/api/offers/resources', areas[i].id)).body
+-    expect(resources.integrations.map((r: any) => r.id)).toEqual([bundles[i].integration_id])
+-    expect(resources.accounts.map((r: any) => r.id)).toEqual([bundles[i].ad_account_id])
+-    expect(resources.connections.map((r: any) => r.id)).toContain(t.connectionId)
+-    expect(JSON.stringify(resources)).not.toContain(fixtureSecret)
++    expect(response.body.connections.map((item: any) => item.id)).toContain(t.connectionId)
++    expect(JSON.stringify(response.body)).not.toContain(fixtureSecret)
+   }
+-  expect((await call('GET', '/api/payment-integrations', areas[0].id)).body.items.map((r: any) => r.id)).toEqual([bundles[0].integration_id])
+-  expect((await call('GET', '/api/payment-integrations/' + bundles[1].integration_id, areas[0].id)).status).toBe(404)
+-  expect((await call('PUT', '/api/meta/ad-accounts/' + bundles[1].ad_account_id, areas[0].id, { included_in_dashboard: false })).status).toBe(404)
++  expect((await call('GET', '/api/payment-integrations/' + bundles[1].integration_id, areas[0].id)).status).toBe(200)
++  expect((await call('POST', '/api/meta/oauth/start', areas[0].id, {})).status).toBe(200)
++  expect((await call('GET', '/api/meta/profiles', areas[1].id)).body.items).toEqual(
++    (await call('GET', '/api/meta/profiles', areas[0].id)).body.items,
++  )
++  expect((await call('PUT', '/api/meta/ad-accounts/' + bundles[1].ad_account_id, areas[0].id, { included_in_dashboard: false })).status).toBe(200)
+   expect((await call('POST', '/api/business-areas/' + areas[1].id + '/resources', undefined, { kind: 'integration', resource_id: bundles[0].integration_id })).status).toBe(409)
+ })
+-it('creates offers only from the selected area and rejects cross-area resources even with direct IDs', async () => {
++it('keeps offers separate while two workspaces can use the exact same resources', async () => {
+   for (let i = 0; i < 2; i++) {
+-    const created = await call('POST', '/api/offers', areas[i].id, { name: 'Business offer ' + i, config: bundles[i] })
++    const created = await call('POST', '/api/offers', areas[i].id, { name: 'Business offer ' + i, config: bundles[0] })
+     expect(created.status, JSON.stringify(created.body)).toBe(201)
+     bundles[i].offerId = created.body.offer.id
+     expect(created.body.offer).toMatchObject({ active: false, business_area_id: areas[i].id })
+@@ -99,7 +102,7 @@ it('creates offers only from the selected area and rejects cross-area resources
+   expect((await call('GET', '/api/offers', areas[0].id)).body.items.map((r: any) => r.id)).toEqual([bundles[0].offerId])
+   expect((await call('GET', '/api/offers/' + bundles[1].offerId, areas[0].id)).status).toBe(404)
+   for (const key of ['integration_id', 'ad_account_id', 'pixel_id', 'flow_id', 'product_id'])
+-    expect((await call('POST', '/api/offers', areas[0].id, { name: 'Forbidden mix', config: { ...bundles[0], [key]: bundles[1][key] } })).status).toBe(422)
++    expect((await call('POST', '/api/offers', areas[0].id, { name: 'Unknown resource', config: { ...bundles[0], [key]: randomUUID() } })).status).toBe(422)
+   expect((await call('GET', '/api/offers')).body.items.map((r: any) => r.id)).toEqual([oldOffer.id])
+ })
+ it('MCP carries an explicit area on each call without leaking state to the next caller, and retains read/write permissions', async () => {
+@@ -114,19 +117,19 @@ it('MCP carries an explicit area on each call without leaking state to the next
+   expect((await tool(reader, 'get_offer', { id: bundles[1].offerId, business_area_id: areas[0].id })).data.status).toBe(404)
+   const flow = await tool(writer, 'create_flow', { name: 'Area MCP flow', business_area_id: areas[0].id })
+   expect(flow.error, JSON.stringify(flow.data)).toBe(false)
+-  expect((await sys.q("select area_id from crm.business_area_resources where kind='flow' and resource_id=$1", [flow.data.flow.id]))[0].area_id).toBe(areas[0].id)
+-  expect((await tool(reader, 'get_flow', { id: flow.data.flow.id, business_area_id: areas[1].id })).data.status).toBe(404)
++  expect(await sys.q("select area_id from crm.business_area_resources where kind='flow' and resource_id=$1", [flow.data.flow.id])).toHaveLength(0)
++  expect((await tool(reader, 'get_flow', { id: flow.data.flow.id, business_area_id: areas[1].id })).error).toBe(false)
+ })
+ it('flow editing rejects both foreign and dynamic destination references before changing the draft', async () => {
+   const id = bundles[0].flow_id
+-  expect((await call('POST', `/api/flows/${id}/nodes`, areas[1].id, { type: 'message', position: {x:0,y:0} })).status).toBe(404)
+-  for (const integration_id of [bundles[1].integration_id, '{{foreignDestination}}']) {
++  expect((await call('GET', `/api/flows/${id}`, areas[1].id)).status).toBe(200)
++  for (const integration_id of [randomUUID(), '{{foreignDestination}}']) {
+     const result = await call('POST', `/api/flows/${id}/nodes`, areas[0].id, { type: 'payment', position: {x:0,y:0}, actions: [{ type: 'create_payment_charge', config: { integration_id } }] })
+     expect(result.status).toBe(422)
+   }
+   expect(await sys.q('select id from crm.flow_nodes where flow_id=$1', [id])).toHaveLength(0)
+ })
+-it('adoption is atomic, explicit, cannot transfer other-area assets and preserves activation/history', async () => {
++it('adoption moves only a general offer and preserves its activation, shared resources and history', async () => {
+   const failed = await call('POST', `/api/business-areas/${areas[1].id}/adopt-offer`, undefined, { offer_id: bundles[0].offerId, confirm: true })
+   expect(failed.status).toBe(409)
+   expect((await sys.q('select business_area_id from crm.offers where id=$1', [bundles[0].offerId]))[0].business_area_id).toBe(areas[0].id)
+@@ -138,13 +141,19 @@ it('adoption is atomic, explicit, cannot transfer other-area assets and preserve
+   expect((await call('POST', `/api/business-areas/${areas[2].id}/adopt-offer`, undefined, { offer_id: oldOffer.id, confirm: true })).status).toBe(200)
+   expect((await sys.q('select version from crm.offers where id=$1', [oldOffer.id]))[0].version).toBe(2)
+   expect(await sys.q('select id from crm.flow_runs')).toHaveLength(0)
++  expect(await sys.q('select * from crm.business_area_resources')).toHaveLength(0)
+   expect(await sys.q('select id from crm.payment_charges')).toHaveLength(0)
+ })
+-it('simultaneous assignment cannot give the same resource to two areas', async () => {
+-  const [p] = await sys.q("insert into crm.products(company_id,name,currency,price_min_cents,price_max_cents,price_fallback_cents) values($1,'Concurrent','BRL',100,100,100) returning id", [t.companyId])
+-  const results = await Promise.all([0,1].map(i => call('POST', `/api/business-areas/${areas[i].id}/resources`, undefined, { kind: 'product', resource_id: p.id })))
+-  expect(results.map(r=>r.status).sort()).toEqual([201,409])
+-  expect(await sys.q('select * from crm.business_area_resources where resource_id=$1', [p.id])).toHaveLength(1)
++it('simultaneous moves cannot give the same offer to two workspaces', async () => {
++  const created = await call('POST', '/api/offers', undefined, { name: 'Concurrent general offer', config: bundles[2] })
++  expect(created.status).toBe(201)
++  const offerId = created.body.offer.id
++  const results = await Promise.all(areas.slice(0,2).map(area =>
++    call('POST', '/api/business-areas/' + area.id + '/adopt-offer', undefined, { offer_id: offerId, confirm: true })))
++  expect(results.map(result => result.status).sort()).toEqual([200,409])
++  const [row] = await sys.q('select version, business_area_id from crm.offers where id=$1', [offerId])
++  expect(row.version).toBe(2)
++  expect(areas.slice(0,2).map(area => area.id)).toContain(row.business_area_id)
+ })
+ it('the same shared chip freezes the selected business, BM and payment destination, with separated historical results', async () => {
+   const { OffersService } = await import('@crm/core'), svc = new OffersService(sys.db)
+@@ -163,11 +172,16 @@ it('the same shared chip freezes the selected business, BM and payment destinati
+   expect((await call('GET','/api/offers/results',areas[0].id)).body.items).toEqual([expect.objectContaining({offer_id:bundles[0].offerId,revenue_cents:'100'})])
+   expect((await call('GET','/api/chats/'+chat.id+'/offers',areas[1].id)).body.items).toEqual([])
+   expect((await call('GET','/api/chats/'+chat.id+'/offers',areas[0].id)).body.items).toHaveLength(1)
++  const [offerRun] = await sys.q("insert into crm.flow_runs(company_id,flow_id,contact_id,chat_id,status,offer_scoped,trigger) values($1,$2,$3,$4,'completed',true,$5) returning id", [t.companyId,bundles[0].flow_id,contact.id,chat.id,{opportunity_id:op.id}])
++  expect((await call('GET','/api/flow-runs/'+offerRun.id,areas[0].id)).status).toBe(200)
++  expect((await call('GET','/api/flow-runs/'+offerRun.id,areas[1].id)).status).toBe(404)
++  expect((await call('GET','/api/flows/'+bundles[0].flow_id+'/runs',areas[1].id)).body.items).toEqual([])
++  expect((await call('GET','/api/chats/'+chat.id+'/flow-runs',areas[1].id)).body.items).toEqual([])
+   expect((await call('PUT','/api/business-areas/'+areas[0].id,undefined,{name:'Admin 1',bm_id:'333000'})).status).toBe(200)
+   expect((await sys.q('select snapshot from crm.offer_opportunities where id=$1',[op.id]))[0].snapshot.bm_id).toBe('111000')
+   expect((await call('PUT','/api/business-areas/'+areas[0].id,undefined,{name:'Admin 1',bm_id:'111000'})).status).toBe(200)
+   expect((await call('PUT','/api/offers/'+bundles[0].offerId,areas[0].id,{name:'Business offer 0',active:false,config:bundles[0]})).status).toBe(200)
+-  expect(await sys.q('select id from crm.flow_runs')).toHaveLength(0)
++  expect(await sys.q('select id from crm.flow_runs')).toEqual([{ id: offerRun.id }])
+   expect(await sys.q('select id from crm.payment_charges')).toHaveLength(0)
+ })
+ it('permissions and company gate are checked on each area management call', async () => {
+@@ -198,43 +212,43 @@ it('another admin of the SAME company cannot discover area tools or read area da
+   expect(profile.companies.find((c:any)=>c.id===t.companyId)).toMatchObject({business_areas_admin:false,business_areas_enabled:true})
+   await sys.q('update crm.users set last_company_id=$1 where id=$2',[t.companyId,user])
+ })
+-it('MCP listing, duplicate/import/paste and run IDs keep the area context, including materialized share-code references', async () => {
++it('MCP lists shared flows, imports reusable definitions and exposes ordinary runs across workspaces', async () => {
+   const a=areas[0].id,b=areas[1].id
+   const created=await call('POST','/api/flows',a,{name:'Scoped template A'})
+   expect(created.status).toBe(201);const id=created.body.flow.id
+   const listed=await tool(reader,'list_flows',{business_area_id:a})
+   expect(listed.data.flows.map((f:any)=>f.id)).toContain(id)
+-  expect((await tool(reader,'list_flows',{business_area_id:b})).data.flows.map((f:any)=>f.id)).not.toContain(id)
++  expect((await tool(reader,'list_flows',{business_area_id:b})).data.flows.map((f:any)=>f.id)).toContain(id)
+   const duplicated=await call('POST',`/api/flows/${id}/duplicate`,a,{})
+   expect(duplicated.status).toBe(201)
+-  expect((await call('GET','/api/flows/'+duplicated.body.flow.id,b)).status).toBe(404)
++  expect((await call('GET','/api/flows/'+duplicated.body.flow.id,b)).status).toBe(200)
+   const exported=await call('GET',`/api/flows/${id}/export`,a)
+   const imported=await call('POST','/api/flows/import-json',a,exported.body)
+   expect(imported.status,JSON.stringify(imported.body)).toBe(201)
+-  expect((await call('GET','/api/flows/'+imported.body.flow.id,b)).status).toBe(404)
++  expect((await call('GET','/api/flows/'+imported.body.flow.id,b)).status).toBe(200)
+   const code=(await call('GET',`/api/flows/${id}/share-code`,a)).body.code
+   const shared=await call('POST','/api/flows/import',a,{codes:[code]})
+   expect(shared.status,JSON.stringify(shared.body)).toBe(201)
+   expect(shared.body.items).toHaveLength(1)
+-  expect((await call('GET','/api/flows/'+shared.body.items[0].flow.id,b)).status).toBe(404)
++  expect((await call('GET','/api/flows/'+shared.body.items[0].flow.id,b)).status).toBe(200)
+   const foreignFlow=await call('POST','/api/flows',b,{name:'Scoped template B'})
+   expect(foreignFlow.status).toBe(201)
+   const node=await call('POST',`/api/flows/${foreignFlow.body.flow.id}/nodes`,b,{id:'pay',type:'payment',position:{x:200,y:0},actions:[{type:'create_payment_charge',config:{gateway:'xpag',method:'pix',amount:100,payment_integration_id:bundles[1].integration_id}}]})
+   expect(node.status,JSON.stringify(node.body)).toBe(201)
+   const foreignCode=(await call('GET',`/api/flows/${foreignFlow.body.flow.id}/share-code`,b)).body.code
+   const count=(await sys.q('select count(*)::int n from crm.flows where company_id=$1',[t.companyId]))[0].n
+-  const refused=await call('POST','/api/flows/import',a,{codes:[foreignCode]})
+-  expect(refused.status,JSON.stringify(refused.body)).toBe(422)
+-  expect((await sys.q('select count(*)::int n from crm.flows where company_id=$1',[t.companyId]))[0].n).toBe(count)
++  const reused=await call('POST','/api/flows/import',a,{codes:[foreignCode]})
++  expect(reused.status,JSON.stringify(reused.body)).toBe(201)
++  expect((await sys.q('select count(*)::int n from crm.flows where company_id=$1',[t.companyId]))[0].n).toBe(count+1)
+   const paste=await call('POST',`/api/flows/${id}/paste-nodes`,a,{source_flow_id:foreignFlow.body.flow.id,nodes:[{id:'pay'}]})
+-  expect(paste.status).toBe(422);expect(paste.body.error.message).toContain('source_flow_id')
++  expect([200, 201]).toContain(paste.status)
+   const [contact]=await sys.q("insert into crm.contacts(company_id,name) values($1,'Synthetic run lookup') returning id",[t.companyId])
+   const [chat]=await sys.q('insert into crm.chats(company_id,contact_id,connection_id) values($1,$2,$3) returning id',[t.companyId,contact.id,t.connectionId])
+   const [run]=await sys.q("insert into crm.flow_runs(company_id,flow_id,contact_id,chat_id,status) values($1,$2,$3,$4,'completed') returning id",[t.companyId,foreignFlow.body.flow.id,contact.id,chat.id])
+-  expect((await call('GET','/api/flow-runs/'+run.id,a)).status).toBe(404)
+-  expect((await call('POST','/api/flow-runs/'+run.id+'/cancel',a,{})).status).toBe(404)
++  expect((await call('GET','/api/flow-runs/'+run.id,a)).status).toBe(200)
++  expect((await call('POST','/api/flow-runs/'+run.id+'/cancel',a,{})).status).toBe(409)
+   expect((await call('GET','/api/flow-runs/'+run.id,b)).status).toBe(200)
+-  expect((await tool(reader,'get_conversation_flow_runs',{id:chat.id,business_area_id:a})).data.items).toEqual([])
++  expect((await tool(reader,'get_conversation_flow_runs',{id:chat.id,business_area_id:a})).data.items).toHaveLength(1)
+   expect((await tool(reader,'get_conversation_flow_runs',{id:chat.id,business_area_id:b})).data.items).toHaveLength(1)
+ })
+ it('desktop/mobile navigation selects the actual business area, filters offers and shows its declared BM', async () => {
+@@ -265,17 +279,30 @@ it('desktop/mobile navigation selects the actual business area, filters offers a
+     try {
+       await context.addCookies([{name:'crm_session',value:t.token,url:base,httpOnly:true,sameSite:'Lax'}])
+       const page=await context.newPage(),errors:string[]=[];page.on('pageerror',e=>errors.push(e.message))
+-      await page.goto(base+'/crm/');
+-      if(width===390)await page.getByTestId('shell-drawer-open').click()
+-      await page.getByTestId('nav-item-offers').click();await page.getByRole('heading',{name:'Ofertas compartilhadas'}).waitFor()
+-      await page.getByLabel('Área de negócio',{exact:true}).selectOption(areas[0].id)
++      await page.goto(base+'/crm/offers')
++      await page.getByTestId('workspace-entry').waitFor()
++      expect(await page.getByRole('heading',{name:'Ofertas compartilhadas'}).count()).toBe(0)
++      await page.getByTestId('workspace-enter-1').click()
++      await page.getByTestId('workspace-current').waitFor()
++      await page.getByRole('heading',{name:'Ofertas compartilhadas'}).waitFor()
+       await expect.poll(()=>page.getByRole('button',{name:/Business offer 0/}).isVisible()).toBe(true)
+       expect(await page.getByRole('button',{name:/Business offer 1/}).isVisible()).toBe(false)
+       expect(await page.getByTestId('business-area-bm').textContent()).toContain('111000')
+-      await page.getByLabel('Área de negócio',{exact:true}).selectOption(areas[1].id)
++      await page.reload()
++      await expect.poll(()=>page.getByRole('button',{name:/Business offer 0/}).isVisible()).toBe(true)
++      await page.getByRole('button',{name:'Trocar workspace'}).click()
++      await page.getByTestId('workspace-enter-2').click()
+       await expect.poll(()=>page.getByRole('button',{name:/Business offer 1/}).isVisible()).toBe(true)
+       expect(await page.getByRole('button',{name:/Business offer 0/}).isVisible()).toBe(false)
+       expect(await page.getByTestId('business-area-bm').textContent()).toContain('222000')
++      await page.getByRole('button',{name:'Trocar workspace'}).click()
++      await page.getByTestId('workspace-enter-3').click()
++      await expect.poll(()=>page.getByTestId('workspace-current').textContent()).toBe(areas[2].name)
++      expect(await page.getByRole('button',{name:/Business offer [01]/}).count()).toBe(0)
++      await page.getByRole('button',{name:'Trocar workspace'}).click()
++      await page.getByTestId('workspace-enter-general').click()
++      await expect.poll(()=>page.getByTestId('workspace-current').textContent()).toBe('Geral')
++      expect(await page.getByRole('button',{name:/Business offer [01]/}).count()).toBe(0)
+       expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true)
+       expect(errors).toEqual([])
+     } finally {await context.close()}

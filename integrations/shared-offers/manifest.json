@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/Guilherme100A/crm-copy.git",
   "base_sha": "acf78e2da49865afa06fe6a4cee77bcf0e888152",
-  "expected_tree": "f222d1b555a0e4e92ca8f86503f35fadb3099c0e",
+  "expected_tree": "ae357bcb0dfc1d411ae840a93c5afb5d65c88c03",
   "sanitization": {
     "excluded_files": [
       "scripts/elevenlabs-account-diagnose.ts",
@@ -28,7 +28,7 @@
     ],
     "reason": "Exclude unrelated operator scripts/private deployment context and audit-only harnesses; replace operational hosts in documentation and URL fixtures with reserved example.test hosts. Original local source preserved.",
     "baseline_tree": "539e4a6dac07e50188e418d0e1a3d669e5f6d687",
-    "final_tree": "f222d1b555a0e4e92ca8f86503f35fadb3099c0e"
+    "final_tree": "ae357bcb0dfc1d411ae840a93c5afb5d65c88c03"
   },
   "test_only_changes": [
     {
@@ -346,6 +346,33 @@
         "packages/db/src/schema/crm/connections.ts",
         "packages/db/src/schema/crm/index.ts",
         "packages/db/src/schema/crm/message-status.ts"
+      ]
+    },
+    {
+      "file": "10-admin-workspaces-shared-resources.patch",
+      "description": "Workspace entry and offer separation with a shared company resource catalog",
+      "sha256": "2c94a8c3362fa60d81bb91c950c1bb0ffa058ba1268cf31abd591ca543732470",
+      "bytes": 83583,
+      "files": [
+        "apps/api/src/middleware/business-area.ts",
+        "apps/api/src/routes/business-areas/index.ts",
+        "apps/api/src/routes/flow-runs/funnel.ts",
+        "apps/api/src/routes/flow-runs/index.ts",
+        "apps/api/src/routes/meta-entities/index.ts",
+        "apps/api/src/routes/meta-oauth/index.ts",
+        "apps/api/src/routes/meta-profiles/index.ts",
+        "apps/api/src/routes/meta-structure/index.ts",
+        "apps/web/src/app/shell/app-shell.tsx",
+        "apps/web/src/features/business-areas/areas.tsx",
+        "apps/web/src/features/business-areas/workspace.tsx",
+        "apps/web/src/features/offers/page.tsx",
+        "apps/web/src/lib/http.ts",
+        "packages/core/src/business-areas/service.ts",
+        "packages/core/src/mcp/server.ts",
+        "packages/core/src/mcp/tools/business-areas.ts",
+        "packages/core/src/mcp/tools/shared.ts",
+        "packages/core/src/offers/service.ts",
+        "tests/acceptance/T125/business-areas.test.ts"
       ]
     }
   ],
