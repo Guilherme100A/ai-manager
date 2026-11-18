@@ -1,9 +1,9 @@
 diff --git a/apps/api/src/routes/mcp/mcp-spy-probes.db.unit.test.ts b/apps/api/src/routes/mcp/mcp-spy-probes.db.unit.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..6387dc038594ea56ae83068cf537ddb460b49728
+index 0000000000000000000000000000000000000000..491fdcbc2a42c0a116346be4c7c349c884e8f221
 --- /dev/null
 +++ b/apps/api/src/routes/mcp/mcp-spy-probes.db.unit.test.ts
-@@ -0,0 +1,217 @@
+@@ -0,0 +1,229 @@
 +import { randomUUID } from 'node:crypto'
 +import { eq } from 'drizzle-orm'
 +import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -123,8 +123,8 @@ index 0000000000000000000000000000000000000000..6387dc038594ea56ae83068cf537ddb4
 +    const { token, mcp_credential } = await credential(owner, 'write')
 +    const started = { id: probeId, offerId, sessionId, branch: 'objecao', status: 'ativa' }
 +    const stopped = { ...started, status: 'parada' }
-+    upstream.mockResolvedValueOnce(Response.json(started, { status: 201 }))
-+    upstream.mockResolvedValueOnce(Response.json(stopped))
++    upstream.mockResolvedValueOnce(Response.json({ ...started, createdBy: upstreamToken, summary: { private: 'upstream-private' }, token: upstreamToken }, { status: 201 }))
++    upstream.mockResolvedValueOnce(Response.json({ ...stopped, createdBy: upstreamToken, summary: { private: 'upstream-private' }, token: upstreamToken }))
 +
 +    expect(content(await invoke(token, 'start_spy_probe', startArgs))).toEqual(started)
 +    expect(content(await invoke(token, 'stop_spy_probe', { id: probeId }))).toEqual(stopped)
@@ -220,12 +220,24 @@ index 0000000000000000000000000000000000000000..6387dc038594ea56ae83068cf537ddb4
 +    expect(JSON.stringify([httpError, networkError])).not.toContain(upstreamToken)
 +    expect(upstream).toHaveBeenCalledTimes(2)
 +  })
++
++  it('recusa respostas 2xx incompletas ou de outro chip, oferta ou sonda sem retry', async () => {
++    const { token } = await credential(owner, 'write')
++    const result = { id: probeId, offerId, sessionId, branch: 'objecao', status: 'ativa' }
++    for (const response of [{}, { ...result, offerId: randomUUID() }, { ...result, sessionId: randomUUID() }]) {
++      upstream.mockResolvedValueOnce(Response.json(response, { status: 201 }))
++      expect(content(await invoke(token, 'start_spy_probe', startArgs))).toMatchObject({ status: 502, error: { code: 'UPSTREAM_ERROR' } })
++    }
++    upstream.mockResolvedValueOnce(Response.json({ ...result, id: randomUUID(), status: 'parada' }))
++    expect(content(await invoke(token, 'stop_spy_probe', { id: probeId }))).toMatchObject({ status: 502, error: { code: 'UPSTREAM_ERROR' } })
++    expect(upstream).toHaveBeenCalledTimes(4)
++  })
 +})
 diff --git a/apps/api/src/routes/spy-mcp.ts b/apps/api/src/routes/spy-mcp.ts
-index de11464eabf28e7b0cfd257bfe2abb438157f7de..da4f3bc97d28d0c2fb795b51996bf3a5026b0a93 100644
+index de11464eabf28e7b0cfd257bfe2abb438157f7de..2201b2461fd8eb953a5cca090452fceab8d052f5 100644
 --- a/apps/api/src/routes/spy-mcp.ts
 +++ b/apps/api/src/routes/spy-mcp.ts
-@@ -1,37 +1,69 @@
+@@ -1,37 +1,78 @@
  import { Hono } from 'hono'
 +import type { ContentfulStatusCode } from 'hono/utils/http-status'
  import { asc, eq } from 'drizzle-orm'
@@ -255,6 +267,13 @@ index de11464eabf28e7b0cfd257bfe2abb438157f7de..da4f3bc97d28d0c2fb795b51996bf3a5
 +    status: z.string(),
 +    sendable: z.boolean(),
 +  })),
++})
++const probeResponse = z.object({
++  id: uuid,
++  offerId: uuid,
++  sessionId: uuid,
++  branch: z.enum(['principal', 'objecao', 'sumiu']),
++  status: z.enum(['ativa', 'concluida', 'parada', 'erro']),
 +})
 +
  /** Narrow bridge: the Manager has one owner company, never expose its data to other tenants. */
@@ -293,10 +312,12 @@ index de11464eabf28e7b0cfd257bfe2abb438157f7de..da4f3bc97d28d0c2fb795b51996bf3a5
 +    if (!['offers', 'probes', 'chips'].includes(op) && !uuid.safeParse(id).success) throw new ApiError('VALIDATION_ERROR', 'ID inválido')
 +
 +    let body: string | undefined
++    let requestedSessionId: string | undefined
 +    if (probeWrite) {
 +      const schema = op === 'start_probe' ? startProbe : stopProbe
 +      const parsed = schema.safeParse(await c.req.json())
 +      if (!parsed.success) throw new ApiError('VALIDATION_ERROR', 'Dados da sonda inválidos')
++      if ('sessionId' in parsed.data && typeof parsed.data.sessionId === 'string') requestedSessionId = parsed.data.sessionId
 +      body = JSON.stringify(parsed.data)
      }
 -    if (!paths[op]) throw new ApiError('NOT_FOUND', 'Operação inválida')
@@ -306,7 +327,7 @@ index de11464eabf28e7b0cfd257bfe2abb438157f7de..da4f3bc97d28d0c2fb795b51996bf3a5
      const now = Date.now()
      for (const [k, v] of downloads) if (v.expires < now) downloads.delete(k)
      const offset = Number(c.req.query('offset') || 0)
-@@ -41,19 +73,38 @@ export function spyMcpRoutes(deps: ResolvedDeps) {
+@@ -41,19 +82,44 @@ export function spyMcpRoutes(deps: ResolvedDeps) {
      let cached = downloads.get(key)
      if (offset > 0 && !cached && (op === 'zip' || op === 'media')) throw new ApiError('CONFLICT', 'Download expirou; reinicie com offset=0')
      if (!cached || offset === 0) {
@@ -344,9 +365,15 @@ index de11464eabf28e7b0cfd257bfe2abb438157f7de..da4f3bc97d28d0c2fb795b51996bf3a5
 +          return c.json(parsed.data)
 +        }
 +        if (probeWrite) {
++          const parsed = probeResponse.safeParse(data)
++          if (!parsed.success) throw new ApiError('UPSTREAM_ERROR', 'Resposta inválida da Sonda')
++          const sameId = (a: string, b: string | undefined) => a.toLowerCase() === b?.toLowerCase()
++          if (op === 'start_probe' ? !sameId(parsed.data.offerId, id) || !sameId(parsed.data.sessionId, requestedSessionId) : !sameId(parsed.data.id, id))
++            throw new ApiError('UPSTREAM_ERROR', 'Resposta da Sonda incompatível com a operação solicitada')
 +          setAudit(c, op === 'start_probe'
 +            ? { action: 'spy.probe.start', targetType: 'spy_offer', targetId: id }
 +            : { action: 'spy.probe.stop', targetType: 'spy_probe', targetId: id })
++          return c.json(parsed.data, status)
 +        }
 +        return c.json(data, probeWrite ? status : 200)
 +      }
@@ -360,10 +387,10 @@ index de11464eabf28e7b0cfd257bfe2abb438157f7de..da4f3bc97d28d0c2fb795b51996bf3a5
      if (offset > bytes.length) throw new ApiError('VALIDATION_ERROR', 'Offset após o fim do arquivo')
 diff --git a/docs/mcp-spy-probes.md b/docs/mcp-spy-probes.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..72904c8a86e410aab4e9f596f9fc3689fb5a6d23
+index 0000000000000000000000000000000000000000..2e6d235482f409f3de862c5770ec27f0b831b71c
 --- /dev/null
 +++ b/docs/mcp-spy-probes.md
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,60 @@
 +# Operar Sondas pelo MCP
 +
 +**Iniciar uma sonda pode fazer o worker enviar mensagens reais de WhatsApp
@@ -395,6 +422,15 @@ index 0000000000000000000000000000000000000000..72904c8a86e410aab4e9f596f9fc3689
 +ferramentas de escrita repassam a resposta da ponte e mantêm os erros
 +retornados pela API no resultado MCP.
 +
++O retorno de início e parada contém apenas `id`, `offerId`, `sessionId`,
++`branch` e `status`. Campos internos como `summary` e `createdBy` não são
++repassados. Uma resposta de outro chip, oferta ou sonda é recusada.
++
++Parar impede novas aceitações de mensagens da sonda na fila. O commit da
++mensagem no PostgreSQL define essa aceitação; uma mensagem já aceita pode
++ser publicada no Redis e entregue depois da parada. Parar não remove nem
++reenvia essas mensagens. A preparação da próxima parte deve respeitar a parada.
++
 +Iniciar é uma operação não idempotente. Após um timeout, o resultado pode
 +estar indeterminado. Consulte `list_spy_probes` e confira a oferta, o chip e a
 +ramificação antes de decidir se cabe uma nova chamada.
@@ -416,7 +452,7 @@ index 0000000000000000000000000000000000000000..72904c8a86e410aab4e9f596f9fc3689
 +argumentos, requisições à ponte e propagação de erros. A validação integrada
 +da ponte e do WSM fica no CI.
 diff --git a/packages/core/src/mcp/tools/spy.ts b/packages/core/src/mcp/tools/spy.ts
-index 350c2956e02af10655750d07f4febb3e05a75b46..53e801610615045f845446c83c4b7a9df5d83548 100644
+index 350c2956e02af10655750d07f4febb3e05a75b46..006c5fdd79a6c35894faac21619c5706eb846d65 100644
 --- a/packages/core/src/mcp/tools/spy.ts
 +++ b/packages/core/src/mcp/tools/spy.ts
 @@ -1,5 +1,5 @@
@@ -460,7 +496,7 @@ index 350c2956e02af10655750d07f4febb3e05a75b46..53e801610615045f845446c83c4b7a9d
 +  tool({
 +    name: 'stop_spy_probe',
 +    title: 'Parar Sonda',
-+    description: 'Encerra a sonda identificada pelo ID retornado em start_spy_probe ou list_spy_probes.',
++    description: 'Interrompe novas mensagens da sonda identificada pelo ID retornado em start_spy_probe ou list_spy_probes. Mensagens já aceitas na fila antes da parada podem ser entregues depois.',
 +    input: { id: UUID.describe('ID da sonda') },
 +    kind: 'write',
 +    perm: 'flows.edit',

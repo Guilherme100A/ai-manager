@@ -2,7 +2,7 @@
 // O estado fica no banco (spy_probes), então um restart do worker continua de onde parou. As mensagens da oferta
 // são lidas da tabela messages (inclui áudio/imagem, que não têm texto e não passam pelo gancho das conversas).
 import {
-  BRANCH_STRATEGY, phoneToUserJid, ProbeAiDisabledError, SENDABLE_STATES, SendRejectedError,
+  BRANCH_STRATEGY, phoneToUserJid, ProbeAiDisabledError, ProbeNotActiveForSendError, SENDABLE_STATES, SendRejectedError,
   type MessageQueue, type ProbeModel, type SendPipeline, type SessionView, type SpyProbeRow, type SpyProbeStore,
 } from '@wsm/core'
 import type { SpyProbeSummary } from '@wsm/db'
@@ -125,6 +125,7 @@ export class SpyProbeRunner {
       if (turns >= probe.maxTurns) return void (await store.end(probe.id, 'concluida', `limite de ${probe.maxTurns} respostas`, { summary, listen: false }))
       await store.replied(probe.id, { turns, summary, ...(sentAt ? { sentAt } : {}) })
     } catch (err) {
+      if (err instanceof ProbeNotActiveForSendError) return
       if (err instanceof ProbeAiDisabledError) return void (await store.end(probe.id, 'erro', err.message, { listen: false }))
       // Limite do chip / antiban / chip caiu: tenta de novo mais tarde, sem perder a conversa.
       const wait = err instanceof SendRejectedError ? 15 * MINUTE : 5 * MINUTE
@@ -137,7 +138,7 @@ export class SpyProbeRunner {
   private async send(probe: SpyProbeRow, text: string): Promise<Date | undefined> {
     await this.opts.manager.getTransport(probe.sessionId)?.sendTyping?.(phoneToUserJid(probe.phone), true).catch(() => undefined)
     await this.sleep(Math.min(9 * SECOND, Math.max(2 * SECOND, 1_500 + text.length * 60)) + Math.floor(this.random() * 1_500))
-    const view = await this.opts.pipeline.send({ sessionId: probe.sessionId, phone: probe.phone, content: { text }, actor: 'spy-probe', origin: 'spy' })
+    const view = await this.opts.pipeline.send({ sessionId: probe.sessionId, phone: probe.phone, content: { text }, actor: 'spy-probe', origin: 'spy', probeId: probe.id })
     for (let waited = 0; waited < PART_SEND_TIMEOUT; waited += SECOND) {
       const message = await this.opts.messages.get(view.id)
       if (message.sentAt) return new Date(message.sentAt)

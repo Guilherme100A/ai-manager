@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { ProbeAiDisabledError, SendRejectedError, type ProbeDecision, type SpyProbeRow, type SpyProbeStore } from '@wsm/core'
+import { ProbeAiDisabledError, ProbeNotActiveForSendError, SendRejectedError, type ProbeDecision, type SpyProbeRow, type SpyProbeStore } from '@wsm/core'
 import { mergeSummary, openerLanguage, SpyProbeRunner } from './probes'
 
 const T0 = Date.parse('2026-10-20T12:00:00Z')
@@ -12,7 +12,7 @@ function probe(over: Partial<SpyProbeRow> = {}): SpyProbeRow {
   }
 }
 
-function setup(opts: { row?: SpyProbeRow; history?: Array<{ de: 'eu' | 'oferta'; texto: string }>; decision?: ProbeDecision | Error; latest?: Date; allowed?: boolean; status?: string; send?: () => Promise<{ id: string }> } = {}) {
+function setup(opts: { row?: SpyProbeRow; history?: Array<{ de: 'eu' | 'oferta'; texto: string }>; decision?: ProbeDecision | Error; latest?: Date; allowed?: boolean; status?: string; send?: () => Promise<{ id: string }>; sleep?: (ms: number) => Promise<void> } = {}) {
   let row = opts.row ?? probe()
   const store = {
     active: vi.fn(async () => (row.status === 'ativa' ? [row] : [])),
@@ -22,11 +22,15 @@ function setup(opts: { row?: SpyProbeRow; history?: Array<{ de: 'eu' | 'oferta';
     history: vi.fn(async () => (opts.history ?? []).map((t) => ({ ...t, at: new Date(T0) }))),
     replied: vi.fn(async () => { row = { ...row, replyDueAt: null } }),
     postpone: vi.fn(async () => undefined),
-    end: vi.fn(async (_id: string, status: SpyProbeRow['status']) => { row = { ...row, status } }),
+    end: vi.fn(async (_id: string, status: SpyProbeRow['status']) => { row = { ...row, status, replyDueAt: null } }),
     listening: vi.fn(async (sessionId: string, phone: string) => (sessionId === 's1' && phone === row.phone ? row : undefined)),
   }
   const sent: Array<Record<string, unknown>> = []
-  const pipeline = { send: vi.fn(async (req: Record<string, unknown>) => { sent.push(req); return (opts.send ? opts.send() : { id: `m${sent.length}` }) as never }) }
+  const pipeline = { send: vi.fn(async (req: Record<string, unknown>) => {
+    if (req.probeId !== row.id || row.status !== 'ativa') throw new ProbeNotActiveForSendError()
+    sent.push(req)
+    return (opts.send ? opts.send() : { id: `m${sent.length}` }) as never
+  }) }
   const model = { decide: vi.fn(async () => { if (opts.decision instanceof Error) throw opts.decision; return opts.decision! }) }
   const typing = vi.fn(async () => undefined)
   const runner = new SpyProbeRunner({
@@ -35,19 +39,25 @@ function setup(opts: { row?: SpyProbeRow; history?: Array<{ de: 'eu' | 'oferta';
     manager: { get: async () => ({ status: opts.status ?? 'STABLE' }) as never, getTransport: () => ({ sendTyping: typing }) },
     allowed: async () => opts.allowed ?? true,
     offerContext: async () => ({ pagina: 'Chef Maria', anuncio: 'Receitas sem açúcar para você vender' }),
-    logger: { info: vi.fn(), warn: vi.fn() }, now: () => T0, random: () => 0, sleep: async () => undefined,
+    logger: { info: vi.fn(), warn: vi.fn() }, now: () => T0, random: () => 0, sleep: opts.sleep ?? (async () => undefined),
   })
   return { runner, store, sent, model, typing, get row() { return row } }
 }
 
 const decision = (over: Partial<ProbeDecision>): ProbeDecision => ({ acao: 'responder', mensagens: [], checkout: [], opcoes: [], humano: false, ...over })
 
+function barrier() {
+  let release!: () => void
+  const reached = new Promise<void>((resolve) => { release = resolve })
+  return { reached, release }
+}
+
 describe('SpyProbeRunner', () => {
   it('sem mensagem nossa ainda: manda a abertura (digitando + origin spy), sem chamar a IA', async () => {
     const s = setup()
     await s.runner.tick()
     expect(s.typing).toHaveBeenCalled()
-    expect(s.sent).toEqual([{ sessionId: 's1', phone: '+5584920022034', content: { text: 'Oi! Vi o anúncio de vocês e fiquei interessada, como funciona?' }, actor: 'spy-probe', origin: 'spy' }])
+    expect(s.sent).toEqual([{ sessionId: 's1', phone: '+5584920022034', content: { text: 'Oi! Vi o anúncio de vocês e fiquei interessada, como funciona?' }, actor: 'spy-probe', origin: 'spy', probeId: 'p1' }])
     expect(s.model.decide).not.toHaveBeenCalled()
     expect(s.store.replied).toHaveBeenCalledWith('p1', { turns: 1, sentAt: new Date(T0) })
   })
@@ -69,6 +79,30 @@ describe('SpyProbeRunner', () => {
     expect(s.sent.map((r) => (r.content as { text: string }).text)).toEqual(['Ah legal', 'aceita pix?'])
     expect(s.model.decide).toHaveBeenCalledWith([{ de: 'eu', texto: 'Oi' }, { de: 'oferta', texto: 'Custa R$ 47. Link: https://pay.kiwify.com/abc' }], expect.objectContaining({ turnosRestantes: 11, pagina: 'Chef Maria' }))
     expect(s.store.replied).toHaveBeenCalledWith('p1', expect.objectContaining({ turns: 2, summary: expect.objectContaining({ preco: 'R$ 47', links: ['https://pay.kiwify.com/abc'] }) }))
+  })
+
+  it.each([0, 1])('stop durante a preparação preserva somente as %i partes já aceitas', async (accepted) => {
+    const preparing = barrier()
+    const resume = barrier()
+    let sleeps = 0
+    const s = setup({
+      ...(accepted ? { history: [{ de: 'eu', texto: 'Oi' }], decision: decision({ mensagens: ['primeira', 'segunda'] }) } : {}),
+      sleep: async () => {
+        if (sleeps++ !== accepted) return
+        preparing.release()
+        await resume.reached
+      },
+    })
+    const tick = s.runner.tick()
+    await preparing.reached
+    await s.store.end('p1', 'parada')
+    resume.release()
+    await tick
+
+    expect(s.sent.map((r) => r.content)).toEqual(accepted ? [{ text: 'primeira' }] : [])
+    expect(s.store.replied).not.toHaveBeenCalled()
+    expect(s.store.postpone).not.toHaveBeenCalled()
+    expect(s.row).toMatchObject({ status: 'parada', replyDueAt: null })
   })
 
   it('IA encerra (checkout capturado): conclui e encerra a escuta sem mandar nada', async () => {
