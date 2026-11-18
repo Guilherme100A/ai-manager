@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/Guilherme100A/crm-copy.git",
   "base_sha": "acf78e2da49865afa06fe6a4cee77bcf0e888152",
-  "expected_tree": "91134a774990fb63abf05764e508f315f1944664",
+  "expected_tree": "829e94e1ea2385ec3cbb5d25e5c03ff56a82b0ff",
   "sanitization": {
     "excluded_files": [
       "scripts/elevenlabs-account-diagnose.ts",
@@ -28,7 +28,7 @@
     ],
     "reason": "Exclude unrelated operator scripts/private deployment context and audit-only harnesses; replace operational hosts in documentation and URL fixtures with reserved example.test hosts. Original local source preserved.",
     "baseline_tree": "539e4a6dac07e50188e418d0e1a3d669e5f6d687",
-    "final_tree": "91134a774990fb63abf05764e508f315f1944664"
+    "final_tree": "829e94e1ea2385ec3cbb5d25e5c03ff56a82b0ff"
   },
   "test_only_changes": [
     {
@@ -323,6 +323,29 @@
         "packages/db/drizzle/crm/0044_chat_wa_identity.sql",
         "packages/db/drizzle/crm/meta/_journal.json",
         "packages/db/src/schema/crm/chats.ts"
+      ]
+    },
+    {
+      "file": "08-flow-outbound-status.patch",
+      "description": "Production interactive recording, durable scoped delivery receipts, post-commit publication and concurrency regressions; no send or event replay.",
+      "sha256": "346908efcb69412f3cc60a742c07a8f69abe486b6a17969afd92fbef2aeaffe0",
+      "bytes": 56576,
+      "files": [
+        "docs/flow-outbound-status.md",
+        "packages/core/src/chats/ingest/chat-ingest.ts",
+        "packages/core/src/chats/model/status-receipts.ts",
+        "packages/core/src/chats/send/record.db.unit.test.ts",
+        "packages/core/src/chats/send/service.ts",
+        "packages/core/src/chats/send/status-race.db.unit.test.ts",
+        "packages/core/src/flows/engine/context.ts",
+        "packages/core/src/flows/engine/runner.ts",
+        "packages/core/src/flows/nodes/messaging/production.ts",
+        "packages/core/src/flows/nodes/messaging/production.unit.test.ts",
+        "packages/db/drizzle/crm/0045_pending_message_status.sql",
+        "packages/db/drizzle/crm/meta/_journal.json",
+        "packages/db/src/schema/crm/connections.ts",
+        "packages/db/src/schema/crm/index.ts",
+        "packages/db/src/schema/crm/message-status.ts"
       ]
     }
   ],

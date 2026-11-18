@@ -67,7 +67,7 @@ export function deploy(options, run = command) {
     const applied = parseJSON(dc('journal-' + count, psql('BEGIN READ ONLY; SELECT coalesce(json_agg(t),\'[]\') FROM (SELECT hash,created_at FROM crm.__drizzle_migrations ORDER BY created_at) t; COMMIT;')), 'CRM journal')
     requireThat(Array.isArray(applied) && applied.length === count && applied.every((x, i) => x.hash === m.migrations[i].hash && Number(x.created_at) === m.migrations[i].when), 'CRM migration history drift')
   }
-  const beforeCount = installed ? (installed.source_tree === TREE ? 45 : ['7158e6027f11a6a4e77910d5a9c536109848a6c9', 'e39405197247f463dec69388a29d43c187a22332'].includes(installed.source_tree) ? 44 : 43) : 39
+  const beforeCount = installed ? (installed.source_tree === TREE ? 46 : installed.source_tree === '91134a774990fb63abf05764e508f315f1944664' ? 45 : ['7158e6027f11a6a4e77910d5a9c536109848a6c9', 'e39405197247f463dec69388a29d43c187a22332'].includes(installed.source_tree) ? 44 : 43) : 39
   checkJournal(beforeCount)
   fs.mkdirSync(state, { recursive: true, mode: 0o700 })
   const space = fs.statfsSync(state)
@@ -127,13 +127,15 @@ export function deploy(options, run = command) {
     atomic(maintenance, { release: m.release, stage: 'migration-attempted', automatic_database_restore: false })
     migrationAttempted = true // Unknown commit state on any migration failure: never restart old binaries.
     next('migrate-only-crm', ['run', '--rm', '--no-deps', 'crm-api', ...tsxCommand('/crm/packages/db/src/migrate.ts'), '--set', 'crm'])
-    checkJournal(45)
+    checkJournal(46)
     const schema = parseJSON(dc('verify-offer-schema', psql("BEGIN READ ONLY; SELECT json_build_object('column',EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='crm' AND table_name='flow_runs' AND column_name='offer_scoped'),'trigger',EXISTS(SELECT 1 FROM pg_trigger WHERE tgname='validate_offer_run_scope'),'indexes',(SELECT count(*) FROM pg_indexes WHERE schemaname='crm' AND indexname IN ('flow_runs_active_contact_uq','flow_runs_active_chat_uq'))); COMMIT;")), 'schema')
     requireThat(schema.column === true && schema.trigger === true && schema.indexes === 2, 'CRM schema verification failed')
     const areas = parseJSON(dc('verify-business-area-schema', psql("BEGIN READ ONLY; SELECT json_build_object('areas',to_regclass('crm.business_areas') IS NOT NULL,'resources',to_regclass('crm.business_area_resources') IS NOT NULL,'offer_column',EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='crm' AND table_name='offers' AND column_name='business_area_id')); COMMIT;")), 'business area schema')
     requireThat(areas.areas === true && areas.resources === true && areas.offer_column === true, 'Business area schema verification failed')
     const identity = parseJSON(dc('verify-message-identity-schema', psql("BEGIN READ ONLY; SELECT json_build_object('scoped',to_regclass('crm.messages_company_connection_wa_id_uq') IS NOT NULL,'old_global',to_regclass('crm.messages_company_wa_id_uq') IS NOT NULL,'column',EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='crm' AND table_name='messages' AND column_name='connection_id' AND is_nullable='NO'),'trigger',EXISTS(SELECT 1 FROM pg_trigger WHERE tgname='bind_message_connection' AND tgrelid='crm.messages'::regclass AND tgenabled='O'),'fk',(SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname='messages_chat_connection_fk' AND conrelid='crm.messages'::regclass AND convalidated)); COMMIT;")), 'message identity schema')
     requireThat(identity.scoped === true && identity.old_global === false && identity.column === true && identity.trigger === true && typeof identity.fk === 'string' && identity.fk.includes('FOREIGN KEY (company_id, chat_id, connection_id)') && identity.fk.includes('REFERENCES crm.chats(company_id, id, connection_id)'), 'Message identity schema verification failed')
+    const pendingStatus = parseJSON(dc('verify-pending-message-status-schema', psql("BEGIN READ ONLY; SELECT json_build_object('table',to_regclass('crm.pending_message_status') IS NOT NULL,'connection_index',to_regclass('crm.connections_company_id_uq') IS NOT NULL,'fk',(SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname='pending_message_status_connection_fk' AND conrelid='crm.pending_message_status'::regclass AND convalidated),'expiry',EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='crm' AND table_name='pending_message_status' AND column_name='expires_at' AND is_nullable='NO')); COMMIT;")), 'pending message status schema')
+    requireThat(pendingStatus.table === true && pendingStatus.connection_index === true && pendingStatus.expiry === true && typeof pendingStatus.fk === 'string' && pendingStatus.fk.includes('FOREIGN KEY (company_id, connection_id)') && pendingStatus.fk.includes('REFERENCES crm.connections(company_id, id)'), 'Pending message status schema verification failed')
     principal()
     atomic(path.join(state, 'active.json'), spec)
     let ready = false
