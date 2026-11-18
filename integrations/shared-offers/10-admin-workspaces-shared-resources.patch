@@ -1,5 +1,5 @@
 diff --git a/apps/api/src/middleware/business-area.ts b/apps/api/src/middleware/business-area.ts
-index 4a1e46e..e1736ab 100644
+index 4a1e46edbd2475fb0b6285015e2af5d798c424a9..e1736ab7877faa23d053316d81f3fe5de339a9dd 100644
 --- a/apps/api/src/middleware/business-area.ts
 +++ b/apps/api/src/middleware/business-area.ts
 @@ -1,24 +1,14 @@
@@ -104,7 +104,7 @@ index 4a1e46e..e1736ab 100644
            await deps.areaTransaction(async tx => {
              await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`business-areas:${company}`},0))`)
 diff --git a/apps/api/src/routes/business-areas/index.ts b/apps/api/src/routes/business-areas/index.ts
-index 3c80645..1826da3 100644
+index 3c80645a8bd24a34ea300237672db65a8b5f459c..1826da3e79287abfb39ebd93b5b60b0c8aa0e890 100644
 --- a/apps/api/src/routes/business-areas/index.ts
 +++ b/apps/api/src/routes/business-areas/index.ts
 @@ -1,6 +1,6 @@
@@ -132,7 +132,7 @@ index 3c80645..1826da3 100644
      validate('json', z.object({ offer_id: z.uuid(), confirm: z.literal(true) })), async c => {
        const result = await svc.adoptOffer(company(c), c.req.param('id'), c.req.valid('json').offer_id)
 diff --git a/apps/api/src/routes/flow-runs/funnel.ts b/apps/api/src/routes/flow-runs/funnel.ts
-index 13db565..cebb8eb 100644
+index 13db5658d659dd065169cb4c7066c8fea4f89734..cebb8ebfdabf62ab50b039331ff17d191915fbcb 100644
 --- a/apps/api/src/routes/flow-runs/funnel.ts
 +++ b/apps/api/src/routes/flow-runs/funnel.ts
 @@ -5,7 +5,17 @@ import { and, countDistinct, eq, gte, inArray, lte, sql, type SQL } from 'drizzl
@@ -163,7 +163,7 @@ index 13db565..cebb8eb 100644
    const byStatus = await db.select({ status: flowRuns.status, n: sql<number>`count(*)::int` }).from(flowRuns).where(runs).groupBy(flowRuns.status)
    const stopped = await db
 diff --git a/apps/api/src/routes/flow-runs/index.ts b/apps/api/src/routes/flow-runs/index.ts
-index 5ca67a0..a32f052 100644
+index 5ca67a0882820f72c0553a53f2c5f3ae3eae0661..a32f0529e1738a09c30325d0b8975b20ab1f83be 100644
 --- a/apps/api/src/routes/flow-runs/index.ts
 +++ b/apps/api/src/routes/flow-runs/index.ts
 @@ -14,7 +14,7 @@ import { validate } from '../../lib/validate'
@@ -248,7 +248,7 @@ index 5ca67a0..a32f052 100644
      setAudit(c, { action: 'flow_run.cancel_all', targetType: 'connection', targetId: connectionId, detail: { cancelled: done.length } })
      return c.json({ cancelled: done.length })
 diff --git a/apps/api/src/routes/meta-entities/index.ts b/apps/api/src/routes/meta-entities/index.ts
-index 3858e7c..0f6e48d 100644
+index 3858e7c8af5b2819baf618e42f720bf0ac7f3e4f..0f6e48d4a93dac83b38d6a4c3c992d6492f89694 100644
 --- a/apps/api/src/routes/meta-entities/index.ts
 +++ b/apps/api/src/routes/meta-entities/index.ts
 @@ -2,8 +2,6 @@
@@ -275,7 +275,7 @@ index 3858e7c..0f6e48d 100644
          try {
            return await svc().update(companyId, id, body)
 diff --git a/apps/api/src/routes/meta-oauth/index.ts b/apps/api/src/routes/meta-oauth/index.ts
-index 7789a2a..2db6294 100644
+index 7789a2a993acff421eb96a04cbf1c36cdd9e92e9..2db62943f0f1dbf70ac13b9575aacbe2f89d99b6 100644
 --- a/apps/api/src/routes/meta-oauth/index.ts
 +++ b/apps/api/src/routes/meta-oauth/index.ts
 @@ -31,7 +31,7 @@ export function metaOAuthRoutes(deps: ResolvedDeps) {
@@ -288,7 +288,7 @@ index 7789a2a..2db6294 100644
        if (message) url.searchParams.set('meta_message', short(message))
        return c.redirect(url.toString(), 302)
 diff --git a/apps/api/src/routes/meta-profiles/index.ts b/apps/api/src/routes/meta-profiles/index.ts
-index c006c07..431949d 100644
+index c006c075541a43bafc7f011612aa635ee1996aa0..431949d0058e01f4522228e0587392190762ea1b 100644
 --- a/apps/api/src/routes/meta-profiles/index.ts
 +++ b/apps/api/src/routes/meta-profiles/index.ts
 @@ -8,8 +8,6 @@ import { validate } from '../../lib/validate'
@@ -331,7 +331,7 @@ index c006c07..431949d 100644
  
    app.delete('/api/meta/profiles/:id', view, requireMetaManager, async (c) => {
 diff --git a/apps/api/src/routes/meta-structure/index.ts b/apps/api/src/routes/meta-structure/index.ts
-index 87280ad..352ed5c 100644
+index 87280adddccd558f34fb0d59b451e43c865496be..352ed5c8dd76130bd28f62b2a4dc3c8470af6d71 100644
 --- a/apps/api/src/routes/meta-structure/index.ts
 +++ b/apps/api/src/routes/meta-structure/index.ts
 @@ -3,8 +3,6 @@
@@ -362,7 +362,7 @@ index 87280ad..352ed5c 100644
      const bundle = await metaDomain(async () => {
        try {
 diff --git a/apps/web/src/app/shell/app-shell.tsx b/apps/web/src/app/shell/app-shell.tsx
-index 91a97cd..841344b 100644
+index 91a97cde936ca64050b8ab8ffde6d286468d1e5b..841344b07abda8b9473255b316380a61e738fedf 100644
 --- a/apps/web/src/app/shell/app-shell.tsx
 +++ b/apps/web/src/app/shell/app-shell.tsx
 @@ -5,7 +5,7 @@ import { Menu as MenuIcon, MoreHorizontal, PanelLeftClose, PanelLeftOpen, X } fr
@@ -402,10 +402,10 @@ index 91a97cd..841344b 100644
        </div>
  
 diff --git a/apps/web/src/features/business-areas/areas.tsx b/apps/web/src/features/business-areas/areas.tsx
-index 606b574..b8b86fc 100644
+index 606b5742d240ada1cd867cf0bc9689600daac2da..5e70197709969898c285178e5aa0b0cdefa70c00 100644
 --- a/apps/web/src/features/business-areas/areas.tsx
 +++ b/apps/web/src/features/business-areas/areas.tsx
-@@ -1,40 +1,18 @@
+@@ -1,40 +1,19 @@
  import { useEffect, useState } from 'react'
 -import { api, activeBusinessArea, selectBusinessArea } from '@/lib/http'
 -import { appPath } from '@/lib/base'
@@ -444,6 +444,7 @@ index 606b574..b8b86fc 100644
 -    const [a, c, o] = await Promise.all([
 -      api.get<{ items: Area[] }>('/api/business-areas'), api.get<Record<string, Resource[]>>('/api/business-areas/catalog'),
 +    const [a, o] = await Promise.all([
++      api.get<{ items: Area[] }>('/api/business-areas', { headers: { 'X-Business-Area-Id': '' } }),
        api.get<{ items: { id: string; name: string }[] }>('/api/offers', { headers: { 'X-Business-Area-Id': '' } }),
      ])
 -    setAreas(a.items); setCatalog(c); setOffers(o.items)
@@ -451,7 +452,7 @@ index 606b574..b8b86fc 100644
    }
    const run = async (fn: () => Promise<void>) => {
      setError(''); setNotice(''); setBusy(true)
-@@ -43,41 +21,31 @@ export function BusinessAreaManager() {
+@@ -43,41 +22,31 @@ export function BusinessAreaManager() {
    useEffect(() => { void run(load) }, [])
    useEffect(() => { const a = areas.find(a => a.id === selected); setName(a?.name ?? ''); setBm(a?.bm_id ?? '') }, [selected, areas])
    return <details data-testid="business-area-manager">
@@ -504,7 +505,7 @@ index 606b574..b8b86fc 100644
    </details>
 diff --git a/apps/web/src/features/business-areas/workspace.tsx b/apps/web/src/features/business-areas/workspace.tsx
 new file mode 100644
-index 0000000..c27ceaa
+index 0000000000000000000000000000000000000000..c27ceaa28400dbc4507bd36aa4665394aa2b0fa3
 --- /dev/null
 +++ b/apps/web/src/features/business-areas/workspace.tsx
 @@ -0,0 +1,121 @@
@@ -630,7 +631,7 @@ index 0000000..c27ceaa
 +  )
 +}
 diff --git a/apps/web/src/features/offers/page.tsx b/apps/web/src/features/offers/page.tsx
-index dedfb47..12266bd 100644
+index dedfb476305d5bde44f515a3a278db9367c51dfd..12266bdd1a1e1e101385571c61a1d704927e24dc 100644
 --- a/apps/web/src/features/offers/page.tsx
 +++ b/apps/web/src/features/offers/page.tsx
 @@ -1,7 +1,6 @@
@@ -650,7 +651,7 @@ index dedfb47..12266bd 100644
        {notice && <p role="status">{notice}</p>}
        <details>
 diff --git a/apps/web/src/lib/http.ts b/apps/web/src/lib/http.ts
-index 18469b2..3a80692 100644
+index 18469b299e04c2e8fc760fa420a491cc23daaa11..3a80692850d68b443bfd37fd43b10bbde7c79126 100644
 --- a/apps/web/src/lib/http.ts
 +++ b/apps/web/src/lib/http.ts
 @@ -78,16 +78,25 @@ export const activeCompany = (): string | null => state.companyId
@@ -687,7 +688,7 @@ index 18469b2..3a80692 100644
  
  /** Para onde ir quando a sessão acabou (o main liga ao router: limpa o cache e navega ao login). */
 diff --git a/packages/core/src/business-areas/service.ts b/packages/core/src/business-areas/service.ts
-index 9bc696b..f1e7f50 100644
+index 9bc696bfe242dd683a25d4566f0d230df0dcb08a..f1e7f50933eab4de316437115311cea9c4a64b74 100644
 --- a/packages/core/src/business-areas/service.ts
 +++ b/packages/core/src/business-areas/service.ts
 @@ -59,22 +59,10 @@ export class BusinessAreasService {
@@ -801,7 +802,7 @@ index 9bc696b..f1e7f50 100644
      })
    }
 diff --git a/packages/core/src/mcp/server.ts b/packages/core/src/mcp/server.ts
-index 7e1d353..aae6939 100644
+index 7e1d3530b7d9d07a7a7db2d119268176c46ca9a8..aae6939c44eab122f8d994dab1aa041f5810e48a 100644
 --- a/packages/core/src/mcp/server.ts
 +++ b/packages/core/src/mcp/server.ts
 @@ -4,7 +4,7 @@
@@ -834,7 +835,7 @@ index 7e1d353..aae6939 100644
        if (status) where.push(eq(flows.status, status))
        if (search?.trim()) where.push(ilike(flows.name, like(search.trim())))
 diff --git a/packages/core/src/mcp/tools/business-areas.ts b/packages/core/src/mcp/tools/business-areas.ts
-index 51c4e95..6604231 100644
+index 51c4e959ef31e81f9e699c84c84668b94e0e6caf..660423179abc5492b9a7ba1d1edb23b314a527c4 100644
 --- a/packages/core/src/mcp/tools/business-areas.ts
 +++ b/packages/core/src/mcp/tools/business-areas.ts
 @@ -3,7 +3,7 @@ import { fromApi, tool, UUID } from './shared'
@@ -866,7 +867,7 @@ index 51c4e95..6604231 100644
      run: async ({ id, ...body }, api) => fromApi(await api.request('POST', `/api/business-areas/${id}/adopt-offer`, { body })) }),
  ]
 diff --git a/packages/core/src/mcp/tools/shared.ts b/packages/core/src/mcp/tools/shared.ts
-index eddc705..97e8481 100644
+index eddc70518c4fb9a543d9948de0ffd3866540ee55..97e8481492b6cb64f4104ba31afc2a7d679f0577 100644
 --- a/packages/core/src/mcp/tools/shared.ts
 +++ b/packages/core/src/mcp/tools/shared.ts
 @@ -84,7 +84,7 @@ export function registerApiTools(server: McpServer, ctx: McpApiContext, tools: r
@@ -879,7 +880,7 @@ index eddc705..97e8481 100644
        if (t.areaScoped && args?.business_area_id && !ctx.businessAreasAdmin) return fail({ error: 'business_area_forbidden' })
        const input = { ...args }, area = t.areaScoped ? input.business_area_id as string | undefined : undefined
 diff --git a/packages/core/src/offers/service.ts b/packages/core/src/offers/service.ts
-index 8401786..e247e74 100644
+index 8401786506f286f92a1dfe0e2a2a14c68bcfa82b..e247e74834ecfcd568c49f0a6c2bccb966490d6b 100644
 --- a/packages/core/src/offers/service.ts
 +++ b/packages/core/src/offers/service.ts
 @@ -91,12 +91,7 @@ export class OffersService {
@@ -897,7 +898,7 @@ index 8401786..e247e74 100644
    }
    async save(company: string, input: { name: string; active?: boolean; config: OfferConfig }, id?: string, area?: string | null) {
 diff --git a/tests/acceptance/T125/business-areas.test.ts b/tests/acceptance/T125/business-areas.test.ts
-index baf6676..e403934 100644
+index baf66768195d3694a24418c2020c8629831287a2..e4039343613864a9aff2393173083a5dbf65efeb 100644
 --- a/tests/acceptance/T125/business-areas.test.ts
 +++ b/tests/acceptance/T125/business-areas.test.ts
 @@ -72,26 +72,29 @@ it('names/BMs are explicit, scoped by company, unique and validated without cont

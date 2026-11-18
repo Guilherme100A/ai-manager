@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/Guilherme100A/crm-copy.git",
   "base_sha": "acf78e2da49865afa06fe6a4cee77bcf0e888152",
-  "expected_tree": "ae357bcb0dfc1d411ae840a93c5afb5d65c88c03",
+  "expected_tree": "c57fceca4a3da8bc11540190c5adccf076ff4115",
   "sanitization": {
     "excluded_files": [
       "scripts/elevenlabs-account-diagnose.ts",
@@ -28,7 +28,7 @@
     ],
     "reason": "Exclude unrelated operator scripts/private deployment context and audit-only harnesses; replace operational hosts in documentation and URL fixtures with reserved example.test hosts. Original local source preserved.",
     "baseline_tree": "539e4a6dac07e50188e418d0e1a3d669e5f6d687",
-    "final_tree": "ae357bcb0dfc1d411ae840a93c5afb5d65c88c03"
+    "final_tree": "c57fceca4a3da8bc11540190c5adccf076ff4115"
   },
   "test_only_changes": [
     {
@@ -351,8 +351,8 @@
     {
       "file": "10-admin-workspaces-shared-resources.patch",
       "description": "Workspace entry and offer separation with a shared company resource catalog",
-      "sha256": "2c94a8c3362fa60d81bb91c950c1bb0ffa058ba1268cf31abd591ca543732470",
-      "bytes": 83583,
+      "sha256": "4da25b39379bee7d84f271896921602bac08e3e4a45f2409c4762ca4a6675b0a",
+      "bytes": 84938,
       "files": [
         "apps/api/src/middleware/business-area.ts",
         "apps/api/src/routes/business-areas/index.ts",
