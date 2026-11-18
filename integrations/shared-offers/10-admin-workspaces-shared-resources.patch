@@ -1,5 +1,5 @@
 diff --git a/apps/api/src/middleware/business-area.ts b/apps/api/src/middleware/business-area.ts
-index 4a1e46edbd2475fb0b6285015e2af5d798c424a9..8fbbca4f4b09ba9d22670ed2e3b28f3453e94d15 100644
+index 4a1e46edbd2475fb0b6285015e2af5d798c424a9..ac182c398aa878b785fd83da377ef03eff69547a 100644
 --- a/apps/api/src/middleware/business-area.ts
 +++ b/apps/api/src/middleware/business-area.ts
 @@ -1,24 +1,16 @@
@@ -66,7 +66,7 @@ index 4a1e46edbd2475fb0b6285015e2af5d798c424a9..8fbbca4f4b09ba9d22670ed2e3b28f34
 -            body.items = await svc.filter(company, area, kind, body.items as { id: string }[])
 -            c.res = new Response(JSON.stringify(body), c.res)
 +        if (flowId && !await svc.flowAllowed(company, area, flowId, flowEdit)) throw new ApiError('NOT_FOUND', 'Fluxo não encontrado neste workspace')
-+        const referencesArea = flowId && flowEdit && await svc.flowShared(company, flowId) ? null : area
++        const referencesArea = flowId && flowEdit && await svc.flowAllowed(company, null, flowId) ? null : area
 +        if (flowWrite) {
 +          const raw = await c.req.raw.clone().text()
 +          if (raw) {
@@ -934,7 +934,7 @@ index 18469b299e04c2e8fc760fa420a491cc23daaa11..3a80692850d68b443bfd37fd43b10bbd
  
  /** Para onde ir quando a sessão acabou (o main liga ao router: limpa o cache e navega ao login). */
 diff --git a/packages/core/src/business-areas/service.ts b/packages/core/src/business-areas/service.ts
-index 9bc696bfe242dd683a25d4566f0d230df0dcb08a..192056a0df607e833a59b054cc4105228fb880f2 100644
+index 9bc696bfe242dd683a25d4566f0d230df0dcb08a..acb15190c67820c29a7af50e285df28ef5d892a0 100644
 --- a/packages/core/src/business-areas/service.ts
 +++ b/packages/core/src/business-areas/service.ts
 @@ -1,4 +1,4 @@
@@ -958,7 +958,7 @@ index 9bc696bfe242dd683a25d4566f0d230df0dcb08a..192056a0df607e833a59b054cc410522
  /** Business partitions of ONE account. They do not authenticate different people. */
  export class BusinessAreasService {
    constructor(readonly db: Database) {}
-@@ -59,22 +67,26 @@ export class BusinessAreasService {
+@@ -59,22 +67,22 @@ export class BusinessAreasService {
        return (await rows<BusinessArea>(db, sql`update crm.business_areas set name=${input.name.trim()},bm_id=${input.bm_id} where company_id=${company} and id=${id} returning *`))[0]!
      })
    }
@@ -990,14 +990,10 @@ index 9bc696bfe242dd683a25d4566f0d230df0dcb08a..192056a0df607e833a59b054cc410522
 +      where company_id=${company} and area_id=${area} and kind='flow' and resource_id=${id}
 +      returning resource_id`)
 +    if (!flow) throw new BusinessAreaError('not_found', 'Fluxo não encontrado neste workspace')
-+  }
-+  async flowShared(company: string, id: string) {
-+    return (await rows(this.db, sql`select 1 from crm.business_area_resources where company_id=${company}
-+      and kind='flow' and resource_id=${id} and shared_with_workspaces`)).length === 1
    }
    async assertReferences(company: string, area: string | null, value: unknown, depth = 0): Promise<void> {
      if (depth > 30) throw new BusinessAreaError('validation', 'Configuração excede o limite de profundidade')
-@@ -84,54 +96,30 @@ export class BusinessAreasService {
+@@ -84,54 +92,30 @@ export class BusinessAreasService {
        const kind = refs[key]
        if (key === 'product_public_id' && v !== null && v !== undefined && v !== '') {
          const product = uuid(v) ? (await rows<{ id: string }>(this.db, sql`select id from crm.products where company_id=${company} and public_id=${v}`))[0] : null
@@ -1064,7 +1060,7 @@ index 9bc696bfe242dd683a25d4566f0d230df0dcb08a..192056a0df607e833a59b054cc410522
      }
      return result
    }
-@@ -141,19 +129,11 @@ export class BusinessAreasService {
+@@ -141,19 +125,11 @@ export class BusinessAreasService {
        await db.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`business-areas:${company}`},0))`)
        area = (await svc.get(company, area)).id
        if (!uuid(offerId)) throw new BusinessAreaError('not_found', 'Oferta não encontrada')

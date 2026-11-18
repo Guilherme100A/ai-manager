@@ -1,0 +1,311 @@
+diff --git a/apps/worker/src/jobs/utmify/utmify.db.unit.test.ts b/apps/worker/src/jobs/utmify/utmify.db.unit.test.ts
+index a6b8da33328d1219bf1c98051e6fabfa2293e433..f8c87e2222355f2cdca7d5c68db74d637a733f14 100644
+--- a/apps/worker/src/jobs/utmify/utmify.db.unit.test.ts
++++ b/apps/worker/src/jobs/utmify/utmify.db.unit.test.ts
+@@ -99,8 +99,10 @@ async function settled(saleId: string, status: 'approved' | 'refunded' = 'approv
+ describe('fila utmify', () => {
+   it('AC-T113-01: o job envia ao fake e termina succeeded com sale.updated', async () => {
+     const s = await saleWithIntegration(TOKEN)
+-    await enqueue({ ...s, status: 'approved' })
++    const job = await enqueue({ ...s, status: 'approved' })
+     expect(await settled(s.saleId)).toMatchObject({ status: 'succeeded', attempts: 1, lastError: null })
++    // The row commits before publish() reads and emits the final update.
++    await expect.poll(async () => await job.getState()).toBe('completed')
+     expect(fake.ordersOf(s.saleId).map((o) => o.status)).toEqual(['paid'])
+     const mine = events.filter((e) => e.data.sale_id === s.saleId).map((e) => [e.type, e.data.utmify_status])
+     expect(mine).toEqual([
+diff --git a/docs/flow-ai-classified-replies.md b/docs/flow-ai-classified-replies.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..5ceca63f28ff419a23bc9e5307c35506ac594c1e
+--- /dev/null
++++ b/docs/flow-ai-classified-replies.md
+@@ -0,0 +1,28 @@
++# Classificação e resposta humana no mesmo bloco
++
++`ai_call` com `output_conditions` usa `output_key` como metadado interno. Quando
++uma saída leva diretamente a uma mensagem que usa `{ai.response}` ou a variável
++de resposta configurada, o schema pede também `response` (texto ou `null`).
++`ai.output` escolhe o handle existente; `ai.response` e `response_variable` recebem
++somente o texto humano de `response`, nunca o JSON serializado nem a chave.
++Um classificador exclusivamente interno mantém o schema anterior, só com a chave.
++Saídas que não enviam essa variável recebem `ai.response = null`, mesmo se o
++provedor incluir indevidamente um texto comercial. O grafo do snapshot define
++os consumidores; não há nomes de nós ou chaves de segurança fixados no código.
++As instruções originais continuam definindo idioma, limites, recusa e atendimento.
++
++Um consumidor imediato que envia `{ai.response}` ou a variável configurada exige
++texto válido. Numa classificação válida para essa saída, sem texto, com chave
++isolada ou envelope técnico, o bloco falha pelo handle `failure` já existente.
++Uma classificação/estrutura inválida mantém o fallback anterior. Nada é enviado
++nessas tentativas. Escolher outra
++saída continua sendo somente roteamento; `auto_send_response` não passa a enviar
++mensagens no modo com saídas condicionais. O modo de texto livre não muda.
++
++Não há novo campo de configuração nem migration. Um snapshot antigo passa a usar
++o contrato corrigido na próxima execução legítima do bloco IA. O corretivo não
++reescreve variáveis, histórico, resultados já persistidos ou snapshots e não
++reexecuta/reenvia ações antigas. Para um run pausado numa espera que já enviou uma
++mensagem errada, a retomada deve ser coordenada: preservar versão e espera, conferir
++deadline e usar uma nova resposta explícita para alcançar novamente o bloco IA.
++Não repetir a ação de envio antiga nem criar outro run silenciosamente.
+diff --git a/packages/core/src/flows/nodes/external/ai-response.unit.test.ts b/packages/core/src/flows/nodes/external/ai-response.unit.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..b2954e9edad5ccefa3ea40df46e1268366212786
+--- /dev/null
++++ b/packages/core/src/flows/nodes/external/ai-response.unit.test.ts
+@@ -0,0 +1,120 @@
++import { describe, expect, it, vi } from 'vitest'
++import type { FlowDefinition, FlowNode } from '@crm/shared'
++import { FakeLlm, output, text } from '@crm/ai/testing'
++import { FakeWaGateway } from '@crm/wa-port/testing'
++import { buildContext, type StepStore } from '../../engine/context'
++import { productionNodeRegistry } from '../messaging/production'
++import { externalHandlers } from './handlers'
++import { classifiedResponse } from './classified-response'
++
++const keys = ['SEGURIDAD', 'HUMANO', 'NO', 'RESPONDER']
++const aiNode = (id: string, extra: Record<string, unknown> = {}): FlowNode => ({ id, name: id, type: 'ai', position: { x: 0, y: 0 }, actions: [{
++  id: id + '_AI', type: 'ai_call', order: 0, config: {
++    provider: 'gpt', model: 'gpt-5.6-luna', user_message: '{resposta}', system_prompt: 'Responde en español mexicano, breve y sin inventar referencias.',
++    output_conditions: keys.map(output_key => ({ output_key, prompt: output_key })), fallback_output_key: 'FALLBACK',
++    response_variable: 'ai.response', auto_send_response: false, ...extra,
++  },
++}] })
++const responseNode = (id: string, variable = 'ai.response'): FlowNode => ({ id, name: id, type: 'wait_response', position: { x: 1, y: 0 }, actions: [
++  { id: id + '_M', type: 'send_message', order: 0, config: { message_text: `{${variable}}` } },
++  { id: id + '_W', type: 'wait_for_response', order: 1, config: { timeout_value: 2, timeout_unit: 'hours', buffer_enabled: false } },
++  { id: id + '_S', type: 'save_user_data', order: 2, config: { field_name: 'resposta', save_empty: true } },
++] })
++
++function setup(nodes: FlowNode[], response = 'N28R', llm = new FakeLlm([])) {
++  const definition: FlowDefinition = { schema: 'crm.flow/v1', entry: nodes[0]!.id, nodes, variables: [], refs: {}, edges: [
++    { id: 'respond', from: nodes[0]!.id, handle: 'output:RESPONDER', to: response },
++  ] }
++  const wa = new FakeWaGateway({ sessions: [{ id: 's', name: 'test', state: 'STABLE' }] })
++  const saved = new Map<string, unknown>()
++  const store: StepStore = { findAction: async k => saved.has(k) ? { result: saved.get(k) } : null, saveAction: async a => { saved.set(a.key, a.result) }, saveStep: async () => undefined }
++  const vars: Record<string, unknown> = { resposta: '¿Es un pago único?', ai: { response: '{"output_key":"RESPONDER"}' }, 'ai.response': '{"output_key":"RESPONDER"}' }
++  const context = (node: FlowNode, seq = 15) => buildContext({ node, seq, definition, runId: 'existing-v6', companyId: 'company', flowId: 'flow', contactId: 'contact', chatId: 'chat',
++    vars, wa, llm, store, contact: null, repo: { companyId: 'company', db: null, dryRun: false }, log: { info() {}, warn() {}, error() {}, debug() {} } })
++  const registry = productionNodeRegistry({ resolveTarget: async () => ({ sessionId: 's', phone: '+5511999990001' }), sleep: async () => undefined })
++  return { definition, wa, vars, context, registry, llm }
++}
++
++describe('classified flow replies', () => {
++  it.each(['N13', 'N28', 'U1_INFO', 'D1_INFO', 'U2_INFO', 'D2_INFO'])('%s sends only the human field through the production registry', async id => {
++    const ai = aiNode(id), reply = responseNode(id + 'R')
++    const f = setup([ai, reply], reply.id, new FakeLlm([output({ output_key: 'RESPONDER', response: 'Es un pago único de MX$100. ¿Qué duda tienes?' })]))
++    const frozen = JSON.stringify(f.definition)
++    expect(await f.registry.get('ai')!.execute(f.context(ai))).toEqual({ next: 'output:RESPONDER' })
++    expect(f.vars.ai).toMatchObject({ output: 'RESPONDER', response: 'Es un pago único de MX$100. ¿Qué duda tienes?', fail: { reason: null } })
++    expect(f.vars['ai.response']).toBe('Es un pago único de MX$100. ¿Qué duda tienes?')
++    const c = f.context(reply, 16)
++    expect(await f.registry.get('wait_response')!.execute(c)).toHaveProperty('wait')
++    await f.registry.get('wait_response')!.execute(c)
++    expect(f.wa.sent).toHaveLength(1)
++    expect(f.wa.sent[0]!.content).toEqual({ text: 'Es un pago único de MX$100. ¿Qué duda tienes?' })
++    expect(JSON.stringify(f.definition)).toBe(frozen)
++    expect(f.llm.calls[0]!.model).toEqual({ provider: 'openai', model: 'gpt-5.6-luna' })
++  })
++
++  it.each(['SEGURIDAD', 'HUMANO', 'NO'])('preserves %s routing without a commercial send or stale reply', async key => {
++    const ai = aiNode('N28', { auto_send_response: true })
++    const f = setup([ai, responseNode('N28R')], 'N28R', new FakeLlm([output({ output_key: key, response: 'This commercial text must be ignored' })]))
++    expect(await f.registry.get('ai')!.execute(f.context(ai))).toEqual({ next: `output:${key}` })
++    expect(f.vars['ai.response']).toBeNull()
++    expect(f.wa.sent).toHaveLength(0)
++  })
++
++  it.each([null, '', 'RESPONDER', '{"output_key":"RESPONDER"}', '```json\n{"output_key":"RESPONDER"}\n```', '{"response":"texto"}'])('rejects missing/control reply %j before its downstream send', async response => {
++    const ai = aiNode('N28'), reply = responseNode('N28R')
++    const f = setup([ai, reply], reply.id, new FakeLlm([output({ output_key: 'RESPONDER', response })]))
++    await expect(f.registry.get('ai')!.execute(f.context(ai))).rejects.toThrow('classificação sem resposta textual válida')
++    expect(f.vars.ai).toMatchObject({ response: null, fail: { reason: 'llm_error' } })
++    expect(f.vars['ai.response']).toBeNull()
++    expect(f.wa.sent).toHaveLength(0)
++  })
++
++  it('keeps legacy classifier-only results and fallback internal', async () => {
++    const ai = aiNode('CLASSIFY')
++    const f = setup([ai], 'unused', new FakeLlm([output({ output_key: 'RESPONDER' }), output({ output_key: 'unknown', response: 'Do not send this' })]))
++    expect(await f.registry.get('ai')!.execute(f.context(ai))).toEqual({ next: 'output:RESPONDER' })
++    expect(f.vars['ai.response']).toBeNull()
++    expect(await f.registry.get('ai')!.execute(f.context(ai, 16))).toEqual({ next: 'output:FALLBACK' })
++    expect(f.vars.ai).toMatchObject({ output: 'FALLBACK', response: null })
++    expect(f.wa.sent).toHaveLength(0)
++  })
++
++  it('preserves custom response variables and the configured integration/model', async () => {
++    const ai = aiNode('N28', { response_variable: 'answer', api_key_source: 'integration', ai_integration_id: 'existing-key' }), reply = responseNode('N28R', 'answer')
++    const f = setup([ai, reply])
++    const llm = new FakeLlm([output({ output_key: 'RESPONDER', response: 'Puedes elegir SPEI u OXXO.' })])
++    const llmForKey = vi.fn(async () => ({ llm, provider: 'openai' as const }))
++    expect(await externalHandlers({ llmForKey }).ai.execute(f.context(ai))).toEqual({ next: 'output:RESPONDER' })
++    expect(llmForKey).toHaveBeenCalledWith('company', 'existing-key')
++    expect(llm.calls).toHaveLength(1)
++    expect(llm.calls[0]!.model.model).toBe('gpt-5.6-luna')
++    expect(f.vars.answer).toBe('Puedes elegir SPEI u OXXO.')
++  })
++
++  it('keeps free-text ai_call behavior unchanged', async () => {
++    const ai = aiNode('FREE', { output_conditions: [], auto_send_response: true })
++    const f = setup([ai], 'unused', new FakeLlm([text('Hola, ¿en qué te ayudo?')]))
++    expect(await externalHandlers({ messaging: { resolveTarget: async () => ({ sessionId: 's', phone: '+5511999990001' }), sleep: async () => undefined } }).ai.execute(f.context(ai))).toEqual({ next: 'success' })
++    expect(f.vars['ai.response']).toBe('Hola, ¿en qué te ayudo?')
++    expect(f.wa.sent).toHaveLength(1)
++  })
++
++  it('reenters the existing paused wait without resending old JSON, then produces a fresh human reply', async () => {
++    const ai = aiNode('N28'), reply = responseNode('N28R')
++    const f = setup([ai, reply], reply.id, new FakeLlm([output({ output_key: 'RESPONDER', response: 'Sí, es un pago único; no hay mensualidad.' })]))
++    f.vars.__await = { node: 'N28R', seq: 16 }
++    f.vars.__replies = [{ text: '¿Hay mensualidad?' }]
++    expect(await f.registry.get('wait_response')!.execute(f.context(reply, 17))).toEqual({ next: 'source' })
++    expect(f.wa.sent).toHaveLength(0)
++    expect(f.vars.resposta).toBe('¿Hay mensualidad?')
++    expect(await f.registry.get('ai')!.execute(f.context(ai, 18))).toEqual({ next: 'output:RESPONDER' })
++    expect(await f.registry.get('wait_response')!.execute(f.context(reply, 19))).toHaveProperty('wait')
++    expect(f.wa.sent).toHaveLength(1)
++    expect(f.wa.sent[0]!.content).toEqual({ text: 'Sí, es un pago único; no hay mensualidad.' })
++  })
++
++  it('does not mistake ordinary punctuation or a URL for a control envelope', () => {
++    expect(classifiedResponse('Consulta las instrucciones {etiqueta}.', keys)).toBe('Consulta las instrucciones {etiqueta}.')
++    expect(classifiedResponse('https://example.test/ayuda', keys)).toBe('https://example.test/ayuda')
++  })
++})
+diff --git a/packages/core/src/flows/nodes/external/classified-response.ts b/packages/core/src/flows/nodes/external/classified-response.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..91ffa05a7cd96236a37e28bdad534acf8ee01d10
+--- /dev/null
++++ b/packages/core/src/flows/nodes/external/classified-response.ts
+@@ -0,0 +1,23 @@
++import type { FlowDefinition } from '@crm/shared'
++
++/** Routing metadata is never a customer reply, including legacy/provider text envelopes. */
++export function classifiedResponse(value: unknown, keys: readonly string[]): string | null {
++  if (typeof value !== 'string') return null
++  const text = value.trim()
++  if (!text || keys.includes(text)) return null
++  const candidate = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(text)?.[1] ?? text
++  try {
++    const parsed: unknown = JSON.parse(candidate)
++    if (parsed && typeof parsed === 'object' && ('output_key' in parsed || 'response' in parsed)) return null
++  } catch { /* A normal conversational reply is not JSON. */ }
++  return text
++}
++
++/** An existing snapshot can explicitly consume the response in the very next message. */
++export function nextMessageNeedsResponse(definition: FlowDefinition, nodeId: string, output: string, variable?: string): boolean {
++  const variables = ['ai.response', ...(variable?.trim() ? [variable.trim()] : [])]
++  const tokens = variables.map(v => new RegExp('\\{\\{?\\s*' + v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*\\}\\}?'))
++  const targets = new Set(definition.edges.filter(e => e.from === nodeId && e.handle === `output:${output}`).map(e => e.to))
++  return definition.nodes.some(n => targets.has(n.id) && n.actions.some(a =>
++    ['send_message', 'send_interactive_menu', 'send_carousel'].includes(a.type) && tokens.some(t => t.test(JSON.stringify(a.config)))))
++}
+diff --git a/packages/core/src/flows/nodes/external/external.db.unit.test.ts b/packages/core/src/flows/nodes/external/external.db.unit.test.ts
+index 2271c35272a20b0d6c1c8fb05f71941c74724881..79d913f7e195c534b3342eb5449b9c7a3d0f973c 100644
+--- a/packages/core/src/flows/nodes/external/external.db.unit.test.ts
++++ b/packages/core/src/flows/nodes/external/external.db.unit.test.ts
+@@ -16,6 +16,7 @@ import { createNodeRegistry } from '../../engine/registry'
+ import { FlowEngine } from '../../engine/runner'
+ import { FlowStore } from '../../store/store'
+ import { registerExternalNodes, type ExternalDeps } from './index'
++import { productionNodeRegistry } from '../messaging/production'
+ 
+ let tmp: TempDatabase
+ let db: Database
+@@ -120,6 +121,41 @@ describe('make_http_request', () => {
+ })
+ 
+ describe('ai_call', () => {
++  it.each([
++    { response: 'Es un pago único de MX$100. ¿Qué duda tienes?', expected: 'N28R', sends: 1 },
++    { response: null, expected: 'HUMAN', sends: 0 },
++  ])('persists routing and human reply atomically; missing reply follows failure ($expected)', async ({ response, expected, sends }) => {
++    const w = await company()
++    const definition = def([
++      node('N28', 'ai', [action('A28', 'ai_call', { provider: 'gpt', user_message: '{resposta}', response_variable: 'ai.response',
++        output_conditions: [{ output_key: 'RESPONDER', prompt: 'Duda común' }, { output_key: 'HUMANO', prompt: 'Pide una persona' }], fallback_output_key: 'FALLBACK' })]),
++      node('N28R', 'wait_response', [action('A28RM', 'send_message', { message_text: '{ai.response}' }),
++        { ...action('A28RW', 'wait_for_response', { timeout_value: 2, timeout_unit: 'hours' }), order: 1 }]),
++      end('HUMAN'),
++    ], [edge('start', 'source', 'N28'), edge('N28', 'output:RESPONDER', 'N28R'), edge('N28', 'output:HUMANO', 'HUMAN'),
++      edge('N28', 'output:FALLBACK', 'HUMAN'), edge('N28', 'failure', 'HUMAN'), edge('N28R', 'source', 'HUMAN'), edge('N28R', 'timeout', 'HUMAN')])
++    const flow = await store.createFlow({ companyId: w.co }, { name: 'Classified human response' })
++    await store.fromDefinition({ companyId: w.co }, flow.id, definition)
++    await store.publish({ companyId: w.co }, flow.id)
++    const llm = new FakeLlm([output({ output_key: 'RESPONDER', response })])
++    const wa = new FakeWaGateway({ sessions: [{ id: 'fake-session', name: 'fake', state: 'STABLE' }] })
++    const registry = registerExternalNodes(productionNodeRegistry({ resolveTarget: async () => ({ sessionId: 'fake-session', phone: '+5511999990001' }), sleep: async () => undefined }), { llm })
++    const engine = new FlowEngine({ db, wa, registry })
++    const { runId } = await engine.startRun({ companyId: w.co }, { flowId: flow.id, contactId: w.contact, vars: { resposta: '¿Hay mensualidad?', 'ai.response': '{"output_key":"RESPONDER"}' } })
++    await engine.step(runId, 0)
++    const row = await one<{ status: string; current_node_key: string; vars: Record<string, unknown> }>(sql`select status,current_node_key,vars from crm.flow_runs where id=${runId} and company_id=${w.co}`)
++    expect(row.status).toBe('waiting')
++    expect(row.current_node_key).toBe(expected)
++    expect(row.vars['ai.response']).toBe(response)
++    expect(row.vars.ai).toMatchObject({ output: 'RESPONDER', response })
++    expect(llm.calls).toHaveLength(1)
++    expect(llm.calls[0]!.tenantId).toBe(w.co)
++    expect(wa.sent).toHaveLength(sends)
++    if (sends) expect(wa.sent[0]!.content).toEqual({ text: response })
++    await engine.step(runId, 0) // stale/duplicate job cannot resend a wait's question
++    expect(wa.sent).toHaveLength(sends)
++  })
++
+   const cond = (extra: Record<string, unknown> = {}) =>
+     def(
+       [
+diff --git a/packages/core/src/flows/nodes/external/handlers.ts b/packages/core/src/flows/nodes/external/handlers.ts
+index 7f6bc5c3fffb9efeb3dbe50b8ee6fb78e033a67b..639ac728bbc06e70fba6f3a38e26bd4ac7c6e96c 100644
+--- a/packages/core/src/flows/nodes/external/handlers.ts
++++ b/packages/core/src/flows/nodes/external/handlers.ts
+@@ -14,6 +14,7 @@ import type { NodeContext, NodeHandler, NodeOutcome } from '../../engine/context
+ import { defaultGlobals } from '../messaging/data'
+ import { applyGlobals, runMessageAction, type MessagingDeps } from '../messaging/handlers'
+ import { HttpRequestError, getPath, safeHttpRequest, type SafeHttpOptions } from './http'
++import { classifiedResponse, nextMessageNeedsResponse } from './classified-response'
+ 
+ export const FLOW_AI_FEATURE = 'flow_ai'
+ 
+@@ -203,10 +204,16 @@ async function aiCall(ctx: NodeContext, deps: ExternalDeps): Promise<NodeOutcome
+   const context = c.maintain_context === true ? await history(ctx, typeof c.context_interactions === 'number' ? c.context_interactions : 5) : []
+   let instructions = render(typeof c.system_prompt === 'string' ? c.system_prompt : '')
+   const keys = [...conditions.map((o) => o.output_key), ...(fallback ? [fallback] : [])]
+-  if (conditions.length)
+-    instructions = `${instructions}\n\nClassifique a mensagem do usuário em UMA das saídas abaixo e responda só com a chave escolhida em "output_key".\n${conditions
++  // The snapshot explicitly declares which outgoing messages consume this reply.
++  // Pure classifiers retain their original one-field schema and routing contract.
++  const responseKeys = keys.filter(key => nextMessageNeedsResponse(ctx.definition, ctx.node.id, key, typeof c.response_variable === 'string' ? c.response_variable : undefined))
++  if (conditions.length) {
++    instructions = `${instructions}\n\nClassifique a mensagem do usuário em UMA das saídas abaixo e devolva a chave escolhida em "output_key".\n${conditions
+       .map((o) => `- ${o.output_key}: ${o.prompt}`)
+       .join('\n')}${fallback ? `\n- ${fallback}: quando nenhuma das anteriores se aplica` : ''}`.trim()
++    if (responseKeys.length)
++      instructions += `\nO objeto estruturado é interno. Somente quando a chave escolhida for uma destas: ${responseKeys.join(', ')}, escreva em "response" a resposta final ao usuário, natural e no idioma solicitado nas instruções originais. Para todas as outras saídas, "response" deve ser null. Preserve as instruções originais, limites e prioridade de segurança, atendimento humano e recusa. Nunca coloque chaves de saída, JSON ou metadados técnicos na resposta; não invente referências ou dados ausentes.`
++  }
+ 
+   const request = {
+     model: { provider, model },
+@@ -214,7 +221,7 @@ async function aiCall(ctx: NodeContext, deps: ExternalDeps): Promise<NodeOutcome
+     messages: [...context, { role: 'user', content: [{ type: 'text', text: userMessage }] } satisfies LlmMessage],
+     tenantId: ctx.companyId,
+     agentId: `flow:${ctx.flowId}`,
+-    ...(conditions.length ? { output: z.object({ output_key: z.string() }) } : {}),
++    ...(conditions.length ? { output: responseKeys.length ? z.object({ output_key: z.string(), response: z.string().nullable() }) : z.object({ output_key: z.string() }) } : {}),
+   }
+   let result
+   try {
+@@ -228,7 +235,10 @@ async function aiCall(ctx: NodeContext, deps: ExternalDeps): Promise<NodeOutcome
+     const valid = typeof chosen === 'string' && keys.includes(chosen) ? chosen : null
+     if (!valid && result!.finish === 'error' && result!.error?.code !== 'OUTPUT_VALIDATION' && !fallback) return fail('llm_error', result!.error?.message ?? 'falha do provedor')
+     ai.output = valid ?? fallback
+-    ai.response = result!.text || ai.output
++    // result.text is normally the serialized classification object, not a reply.
++    ai.response = valid && responseKeys.includes(valid) ? classifiedResponse((result!.object as { response?: unknown } | undefined)?.response, keys) : null
++    if (ai.output && responseKeys.includes(ai.output) && !ai.response)
++      return fail('llm_error', 'classificação sem resposta textual válida para a próxima mensagem')
+     setAi()
+     if (!ai.output) return fail('llm_error', 'saída inválida e sem saída padrão')
+     return { next: `output:${ai.output}` }

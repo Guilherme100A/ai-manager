@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/Guilherme100A/crm-copy.git",
   "base_sha": "acf78e2da49865afa06fe6a4cee77bcf0e888152",
-  "expected_tree": "0a455ee5ebeb49fc2e018e02e62fe78f86f56471",
+  "expected_tree": "dbb5cb69325a46cfeba3e4faefdcb3c0985a0a52",
   "sanitization": {
     "excluded_files": [
       "scripts/elevenlabs-account-diagnose.ts",
@@ -28,7 +28,7 @@
     ],
     "reason": "Exclude unrelated operator scripts/private deployment context and audit-only harnesses; replace operational hosts in documentation and URL fixtures with reserved example.test hosts. Original local source preserved.",
     "baseline_tree": "539e4a6dac07e50188e418d0e1a3d669e5f6d687",
-    "final_tree": "0a455ee5ebeb49fc2e018e02e62fe78f86f56471"
+    "final_tree": "dbb5cb69325a46cfeba3e4faefdcb3c0985a0a52"
   },
   "test_only_changes": [
     {
@@ -349,10 +349,24 @@
       ]
     },
     {
+      "file": "09-ai-human-response.patch",
+      "description": "Separate conditional AI routing from human replies; preserve safety and wait reentry. Synchronize an existing UTMify test with completed publication; no worker runtime, flow, send or migration changes.",
+      "sha256": "e0454e43843ce9e06bc9c78e5f0f7f1edac36400878a1092f0c61495f1b1c8cc",
+      "bytes": 22482,
+      "files": [
+        "apps/worker/src/jobs/utmify/utmify.db.unit.test.ts",
+        "docs/flow-ai-classified-replies.md",
+        "packages/core/src/flows/nodes/external/ai-response.unit.test.ts",
+        "packages/core/src/flows/nodes/external/classified-response.ts",
+        "packages/core/src/flows/nodes/external/external.db.unit.test.ts",
+        "packages/core/src/flows/nodes/external/handlers.ts"
+      ]
+    },
+    {
       "file": "10-admin-workspaces-shared-resources.patch",
       "description": "Workspace offer separation, private flows with explicit sharing, and a company resource catalog",
-      "sha256": "59eceedc948a396bcbad7ac7c28e7543accf6efc6a65e682e9327fc65796e818",
-      "bytes": 110845,
+      "sha256": "60e6c3b295336cb63595744bff8738d1aea5b4b6b7e2bfa9484f170319e9ec7c",
+      "bytes": 110601,
       "files": [
         "apps/api/src/middleware/business-area.ts",
         "apps/api/src/routes/business-areas/index.ts",
