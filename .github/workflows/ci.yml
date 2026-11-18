@@ -136,7 +136,7 @@ jobs:
         run: |
           mkdir -p "$CRM_REPORT_DIR" "$RUNNER_TEMP/output/shared-offers"
           node scripts/prepare-shared-offers-crm.mjs "$RUNNER_TEMP/crm-source"
-          test "$(git -C "$RUNNER_TEMP/crm-source" write-tree)" = f222d1b555a0e4e92ca8f86503f35fadb3099c0e
+          test "$(git -C "$RUNNER_TEMP/crm-source" write-tree)" = 58266e346324e1092bb1578fc1749bccc3b6e7f7
       - name: Install and build test dependencies on the runner only
         run: |
           pnpm install --frozen-lockfile
@@ -171,14 +171,14 @@ jobs:
           node -e 'const r=require(process.argv[1]); if(r.numTotalTests!==8 || r.numPassedTests!==8 || r.numPendingTests || r.numFailedTests || !r.success) process.exit(1)' "$CRM_REPORT_DIR/mcp-offers.json"
           pnpm exec vitest run --config tests/acceptance/vitest.config.ts tests/acceptance/T125/business-areas.test.ts --reporter=json --outputFile="$CRM_REPORT_DIR/business-areas.json"
           node -e 'const r=require(process.argv[1]); if(r.numTotalTests!==13 || r.numPassedTests!==13 || r.numPendingTests || r.numFailedTests || !r.success) process.exit(1)' "$CRM_REPORT_DIR/business-areas.json"
-          pnpm --filter @crm/core exec vitest run src/offers src/connections src/flows/engine src/flows/nodes/messaging src/flows/nodes/interactive src/flows/triggers src/payments/webhooks src/mcp src/mcp-oauth src/chats/ingest src/chats/send src/media --maxWorkers=2 --reporter=json --outputFile="$CRM_REPORT_DIR/core.json"
+          pnpm --filter @crm/core exec vitest run src/offers src/connections src/flows/engine src/flows/nodes/messaging src/flows/nodes/interactive src/flows/nodes/external src/flows/triggers src/payments/webhooks src/mcp src/mcp-oauth src/chats/ingest src/chats/send src/media --maxWorkers=2 --reporter=json --outputFile="$CRM_REPORT_DIR/core.json"
           pnpm --filter @crm/api exec vitest run src/routes/mcp src/routes/mcp-oauth src/routes/connections src/routes/internal-wa-media --maxWorkers=2 --reporter=json --outputFile="$CRM_REPORT_DIR/mcp-auth.json"
           pnpm --filter @crm/worker test
           git diff --exit-code
       - name: Build immutable Alpine/musl release (never copy runner node_modules)
         run: |
           printf '.git\n**/node_modules\n**/dist\noutput\n.env\ntests/acceptance/T125/operational-ci.test.ts\ntests/acceptance/T125/revisor-gated-ci.test.ts\ntests/acceptance/T125/persistent-login-ci.test.ts\n' > "$RUNNER_TEMP/crm-source/.dockerignore"
-          docker build --platform linux/amd64 --build-arg SOURCE_TREE=f222d1b555a0e4e92ca8f86503f35fadb3099c0e -f integrations/shared-offers/Dockerfile -t "crm-shared-offers:$GITHUB_SHA" "$RUNNER_TEMP/crm-source"
+          docker build --platform linux/amd64 --build-arg SOURCE_TREE=58266e346324e1092bb1578fc1749bccc3b6e7f7 -f integrations/shared-offers/Dockerfile -t "crm-shared-offers:$GITHUB_SHA" "$RUNNER_TEMP/crm-source"
           docker run --rm --network none -w /crm/apps/api "crm-shared-offers:$GITHUB_SHA" node /crm/node_modules/tsx/dist/cli.mjs --conditions=development -e "import('@crm/core').then(()=>console.log('Alpine workspace/dependencies load'))"
           docker volume create "ci_crm_${GITHUB_RUN_ID}_deps"
           docker run --rm --network none -v "ci_crm_${GITHUB_RUN_ID}_deps:/crm/node_modules:ro" "crm-shared-offers:$GITHUB_SHA" node -e "require('fs').accessSync('/crm/node_modules/tsx/dist/cli.mjs')"
