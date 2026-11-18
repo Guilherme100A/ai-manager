@@ -1,3 +1,19 @@
+diff --git a/apps/worker/src/jobs/utmify/utmify.db.unit.test.ts b/apps/worker/src/jobs/utmify/utmify.db.unit.test.ts
+index a6b8da33328d1219bf1c98051e6fabfa2293e433..f8c87e2222355f2cdca7d5c68db74d637a733f14 100644
+--- a/apps/worker/src/jobs/utmify/utmify.db.unit.test.ts
++++ b/apps/worker/src/jobs/utmify/utmify.db.unit.test.ts
+@@ -99,8 +99,10 @@ async function settled(saleId: string, status: 'approved' | 'refunded' = 'approv
+ describe('fila utmify', () => {
+   it('AC-T113-01: o job envia ao fake e termina succeeded com sale.updated', async () => {
+     const s = await saleWithIntegration(TOKEN)
+-    await enqueue({ ...s, status: 'approved' })
++    const job = await enqueue({ ...s, status: 'approved' })
+     expect(await settled(s.saleId)).toMatchObject({ status: 'succeeded', attempts: 1, lastError: null })
++    // The row commits before publish() reads and emits the final update.
++    await expect.poll(async () => await job.getState()).toBe('completed')
+     expect(fake.ordersOf(s.saleId).map((o) => o.status)).toEqual(['paid'])
+     const mine = events.filter((e) => e.data.sale_id === s.saleId).map((e) => [e.type, e.data.utmify_status])
+     expect(mine).toEqual([
 diff --git a/docs/flow-ai-classified-replies.md b/docs/flow-ai-classified-replies.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..5ceca63f28ff419a23bc9e5307c35506ac594c1e

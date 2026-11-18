@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/Guilherme100A/crm-copy.git",
   "base_sha": "acf78e2da49865afa06fe6a4cee77bcf0e888152",
-  "expected_tree": "58266e346324e1092bb1578fc1749bccc3b6e7f7",
+  "expected_tree": "fe9dbf880d74e6dc4550735b24527756cbd9afc4",
   "sanitization": {
     "excluded_files": [
       "scripts/elevenlabs-account-diagnose.ts",
@@ -28,7 +28,7 @@
     ],
     "reason": "Exclude unrelated operator scripts/private deployment context and audit-only harnesses; replace operational hosts in documentation and URL fixtures with reserved example.test hosts. Original local source preserved.",
     "baseline_tree": "539e4a6dac07e50188e418d0e1a3d669e5f6d687",
-    "final_tree": "58266e346324e1092bb1578fc1749bccc3b6e7f7"
+    "final_tree": "fe9dbf880d74e6dc4550735b24527756cbd9afc4"
   },
   "test_only_changes": [
     {
@@ -350,10 +350,11 @@
     },
     {
       "file": "09-ai-human-response.patch",
-      "description": "Separate conditional AI routing from human replies, block control envelopes, preserve safety branches and existing-wait reentry; no flow edits, sends or migrations.",
-      "sha256": "e69f48ab3ee75165ed3a876b600975f710f5abea38d52c0c85f0cbdedd884a14",
-      "bytes": 21301,
+      "description": "Separate conditional AI routing from human replies; preserve safety and wait reentry. Synchronize an existing UTMify test with completed publication; no worker runtime, flow, send or migration changes.",
+      "sha256": "e0454e43843ce9e06bc9c78e5f0f7f1edac36400878a1092f0c61495f1b1c8cc",
+      "bytes": 22482,
       "files": [
+        "apps/worker/src/jobs/utmify/utmify.db.unit.test.ts",
         "docs/flow-ai-classified-replies.md",
         "packages/core/src/flows/nodes/external/ai-response.unit.test.ts",
         "packages/core/src/flows/nodes/external/classified-response.ts",
