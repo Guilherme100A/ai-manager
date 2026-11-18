@@ -436,10 +436,10 @@ index e37d0aefd05ba5510d8bf9cd63cb21809d0e686f..e447513eead5d71a6aac87a716cd5611
      await this.publish(companyId, 'chat.updated', { chat_id: chat.id, chat: toChatDto(result.chat) as never }, result.chat)
 diff --git a/packages/core/src/chats/send/status-race.db.unit.test.ts b/packages/core/src/chats/send/status-race.db.unit.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..d6170a02eea2f127978f3bbf328e5781cdbc436f
+index 0000000000000000000000000000000000000000..c9d5d29ddcfeae4adc34fd55f16a16502d3be72d
 --- /dev/null
 +++ b/packages/core/src/chats/send/status-race.db.unit.test.ts
-@@ -0,0 +1,200 @@
+@@ -0,0 +1,201 @@
 +// Runs only on disposable PostgreSQL in CI. All sends below use the fake gateway.
 +import { randomUUID } from 'node:crypto'
 +import { tmpdir } from 'node:os'
@@ -618,7 +618,8 @@ index 0000000000000000000000000000000000000000..d6170a02eea2f127978f3bbf328e5781
 +    const [secondConnection] = await db.insert(connections).values({ companyId: a.company.id, sessionId: randomUUID(), name: 'Other chip' }).returning()
 +    const [secondChat] = await db.insert(chats).values({ companyId: a.company.id, connectionId: secondConnection!.id, contactId: a.contact.id }).returning()
 +    const secondPipe = randomUUID()
-+    await a.makeIngest().handle(a.event('read', { message_id: secondPipe }))
++    await a.makeIngest().handle(a.event('read', { message_id: secondPipe, transport_message_id: 'WA-' + secondPipe }))
++    expect(await db.select().from(pendingMessageStatus).where(and(eq(pendingMessageStatus.companyId, a.company.id), eq(pendingMessageStatus.connectionId, a.connection.id), eq(pendingMessageStatus.pipelineMessageId, secondPipe)))).toHaveLength(1)
 +    expect(await a.makeService().recordOutbound(a.input({ chatId: secondChat!.id, sessionId: secondConnection!.sessionId, view: a.view({ id: secondPipe, sessionId: secondConnection!.sessionId }) }))).toMatchObject({ status: 'queued' })
 +    await expect(a.makeService().recordOutbound(a.input({ chatId: secondChat!.id, sessionId: secondConnection!.sessionId, view: a.view({ sessionId: secondConnection!.sessionId }) }))).rejects.toMatchObject({ code: 'conflict' })
 +    await a.makeIngest().handle(a.event('sent', { transport_message_id: 'WRONG-WA' }))
