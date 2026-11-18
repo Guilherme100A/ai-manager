@@ -4,8 +4,8 @@ import { z } from 'zod'
 import JSZip from 'jszip'
 import { randomUUID } from 'node:crypto'
 import { asc, desc, eq, or, inArray, isNotNull, sql } from 'drizzle-orm'
-import { buildSpyFlow, mediaZipPath, renderBranchConversation, renderFlowPlaybook, renderFlowSummary, SpyProbeError, SpyProbeStore, SpyStore, normalizePhone, type SpyFlow } from '@wsm/core'
-import { spyMedia, spyOffers, spyProbes, SPY_BRANCHES } from '@wsm/db'
+import { buildSpyFlow, mediaZipPath, renderBranchConversation, renderFlowPlaybook, renderFlowSummary, SENDABLE_STATES, SpyProbeError, SpyProbeStore, SpyStore, normalizePhone, type SpyFlow } from '@wsm/core'
+import { sessions, spyMedia, spyOffers, spyProbes, SPY_BRANCHES } from '@wsm/db'
 import { ApiError, type ErrorCode } from '../errors'
 import { setAudit } from '../middleware/audit'
 import { loadSpyAutoProbeConfig, saveSpyAutoProbeConfig } from '../spy-auto'
@@ -31,6 +31,12 @@ export function spyRoutes(deps: Pick<AppDeps, 'db' | 'redis'>) {
   return new Hono<AppEnv>()
     .get('/api/spy/ads', async (c) => c.json({ items: await store.listAds() }))
     .get('/api/spy/offers', async (c) => c.json({ items: await store.listOffers() }))
+    .get('/api/spy/chips', async (c) => {
+      const chips = await deps.db.select({
+        session_id: sessions.id, name: sessions.name, phone: sessions.phone, status: sessions.status,
+      }).from(sessions).orderBy(asc(sessions.name), asc(sessions.id))
+      return c.json({ items: chips.map((chip) => ({ ...chip, sendable: SENDABLE_STATES.includes(chip.status) })) })
+    })
     .get('/api/spy/media/:id', validate('param', adParam), async (c) => {
       const [file] = await deps.db.select().from(spyMedia).where(eq(spyMedia.id, c.req.valid('param').id)).limit(1)
       if (!file) throw new ApiError('NOT_FOUND', 'Mídia não encontrada')
