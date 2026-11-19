@@ -4,7 +4,7 @@
 import type { Database } from '@wsm/db'
 import { canMessage, ContactsService, type Contact } from '../contacts'
 import type { EnqueueMessageInput, MessageOrigin, MessageView } from '../queue/store'
-import { SessionLimitsService, type SessionLimitsView } from '../safety/limits'
+import { computeEffectiveLimits, SessionLimitsService, type SessionLimitsView } from '../safety/limits'
 import { SENDABLE_STATES } from '../session/states'
 import { SessionStore, type SessionRow } from '../session/store'
 import type { OutgoingContent, WaTransport } from '../transport'
@@ -54,6 +54,11 @@ export interface SendRequest {
   origin?: MessageOrigin
   /** Guarda interna para a aceitação durável de uma mensagem da sonda. */
   probeId?: string
+}
+
+function isProbeSend(req: SendRequest): boolean {
+  // O ID interno também obriga a fila a conferir sonda ativa, chip e destino na mesma transação da gravação.
+  return req.origin === 'spy' && req.probeId !== undefined && !req.groupId
 }
 
 /** Estado compartilhado entre os gates de um envio. */
@@ -166,6 +171,7 @@ export class SendPipeline {
         ctx.contact = contact!
       },
       warmupLimit: async (req, ctx) => {
+        if (isProbeSend(req)) return
         const session = ctx.session ?? (await this.sessions.get(req.sessionId))
         const limits = (ctx.limits ??= await this.limits.view(session))
         const limit = limits.effective.warmupDailyLimit
@@ -183,10 +189,14 @@ export class SendPipeline {
         const session = ctx.session ?? (await this.sessions.get(req.sessionId))
         const limits = (ctx.limits ??= await this.limits.view(session))
         const now = this.limits.nowDate().getTime()
+        // Para sondas, mantém a cota diária configurada com o fator de segurança, sem o teto do cronograma.
+        const dailyLimit = isProbeSend(req)
+          ? computeEffectiveLimits({ configured: limits.configured, reductionFactor: limits.reductionFactor, state: session.status, warmupDailyLimit: null }).perDay
+          : limits.effective.perDay
         const windows = [
           { window: 'minute', ms: 60_000, limit: limits.effective.perMinute },
           { window: 'hour', ms: 3_600_000, limit: limits.effective.perHour },
-          { window: 'day', ms: 86_400_000, limit: limits.effective.perDay },
+          { window: 'day', ms: 86_400_000, limit: dailyLimit },
         ] as const
         for (const w of windows) {
           const sent = await this.limits.countOutbound(req.sessionId, new Date(now - w.ms))

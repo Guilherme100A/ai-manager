@@ -1,9 +1,9 @@
 // SendPipeline + SessionLimitsService com Postgres local (banco descartável).
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { eq } from 'drizzle-orm'
-import { contacts, createDb, createTempDatabase, messages, sessionLimits, sessions, type Database, type TempDatabase } from '@wsm/db'
+import { contacts, createDb, createTempDatabase, messages, sessionLimits, sessions, spyOffers, spyProbes, type Database, type TempDatabase } from '@wsm/db'
 import { generateCredentialsKey, resetCredentialsCrypto } from '../crypto'
-import { MessageStore, type EnqueueMessageInput } from '../queue/store'
+import { MessageStore, ProbeNotActiveForSendError, type EnqueueMessageInput } from '../queue/store'
 import { computeEffectiveLimits, DEFAULT_SEND_LIMITS, SessionLimitsService } from '../safety/limits'
 import { FakeTransport } from '../transport'
 import { DAY_MS } from '../warmup'
@@ -28,6 +28,8 @@ afterAll(async () => {
 })
 
 beforeEach(async () => {
+  await db.delete(spyProbes)
+  await db.delete(spyOffers)
   await db.delete(sessions)
   await db.delete(contacts)
 })
@@ -60,6 +62,12 @@ async function seedSent(sessionId: string, n: number, at: Date) {
   for (let i = 0; i < n; i++) {
     await db.insert(messages).values({ sessionId, phone: PHONE, content: { text: `m${i}` }, status: 'sent', createdAt: at })
   }
+}
+
+async function probeRequest(sessionId: string) {
+  const [offer] = await db.insert(spyOffers).values({ phone: PHONE.slice(1) }).returning()
+  const [probe] = await db.insert(spyProbes).values({ offerId: offer!.id, sessionId, phone: PHONE, createdBy: 'test' }).returning()
+  return { ...req(sessionId), actor: 'spy-probe', origin: 'spy' as const, probeId: probe!.id }
 }
 
 const req = (sessionId: string) => ({ sessionId, phone: PHONE, content: { text: 'oi' }, actor: 'api' })
@@ -140,6 +148,40 @@ describe('gates default', () => {
     await new SessionLimitsService(db, { now: () => now }).set(id, { perMinute: 1000, perHour: 1000, perDay: 1000 })
     await seedSent(id, 30, new Date(now.getTime() - DAY_MS)) // dia 0
     await expect(pipeline.send(req(id))).resolves.toBeDefined()
+  })
+
+  it('ignora a cota do warm-up apenas para envio de sonda ativa e vinculada, com opt-out preservado', async () => {
+    const { pipeline, transports } = setup()
+    await contact()
+    const id = await session('WARMING', 3 * 60 * 60_000)
+    transports.set(id, new FakeTransport())
+    await seedSent(id, 20, new Date(now.getTime() - 2 * 60 * 60_000))
+    const probe = await probeRequest(id)
+
+    expect(await reject(pipeline.send(req(id)))).toMatchObject({ code: 'WARMUP_LIMIT' })
+    expect(await reject(pipeline.send({ ...req(id), origin: 'spy' }))).toMatchObject({ code: 'WARMUP_LIMIT' })
+    await db.update(contacts).set({ optOut: true })
+    expect(await reject(pipeline.send(probe))).toMatchObject({ code: 'CONTACT_NOT_ALLOWED', details: { reason: 'opt_out' } })
+    await db.update(contacts).set({ optOut: false })
+    await expect(pipeline.send(probe)).resolves.toMatchObject({ status: 'queued' })
+
+    await db.update(spyProbes).set({ status: 'parada' }).where(eq(spyProbes.id, probe.probeId))
+    await expect(pipeline.send(probe)).rejects.toBeInstanceOf(ProbeNotActiveForSendError)
+    expect(await db.select().from(messages).where(eq(messages.origin, 'spy'))).toHaveLength(1)
+  })
+
+  it('preserva a cota diária configurada e reduzida para sondas', async () => {
+    const { pipeline, transports, queue } = setup()
+    await contact()
+    const id = await session('WARMING', 3 * 60 * 60_000)
+    transports.set(id, new FakeTransport())
+    const limits = new SessionLimitsService(db, { now: () => now })
+    await limits.set(id, { perDay: 40 })
+    await limits.reduce(id, 0.5, 'test')
+    await seedSent(id, 20, new Date(now.getTime() - 2 * 60 * 60_000))
+    const probe = await probeRequest(id)
+    expect(await reject(pipeline.send(probe))).toMatchObject({ code: 'RATE_LIMIT', gate: 'rateLimit', details: { window: 'day', limit: 20, sent: 20 } })
+    expect(queue.enqueue).not.toHaveBeenCalled()
   })
 
   it('rateLimit: janelas minuto/hora/dia → 429 RATE_LIMIT', async () => {
