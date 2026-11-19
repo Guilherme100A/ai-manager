@@ -9,7 +9,7 @@ import { AutoReply } from './pages/AutoReply'
 import { AiSettingsPage } from './pages/AiSettings'
 import { Contacts } from './pages/Contacts'
 import { Crm } from './pages/Crm'
-import { backRoute } from './pages/Crm.logic'
+import { backRoute, metaProfilesDestination } from './pages/Crm.logic'
 import { Groups } from './pages/Groups'
 import { Home } from './pages/Home'
 import { Login } from './pages/Login'
@@ -66,6 +66,7 @@ function Page({ route }: { route: Route }) {
 export function App() {
   const route = useRoute()
   const token = useToken()
+  const metaDestination = metaProfilesDestination(window.location.search)
   // Última página do painel antes de entrar no CRM: destino do "Voltar ao painel".
   const lastPanelRoute = useRef<Route | null>(null)
   useEffect(() => {
@@ -85,12 +86,17 @@ export function App() {
   // Sem token, toda rota vai para o login (AC-T18-01); com token, o login vai para a home.
   useEffect(() => {
     if (!token && route.name !== 'login') navigate({ name: 'login' })
-    else if (token && route.name === 'login') navigate({ name: 'home' })
-  }, [token, route.name])
+    else if (token && route.name === 'login') navigate({ name: metaDestination ? 'crm' : 'home' })
+    else if (token && route.name !== 'crm' && metaDestination) {
+      const url = new URL(window.location.href)
+      for (const key of ['meta_oauth', 'meta_workspace', 'meta_message']) url.searchParams.delete(key)
+      window.history.replaceState(window.history.state, '', url)
+    }
+  }, [token, route.name, metaDestination])
 
-  if (!token || route.name === 'login') return <Login />
+  if (!token || route.name === 'login') return <Login returnToCrm={Boolean(metaDestination)} />
   // CRM = outra parte do site: tela cheia, sem o menu lateral do painel (a barra do topo leva de volta).
-  if (route.name === 'crm') return <Crm back={backRoute(lastPanelRoute.current)} flowId={route.flowId} />
+  if (route.name === 'crm') return <Crm back={backRoute(lastPanelRoute.current)} flowId={route.flowId} metaDestination={metaDestination} />
   return (
     <Layout route={route}>
       <Page route={route} />

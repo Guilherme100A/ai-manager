@@ -1,9 +1,17 @@
 import { describe, expect, it } from 'vitest'
 import { ApiRequestError } from '../lib/api'
 import { parseHash, routeHref } from '../lib/router'
-import { backRoute, crmErrorState, freshCrmUrl, safeCrmUrl } from './Crm.logic'
+import { backRoute, crmErrorState, freshCrmUrl, metaProfilesDestination, safeCrmUrl } from './Crm.logic'
 
 describe('página CRM', () => {
+  it('keeps only the validated OAuth result and workspace on the fixed CRM destination', () => {
+    const area = '11111111-2222-4333-8444-555555555555'
+    expect(metaProfilesDestination('?meta_oauth=success&meta_workspace=' + area + '&redirect=//other.example&code=private'))
+      .toBe('/facebook/profiles?meta_oauth=success&meta_workspace=' + area)
+    expect(metaProfilesDestination('?meta_oauth=error&meta_workspace=%2F%2Fother.example'))
+      .toBe('/facebook/profiles?meta_oauth=error')
+    expect(metaProfilesDestination('?meta_oauth=invalid')).toBeUndefined()
+  })
   it('renews the document URL without putting the SSO token in the HTTP query', () => {
     expect(freshCrmUrl('/crm/auth/sso#token=private', 'one')).toBe('/crm/auth/sso?crm_entry=one#token=private')
     expect(freshCrmUrl('/crm/auth/sso?embed=1#token=private&redirect=%2Fflows', 'two')).toBe('/crm/auth/sso?embed=1&crm_entry=two#token=private&redirect=%2Fflows')

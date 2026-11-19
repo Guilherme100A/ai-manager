@@ -64,6 +64,23 @@ describe('T18 — login de administrador', () => {
     expect(t === null || t === '').toBe(true)
   })
 
+  it('returns from real panel login to the embedded CRM Meta destination', async () => {
+    const page = await ctx.newPage({ login: false })
+    const area = '11111111-2222-4333-8444-555555555555'
+    await page.route('**/api/crm/sso', (route) => route.fulfill({ json: { url: '/crm/auth/sso#token=fixture' } }))
+    await page.route('**/crm/auth/sso?*', (route) => route.fulfill({ contentType: 'text/html', body: '<p>CRM fixture</p>' }))
+    await page.goto(ctx.base + '/?meta_oauth=success&meta_workspace=' + area + '#/crm')
+    await page.locator(tid('login-username')).fill(ADMIN_USERNAME)
+    await page.locator(tid('login-password')).fill(ADMIN_PASSWORD)
+    await page.locator(tid('login-submit')).click()
+    await page.locator(tid('crm-topbar')).waitFor()
+    const src = await page.locator(tid('crm-frame')).getAttribute('src')
+    const url = new URL(src!, ctx.base)
+    const fragment = new URLSearchParams(url.hash.slice(1))
+    expect(fragment.get('redirect')).toBe('/facebook/profiles?meta_oauth=success&meta_workspace=' + area)
+    expect(url.searchParams.has('token')).toBe(false)
+  })
+
   it('AC-T18-01 sem token, as rotas voltam ao login', async () => {
     const page = await ctx.newPage({ login: false })
     for (const route of ['/', '/sessions', '/sessions/new', '/contacts']) {

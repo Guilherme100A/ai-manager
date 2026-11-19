@@ -136,7 +136,7 @@ jobs:
         run: |
           mkdir -p "$CRM_REPORT_DIR" "$RUNNER_TEMP/output/shared-offers"
           node scripts/prepare-shared-offers-crm.mjs "$RUNNER_TEMP/crm-source"
-          test "$(git -C "$RUNNER_TEMP/crm-source" write-tree)" = 6e93ea0546991123f8436bc75c68027ba30d63eb
+          test "$(git -C "$RUNNER_TEMP/crm-source" write-tree)" = 5d4d9a5897bf1ae6a4014a6ab892ff35709bf7b9
       - name: Install and build test dependencies on the runner only
         run: |
           pnpm install --frozen-lockfile
@@ -145,7 +145,7 @@ jobs:
           pnpm --dir "$RUNNER_TEMP/crm-source" exec playwright install --with-deps chromium
           pnpm --dir "$RUNNER_TEMP/crm-source" --filter @crm/web build
           cp -R "$RUNNER_TEMP/crm-source/apps/web/dist" "$RUNNER_TEMP/output/shared-offers/revisor-web-dist"
-          VITE_BASE_PATH=/crm/ VITE_API_BASE=/crm/api pnpm --dir "$RUNNER_TEMP/crm-source" --filter @crm/web exec vite build --outDir "$CRM_EMBEDDED_DIST"
+          VITE_BASE_PATH=/crm/ VITE_API_BASE=/crm/api CRM_UI_SKIN=ai-manager pnpm --dir "$RUNNER_TEMP/crm-source" --filter @crm/web exec vite build --outDir "$CRM_EMBEDDED_DIST"
       - name: Check integrated CRM types and gateway contracts before acceptance
         run: |
           cd "$RUNNER_TEMP/crm-source"
@@ -179,7 +179,7 @@ jobs:
       - name: Build immutable Alpine/musl release (never copy runner node_modules)
         run: |
           printf '.git\n**/node_modules\n**/dist\noutput\n.env\ntests/acceptance/T125/operational-ci.test.ts\ntests/acceptance/T125/revisor-gated-ci.test.ts\ntests/acceptance/T125/persistent-login-ci.test.ts\n' > "$RUNNER_TEMP/crm-source/.dockerignore"
-          docker build --platform linux/amd64 --build-arg SOURCE_TREE=6e93ea0546991123f8436bc75c68027ba30d63eb -f integrations/shared-offers/Dockerfile -t "crm-shared-offers:$GITHUB_SHA" "$RUNNER_TEMP/crm-source"
+          docker build --platform linux/amd64 --build-arg SOURCE_TREE=5d4d9a5897bf1ae6a4014a6ab892ff35709bf7b9 -f integrations/shared-offers/Dockerfile -t "crm-shared-offers:$GITHUB_SHA" "$RUNNER_TEMP/crm-source"
           docker run --rm --network none -w /crm/apps/api "crm-shared-offers:$GITHUB_SHA" node /crm/node_modules/tsx/dist/cli.mjs --conditions=development -e "import('@crm/core').then(()=>console.log('Alpine workspace/dependencies load'))"
           docker volume create "ci_crm_${GITHUB_RUN_ID}_deps"
           docker run --rm --network none -v "ci_crm_${GITHUB_RUN_ID}_deps:/crm/node_modules:ro" "crm-shared-offers:$GITHUB_SHA" node -e "require('fs').accessSync('/crm/node_modules/tsx/dist/cli.mjs')"

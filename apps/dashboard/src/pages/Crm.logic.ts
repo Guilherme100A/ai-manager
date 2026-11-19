@@ -2,6 +2,19 @@
 import { ApiRequestError } from '../lib/api'
 import type { Route } from '../lib/router'
 
+/** Fixed CRM destination for a Meta callback. Never accept a redirect path from the query. */
+export function metaProfilesDestination(search: string): string | undefined {
+  const input = new URLSearchParams(search)
+  const status = input.get('meta_oauth')
+  if (status !== 'success' && status !== 'error') return undefined
+  const params = new URLSearchParams({ meta_oauth: status })
+  const workspace = input.get('meta_workspace')
+  if (workspace && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(workspace)) {
+    params.set('meta_workspace', workspace)
+  }
+  return '/facebook/profiles?' + params
+}
+
 export type CrmState =
   | { kind: 'loading' }
   | { kind: 'ready'; url: string }

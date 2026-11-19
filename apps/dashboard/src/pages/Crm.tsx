@@ -9,7 +9,7 @@ import { api } from '../lib/api'
 import { routeHref, type Route } from '../lib/router'
 import { crmErrorState, freshCrmUrl, type CrmState } from './Crm.logic'
 
-export function Crm({ back, flowId }: { back: Route; flowId?: string }) {
+export function Crm({ back, flowId, metaDestination }: { back: Route; flowId?: string; metaDestination?: string }) {
   const [state, setState] = useState<CrmState>({ kind: 'loading' })
 
   const load = useCallback(() => {
@@ -18,12 +18,12 @@ export function Crm({ back, flowId }: { back: Route; flowId?: string }) {
       .crmSso()
       .then(({ url }) => {
         const safe = freshCrmUrl(url)
-        const target = flowId ? `/flows/${encodeURIComponent(flowId)}/edit` : undefined
+        const target = flowId ? `/flows/${encodeURIComponent(flowId)}/edit` : metaDestination
         const destination = safe && target ? `${safe}&redirect=${encodeURIComponent(target)}` : safe
         setState(destination ? { kind: 'ready', url: destination } : { kind: 'error', message: 'O servidor devolveu uma URL do CRM inválida.' })
       })
       .catch((err: unknown) => setState(crmErrorState(err)))
-  }, [flowId])
+  }, [flowId, metaDestination])
 
   useEffect(load, [load])
 
