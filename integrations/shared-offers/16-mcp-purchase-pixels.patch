@@ -501,37 +501,8 @@ index 1a908884d837d35c5dc8f6b24e184692e5444e66..7639e2d69eefe2d7195d7b6e3f0d942e
      expect((await tool(writer, 'link_workspace_meta_pixel', config)).data.pixel.id).toBe(pixel.data.pixel.id)
      expect((await call('GET', '/api/meta/pixels/' + pixel.data.pixel.id + '?include_access_token=true', business_area_id)).body.pixel).not.toHaveProperty('access_token')
      expect((await call('PUT', '/api/meta/pixels/' + pixel.data.pixel.id, business_area_id, { auto_send_sales: true })).status).toBe(422)
-diff --git a/tests/acceptance/T125/revisor-shared-offers.test.ts b/tests/acceptance/T125/revisor-shared-offers.test.ts
-index c723a825a8b591b0da25f09043a7b30d44e822a7..e4963e2f162328217f5cc8321f331543a1e5de78 100644
---- a/tests/acceptance/T125/revisor-shared-offers.test.ts
-+++ b/tests/acceptance/T125/revisor-shared-offers.test.ts
-@@ -1,4 +1,4 @@
--﻿import { hashPassword } from '@crm/node-kit'
-+import { hashPassword } from '@crm/node-kit'
- import { createClient } from '../helpers/http'
- import { createHash, randomBytes } from 'node:crypto'
- import { createServer } from 'node:http'
-@@ -121,7 +121,7 @@ beforeAll(async () => {
-   pxB = await salesPixel(sys, t)
-   pxC = await salesPixel(sys,t); sentinel = await salesPixel(sys,t)
-   for (const px of [pxA, pxB, pxC, sentinel]) {
--    await t.c.put('/api/meta/pixels/' + px.id, { auto_lead_on_ad: true, whatsapp_business_account_id: '123456789' })
-+    await t.c.put('/api/meta/pixels/' + px.id, { auto_lead_on_ad: true, allowed_events: ['Purchase', 'Lead', 'InitiateCheckout', 'Contact'], whatsapp_business_account_id: '123456789' })
-     sys.fakeMeta.setBusinessMessagingMode(px.pixelId, 'accept')
-   }
-   const prod = await t.c.post('/api/products', {
-@@ -233,6 +233,9 @@ it('same company / shared chip: frozen A attribution survives B, edits and late
-   expect(ca).toMatchObject({ integration_id: integrationA, currency: 'MXN', contact_id: oa.contact_id })
-   expect(Number(ca.amount_cents)).toBe(12345)
-   await accepted(pxA, 'offer-lead-' + oa.id)
-+  const disabledEvent = 'offer-disabled-schedule-' + oa.id
-+  expect(await new OffersService(sys.db).queueEvent(oa, 'Schedule', disabledEvent)).toBe(false)
-+  expect(await sys.q('select id from crm.offer_event_outbox where event_id=$1', [disabledEvent])).toHaveLength(0)
-   expect(sys.fakeMeta.capiEventsFor(pxB.pixelId)).toHaveLength(0)
-   // Explicit context replacement in the same chat; manual never inherits A's click.
-   const manual = await t.c.post('/api/chats/' + ma.chat + '/offer', { offer_id: b.id, replace_active: true })
 diff --git a/tests/acceptance/T125/shared-offers.test.ts b/tests/acceptance/T125/shared-offers.test.ts
-index 2eb9b9ad8059a6b4c951c55443be65c55fddf920..d5f6148dfae92ead3827b916b5b3e2d2ebaa89ba 100644
+index 2eb9b9ad8059a6b4c951c55443be65c55fddf920..4efe4273ee07ea448a2500c2761fb2f9048d0c44 100644
 --- a/tests/acceptance/T125/shared-offers.test.ts
 +++ b/tests/acceptance/T125/shared-offers.test.ts
 @@ -114,7 +114,7 @@ beforeAll(async () => {
@@ -543,3 +514,13 @@ index 2eb9b9ad8059a6b4c951c55443be65c55fddf920..d5f6148dfae92ead3827b916b5b3e2d2
      sys.fakeMeta.setBusinessMessagingMode(px.pixelId, 'accept')
    }
    const prod = await t.c.post('/api/products', {
+@@ -223,6 +223,9 @@ it('same company / shared chip: frozen A attribution survives B, edits and late
+   expect(ca).toMatchObject({ integration_id: integrationA, currency: 'MXN', contact_id: oa.contact_id })
+   expect(Number(ca.amount_cents)).toBe(12345)
+   await accepted(pxA, 'offer-lead-' + oa.id)
++  const disabledEvent = 'offer-disabled-schedule-' + oa.id
++  expect(await new OffersService(sys.db).queueEvent(oa, 'Schedule', disabledEvent)).toBe(false)
++  expect(await sys.q('select id from crm.offer_event_outbox where event_id=$1', [disabledEvent])).toHaveLength(0)
+   expect(sys.fakeMeta.capiEventsFor(pxB.pixelId)).toHaveLength(0)
+   // Explicit context replacement in the same chat; manual never inherits A's click.
+   const manual = await t.c.post('/api/chats/' + ma.chat + '/offer', { offer_id: b.id, replace_active: true })

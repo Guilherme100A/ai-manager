@@ -10,6 +10,7 @@ export const originalFile = 'revisor-shared-offers.test.ts'
 export const adaptedFile = 'revisor-gated-ci.test.ts'
 const check = (ok, message) => { if (!ok) throw Error(message) }
 const changes = [
+  ["auto_lead_on_ad: true, whatsapp_business_account_id:", "auto_lead_on_ad: true, allowed_events: ['Purchase', 'Lead', 'InitiateCheckout', 'Contact'], whatsapp_business_account_id:"],
   ['let sys: System, t: Tenant', 'const __ciOriginalOffersGate = process.env.SHARED_OFFERS_COMPANY_ID\nlet sys: System, t: Tenant'],
   ['  t = await tenant(sys)\n', '  t = await tenant(sys)\n  process.env.SHARED_OFFERS_COMPANY_ID = t.companyId\n'],
   ["expect((await foreign.c.put('/api/offers/' + a.id, a)).status).toBe(422)", "expect((await foreign.c.put('/api/offers/' + a.id, a)).status).toBe(404)"],

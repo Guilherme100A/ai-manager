@@ -20,6 +20,7 @@ test('adapter scopes tenant, restores env and aligns only the strict foreign-com
   const before = source.split('\n').filter(x => x.includes('expect(')), after = adapted.split('\n').filter(x => x.includes('expect('))
   assert.deepEqual(after, before.map(line => line.replace("expect((await foreign.c.put('/api/offers/' + a.id, a)).status).toBe(422)", "expect((await foreign.c.put('/api/offers/' + a.id, a)).status).toBe(404)")))
   assert.ok(adapted.includes('expect(invalid.status, invalid.text).toBe(422)'))
+  assert.ok(adapted.includes("allowed_events: ['Purchase', 'Lead', 'InitiateCheckout', 'Contact']"))
   assert.ok(adapted.includes("await p.getByRole('button',{name:/UI shared offer/}).waitFor()\n      expect(await p.getByRole('button',{name:/UI shared offer/}).count()).toBe(1)"))
   assert.deepEqual(adapted.split('\n').filter(x => /\bit\(/.test(x)), source.split('\n').filter(x => /\bit\(/.test(x)))
   assert.ok(adapted.includes('finally {\n    if (__ciOriginalOffersGate === undefined) delete'))
