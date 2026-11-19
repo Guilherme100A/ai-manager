@@ -130,10 +130,10 @@ try {
   const beforeMeta = path.join(dir, 'before0047.dump')
   utility('pg_dump', ['-Fc', '--no-owner', '--dbname', b.url, '-f', beforeMeta]); utility('pg_restore', ['--list', beforeMeta])
   const restored47 = await create(); utility('pg_restore', ['--no-owner', '--exit-on-error', '--dbname', restored47.url, beforeMeta]); b = restored47
-  await migrateUrl(b.url, { set: 'crm' })
-  const journalAfter = (await b.client.query('SELECT hash,created_at FROM crm.__drizzle_migrations ORDER BY created_at')).rows
-  assert.equal(journalAfter.length,48)
-  assert.deepEqual(journalAfter.slice(0,47),journal47)
+  await migrateUrl(b.url, { set: 'crm', folders: { crm: partial(48) } })
+  const journal48 = (await b.client.query('SELECT hash,created_at FROM crm.__drizzle_migrations ORDER BY created_at')).rows
+  assert.equal(journal48.length,48)
+  assert.deepEqual(journal48.slice(0,47),journal47)
   assert.deepEqual((await b.client.query('SELECT business_area_id,access_token_enc FROM crm.meta_profiles WHERE id=$1',[legacyProfile.id])).rows,[{business_area_id:null,access_token_enc:'opaque-fixture'}])
   assert.deepEqual((await b.client.query('SELECT business_area_id,profile_id FROM crm.meta_ad_accounts WHERE id=$1',[legacyAccount.id])).rows,[{business_area_id:null,profile_id:legacyProfile.id}])
   assert.deepEqual((await b.client.query('SELECT business_area_id,meta_ad_account_id,auto_send_sales FROM crm.pixel_configs WHERE id=$1',[legacyPixel.id])).rows,[{business_area_id:null,meta_ad_account_id:null,auto_send_sales:true}])
@@ -149,6 +149,17 @@ try {
   await assert.rejects(addPixel(otherArea.id,accountA.id,false), e => e.code === '23503')
   await assert.rejects(addPixel(workspace,accountA.id,true), e => e.code === '23514')
   await addPixel(workspace,accountA.id,false)
+  const beforePixelPolicy = path.join(dir, 'before0048.dump')
+  utility('pg_dump', ['-Fc', '--no-owner', '--dbname', b.url, '-f', beforePixelPolicy]); utility('pg_restore', ['--list', beforePixelPolicy])
+  const restored48 = await create()
+  utility('pg_restore', ['--no-owner', '--exit-on-error', '--dbname', restored48.url, beforePixelPolicy]); b = restored48
+  await migrateUrl(b.url, { set: 'crm' })
+  const journalAfter = (await b.client.query('SELECT hash,created_at FROM crm.__drizzle_migrations ORDER BY created_at')).rows
+  assert.equal(journalAfter.length,49)
+  assert.deepEqual(journalAfter.slice(0,48),journal48)
+  const policy = await b.client.query('SELECT allowed_events FROM crm.pixel_configs WHERE id=$1 OR (business_area_id=$2 AND meta_ad_account_id=$3)', [legacyPixel.id,workspace,accountA.id])
+  assert.deepEqual(policy.rows.map(x => x.allowed_events), [['Purchase'], ['Purchase']])
+  await assert.rejects(b.client.query("UPDATE crm.pixel_configs SET allowed_events=ARRAY['Invalid'] WHERE id=$1", [legacyPixel.id]), e => e.code === '23514')
   await migrateUrl(b.url, { set: 'crm' }); assert.deepEqual((await b.client.query('SELECT hash,created_at FROM crm.__drizzle_migrations ORDER BY created_at')).rows, journalAfter)
   assert.equal((await b.client.query('SELECT count(*)::int n FROM crm.company_members')).rows[0].n, 3)
   assert.equal((await b.client.query('SELECT count(*)::int n FROM crm.release_fixture_link JOIN public.release_fixture_parent ON parent_id=id')).rows[0].n, 1)
@@ -166,13 +177,13 @@ try {
   await assert.rejects(migrateUrl(a.url, { set: 'crm' }), e=>(e.cause?.code ?? e.code)==='P0001')
   assert.equal((await a.client.query('SELECT count(*)::int n FROM crm.__drizzle_migrations')).rows[0].n,44)
   assert.equal((await a.client.query("SELECT count(*)::int n FROM information_schema.columns WHERE table_schema='crm' AND table_name='messages' AND column_name='connection_id'")).rows[0].n,0)
-  const finalDump = path.join(dir, 'after0047.dump'); utility('pg_dump', ['-Fc', '--no-owner', '--dbname', b.url, '-f', finalDump]); utility('pg_restore', ['--no-owner', '--exit-on-error', '--dbname', c.url, finalDump])
+  const finalDump = path.join(dir, 'after0048.dump'); utility('pg_dump', ['-Fc', '--no-owner', '--dbname', b.url, '-f', finalDump]); utility('pg_restore', ['--no-owner', '--exit-on-error', '--dbname', c.url, finalDump])
   assert.deepEqual((await c.client.query('SELECT hash,created_at FROM crm.__drizzle_migrations ORDER BY created_at')).rows, journalAfter)
   assert.deepEqual((await c.client.query('SELECT id,offer_scoped FROM crm.flow_runs ORDER BY id')).rows, scope)
   await assert.rejects(c.client.query('UPDATE crm.flow_runs SET offer_scoped=true WHERE id=$1', [rows[0].run]), /invalid offer run scope/)
   assert.equal((await c.client.query('SELECT count(*)::int n FROM crm.messages WHERE company_id=$1 AND wa_message_id=$2', [company,waId])).rows[0].n, 2)
   assert.equal((await c.client.query('SELECT count(*)::int n FROM crm.pending_message_status')).rows[0].n,1)
-  metrics.passed = ['backup/restore0038 with public dependency', 'one shared company and three existing member identities preserved', '0039->0042 valid opportunity backfill and legacy scope', 'backup/restore0042 then upgrade0043 without changing43-prefix or assigning existing offers', 'backup/restore44 then upgrade45 preserving44-prefix and old outbound', 'two connections may contain same WA id; local duplicate and identity moves rejected', 'backup/restore45 then upgrade46 preserving45-prefix and status-only tenant FK', 'backup/restore46 then upgrade47 retaining private flow ownership and exact prefix', '47-entry journal idempotence', 'unique indexes and scope/FK triggers', 'post0046 dump/restore with pending receipt', 'RPO tail-loss demonstrated without automatic production restore']
+  metrics.passed = ['backup/restore0038 with public dependency', 'one shared company and three existing member identities preserved', '0039->0042 valid opportunity backfill and legacy scope', 'backup/restore0042 then upgrade0043 without changing43-prefix or assigning existing offers', 'backup/restore44 then upgrade45 preserving44-prefix and old outbound', 'two connections may contain same WA id; local duplicate and identity moves rejected', 'backup/restore45 then upgrade46 preserving45-prefix and status-only tenant FK', 'backup/restore46 then upgrade47 retaining private flow ownership and exact prefix', 'backup/restore48 and upgrade49 preserves prefix and limits legacy and scoped pixels to Purchase', '49-entry journal idempotence', 'unique indexes and scope/FK triggers', 'post0046 dump/restore with pending receipt', 'RPO tail-loss demonstrated without automatic production restore']
   fs.writeFileSync(path.join(process.env.CRM_REPORT_DIR, 'migration-restore.json'), JSON.stringify(metrics, null, 2))
 } finally {
   for (const client of clients) await client.end()
