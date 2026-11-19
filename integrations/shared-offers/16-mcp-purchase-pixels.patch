@@ -73,7 +73,7 @@ index a37ae161d9cf58d7e1e0b9817214e8a27f02f6d9..41748a8e3ea5cf1308fc54b0c9ef38bf
    return { companyId: c!.id, pixel, pixelId, contact: contact! }
  }
 diff --git a/docs/mcp-meta-workspaces.md b/docs/mcp-meta-workspaces.md
-index 01952eb4010c32a4682b96b7fd25da91bcc754bf..a5c14f47356c1af74aa1bd7bdd929bbc6570f9e0 100644
+index 01952eb4010c32a4682b96b7fd25da91bcc754bf..7a351d3f88c32ca7d4a93789e4bf72e7205bc54a 100644
 --- a/docs/mcp-meta-workspaces.md
 +++ b/docs/mcp-meta-workspaces.md
 @@ -15,3 +15,9 @@ O vínculo do pixel usa uma leitura de `/act_<id>/adspixels` para confirmar aces
@@ -83,9 +83,9 @@ index 01952eb4010c32a4682b96b7fd25da91bcc754bf..a5c14f47356c1af74aa1bd7bdd929bbc
 +
 +### Cadastro por ID
 +
-+Exemplo de prompt: "No Admin 1, cadastre o pixel Compra Loja, Pixel ID 123456789, Page ID 987654321, na conta de anuncios ja vinculada, somente Purchase."
++Exemplo de prompt: "No Admin 1, cadastre o pixel Compra Loja, Pixel ID 123456789, Page ID 987654321, na conta de anúncios já vinculada, somente Purchase."
 +
-+O MCP usa `link_workspace_meta_pixel` para cadastrar um pixel existente da conta vinculada. Envie `pixel_id` e `page_id` como strings para preservar os digitos. O Page ID e opcional e configura a atribuicao Click-to-WhatsApp. A credencial vem do perfil Meta conectado. Novos cadastros permitem somente `Purchase` por padrao. Para habilitar outros eventos, informe `allowed_events` explicitamente. O cadastro por si so nao envia eventos.
++O MCP usa `link_workspace_meta_pixel` para cadastrar um pixel existente da conta vinculada. Envie `pixel_id` e `page_id` como strings para preservar os dígitos. O Page ID é opcional e configura a atribuição Click-to-WhatsApp. A credencial vem do perfil Meta conectado. Novos cadastros permitem somente `Purchase` por padrão. Para habilitar outros eventos, informe `allowed_events` explicitamente. O cadastro por si só não envia eventos.
 diff --git a/packages/core/src/flows/nodes/pixel/index.ts b/packages/core/src/flows/nodes/pixel/index.ts
 index 041077394fce6a0096e4f1ce824c62bd54e42e2f..6f3f5dec1ab1f91f9ede50ad4a956573c3453c77 100644
 --- a/packages/core/src/flows/nodes/pixel/index.ts
@@ -483,16 +483,17 @@ index e14a99da5d210a3245553215fa665ff4ce7bfb8a..25ff1d0855c564482a1ab1bd6176f0b2
      check('pixel_configs_page_id_ck', sql`${t.pageId} is null or ${t.pageId} ~ '^[0-9]+$'`),
      check('pixel_configs_waba_id_ck', sql`${t.whatsappBusinessAccountId} is null or ${t.whatsappBusinessAccountId} ~ '^[0-9]+$'`),
 diff --git a/tests/acceptance/T125/business-areas.test.ts b/tests/acceptance/T125/business-areas.test.ts
-index 1a908884d837d35c5dc8f6b24e184692e5444e66..8c72d44c6a4f4165ae8e767a2f10e058ad9cb9b6 100644
+index 1a908884d837d35c5dc8f6b24e184692e5444e66..7639e2d69eefe2d7195d7b6e3f0d942ecc447e1c 100644
 --- a/tests/acceptance/T125/business-areas.test.ts
 +++ b/tests/acceptance/T125/business-areas.test.ts
-@@ -122,10 +122,11 @@ it('authorizes one Facebook profile separately in three workspaces and binds dis
+@@ -122,10 +122,12 @@ it('authorizes one Facebook profile separately in three workspaces and binds dis
      expect((await tool(writer, 'link_workspace_meta_ad_account', link)).data.ad_account.id).toBe(ad_account_id)
      expect((await tool(reader, 'list_workspace_meta_pixels', { ...workspace, ad_account_id })).data.items).toEqual([{ pixel_id: datasetIds[i], name: 'Workspace Pixel ' + (i+1) }])
      expect((await tool(writer, 'link_workspace_meta_pixel', { ...workspace, ad_account_id, pixel_id: '7777' })).data.status).toBe(404)
 -    const config = { ...workspace, ad_account_id, pixel_id: datasetIds[i] }
 +    const config = { ...workspace, ad_account_id, pixel_id: datasetIds[i], page_id: String(2001+i), name: "Pixel Compra " + (i+1) }
 +    expect((await tool(writer, "link_workspace_meta_pixel", { ...config, page_id: "not-an-id" })).error).toBe(true)
++    expect((await tool(reader, 'link_workspace_meta_pixel', config)).error).toBe(true)
      const pixel = await tool(writer, 'link_workspace_meta_pixel', config)
      expect(pixel.error, JSON.stringify(pixel.data)).toBe(false)
 -    expect(pixel.data).toMatchObject({ capi_delivery_verified: false, pixel: { ad_account_id, pixel_id: datasetIds[i] } })
@@ -501,7 +502,7 @@ index 1a908884d837d35c5dc8f6b24e184692e5444e66..8c72d44c6a4f4165ae8e767a2f10e058
      expect((await call('GET', '/api/meta/pixels/' + pixel.data.pixel.id + '?include_access_token=true', business_area_id)).body.pixel).not.toHaveProperty('access_token')
      expect((await call('PUT', '/api/meta/pixels/' + pixel.data.pixel.id, business_area_id, { auto_send_sales: true })).status).toBe(422)
 diff --git a/tests/acceptance/T125/revisor-shared-offers.test.ts b/tests/acceptance/T125/revisor-shared-offers.test.ts
-index c723a825a8b591b0da25f09043a7b30d44e822a7..482d14ab0e270e96825e2ebc2bacf803e1947d9c 100644
+index c723a825a8b591b0da25f09043a7b30d44e822a7..e4963e2f162328217f5cc8321f331543a1e5de78 100644
 --- a/tests/acceptance/T125/revisor-shared-offers.test.ts
 +++ b/tests/acceptance/T125/revisor-shared-offers.test.ts
 @@ -1,4 +1,4 @@
@@ -515,12 +516,22 @@ index c723a825a8b591b0da25f09043a7b30d44e822a7..482d14ab0e270e96825e2ebc2bacf803
    pxC = await salesPixel(sys,t); sentinel = await salesPixel(sys,t)
    for (const px of [pxA, pxB, pxC, sentinel]) {
 -    await t.c.put('/api/meta/pixels/' + px.id, { auto_lead_on_ad: true, whatsapp_business_account_id: '123456789' })
-+    await t.c.put('/api/meta/pixels/' + px.id, { auto_lead_on_ad: true, allowed_events: ["Purchase", "Lead", "InitiateCheckout"], whatsapp_business_account_id: '123456789' })
++    await t.c.put('/api/meta/pixels/' + px.id, { auto_lead_on_ad: true, allowed_events: ['Purchase', 'Lead', 'InitiateCheckout', 'Contact'], whatsapp_business_account_id: '123456789' })
      sys.fakeMeta.setBusinessMessagingMode(px.pixelId, 'accept')
    }
    const prod = await t.c.post('/api/products', {
+@@ -233,6 +233,9 @@ it('same company / shared chip: frozen A attribution survives B, edits and late
+   expect(ca).toMatchObject({ integration_id: integrationA, currency: 'MXN', contact_id: oa.contact_id })
+   expect(Number(ca.amount_cents)).toBe(12345)
+   await accepted(pxA, 'offer-lead-' + oa.id)
++  const disabledEvent = 'offer-disabled-schedule-' + oa.id
++  expect(await new OffersService(sys.db).queueEvent(oa, 'Schedule', disabledEvent)).toBe(false)
++  expect(await sys.q('select id from crm.offer_event_outbox where event_id=$1', [disabledEvent])).toHaveLength(0)
+   expect(sys.fakeMeta.capiEventsFor(pxB.pixelId)).toHaveLength(0)
+   // Explicit context replacement in the same chat; manual never inherits A's click.
+   const manual = await t.c.post('/api/chats/' + ma.chat + '/offer', { offer_id: b.id, replace_active: true })
 diff --git a/tests/acceptance/T125/shared-offers.test.ts b/tests/acceptance/T125/shared-offers.test.ts
-index 2eb9b9ad8059a6b4c951c55443be65c55fddf920..be3b6020d1c42adad0561e40f8897cfaca44220e 100644
+index 2eb9b9ad8059a6b4c951c55443be65c55fddf920..d5f6148dfae92ead3827b916b5b3e2d2ebaa89ba 100644
 --- a/tests/acceptance/T125/shared-offers.test.ts
 +++ b/tests/acceptance/T125/shared-offers.test.ts
 @@ -114,7 +114,7 @@ beforeAll(async () => {
@@ -528,7 +539,7 @@ index 2eb9b9ad8059a6b4c951c55443be65c55fddf920..be3b6020d1c42adad0561e40f8897cfa
    pxB = await salesPixel(sys, t)
    for (const px of [pxA, pxB]) {
 -    await t.c.put('/api/meta/pixels/' + px.id, { auto_lead_on_ad: true, whatsapp_business_account_id: '123456789' })
-+    await t.c.put('/api/meta/pixels/' + px.id, { auto_lead_on_ad: true, allowed_events: ["Purchase", "Lead", "InitiateCheckout"], whatsapp_business_account_id: '123456789' })
++    await t.c.put('/api/meta/pixels/' + px.id, { auto_lead_on_ad: true, allowed_events: ['Purchase', 'Lead', 'InitiateCheckout', 'Contact'], whatsapp_business_account_id: '123456789' })
      sys.fakeMeta.setBusinessMessagingMode(px.pixelId, 'accept')
    }
    const prod = await t.c.post('/api/products', {
