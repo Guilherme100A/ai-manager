@@ -122,7 +122,7 @@ index 041077394fce6a0096e4f1ce824c62bd54e42e2f..6f3f5dec1ab1f91f9ede50ad4a956573
          ctx.setVar('pixel', { event_id: result.eventId, status: result.status, event: eventName, ...(result.status === 'sent' ? { mode: result.mode } : {}) })
          return ok
 diff --git a/packages/core/src/flows/nodes/pixel/pixel.db.unit.test.ts b/packages/core/src/flows/nodes/pixel/pixel.db.unit.test.ts
-index 7b90cc8692077cd27289a5e96e99b89b45765e0d..69faa7528aa81bf7be321c9be7de37f632584514 100644
+index 7b90cc8692077cd27289a5e96e99b89b45765e0d..805426ebf3f448141aff951e6781ffe1c8e76609 100644
 --- a/packages/core/src/flows/nodes/pixel/pixel.db.unit.test.ts
 +++ b/packages/core/src/flows/nodes/pixel/pixel.db.unit.test.ts
 @@ -47,7 +47,7 @@ async function world() {
@@ -130,7 +130,7 @@ index 7b90cc8692077cd27289a5e96e99b89b45765e0d..69faa7528aa81bf7be321c9be7de37f6
    const token = `EAAB${randomBytes(12).toString('hex')}`
    fake.addPixel(pixelId, token)
 -  const pixel = await new PixelConfigService({ db }).create(co, { name: 'Pixel', pixel_id: pixelId, access_token: token })
-+  const pixel = await new PixelConfigService({ db }).create(co, { name: 'Pixel', pixel_id: pixelId, access_token: token, allowed_events: ["Purchase", "Lead", "Schedule", "Contact", "Subscribe", "CompleteRegistration", "AddToCart"] })
++  const pixel = await new PixelConfigService({ db }).create(co, { name: 'Pixel', pixel_id: pixelId, access_token: token, allowed_events: ['Purchase', 'Lead', 'InitiateCheckout', 'Schedule', 'Contact', 'Subscribe', 'CompleteRegistration', 'AddToCart'] })
    return { co, contact, pixelId, pixelConfigId: pixel.id }
  }
  

@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/Guilherme100A/crm-copy.git",
   "base_sha": "acf78e2da49865afa06fe6a4cee77bcf0e888152",
-  "expected_tree": "d31b5a2fa9099fb470dc53e66ba55915dafe9d9a",
+  "expected_tree": "6e93ea0546991123f8436bc75c68027ba30d63eb",
   "sanitization": {
     "excluded_files": [
       "scripts/elevenlabs-account-diagnose.ts",
@@ -28,7 +28,7 @@
     ],
     "reason": "Exclude unrelated operator scripts/private deployment context and audit-only harnesses; replace operational hosts in documentation and URL fixtures with reserved example.test hosts. Original local source preserved.",
     "baseline_tree": "539e4a6dac07e50188e418d0e1a3d669e5f6d687",
-    "final_tree": "d31b5a2fa9099fb470dc53e66ba55915dafe9d9a"
+    "final_tree": "6e93ea0546991123f8436bc75c68027ba30d63eb"
   },
   "test_only_changes": [
     {
@@ -486,8 +486,8 @@
     {
       "file": "16-mcp-purchase-pixels.patch",
       "description": "Register workspace Meta pixels with Page ID and allow Purchase by default.",
-      "sha256": "8ee535b1bd4149b3868d9d52012b657dd1ae2302b9470f5de620ffa9f00a03a9",
-      "bytes": 38306,
+      "sha256": "d9172d7380296c6d5e190f4e1f7f6d8752dc6e69140b5887006817d122216ef0",
+      "bytes": 38326,
       "files": [
         "apps/api/src/routes/meta-pixels/index.ts",
         "apps/api/src/routes/meta-profiles/index.ts",
