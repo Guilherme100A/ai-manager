@@ -502,7 +502,7 @@ index 1a908884d837d35c5dc8f6b24e184692e5444e66..7639e2d69eefe2d7195d7b6e3f0d942e
      expect((await call('GET', '/api/meta/pixels/' + pixel.data.pixel.id + '?include_access_token=true', business_area_id)).body.pixel).not.toHaveProperty('access_token')
      expect((await call('PUT', '/api/meta/pixels/' + pixel.data.pixel.id, business_area_id, { auto_send_sales: true })).status).toBe(422)
 diff --git a/tests/acceptance/T125/shared-offers.test.ts b/tests/acceptance/T125/shared-offers.test.ts
-index 2eb9b9ad8059a6b4c951c55443be65c55fddf920..4efe4273ee07ea448a2500c2761fb2f9048d0c44 100644
+index 2eb9b9ad8059a6b4c951c55443be65c55fddf920..2cbc3266f25632870b7082de6cb8e34fe239deaa 100644
 --- a/tests/acceptance/T125/shared-offers.test.ts
 +++ b/tests/acceptance/T125/shared-offers.test.ts
 @@ -114,7 +114,7 @@ beforeAll(async () => {
@@ -524,3 +524,14 @@ index 2eb9b9ad8059a6b4c951c55443be65c55fddf920..4efe4273ee07ea448a2500c2761fb2f9
    expect(sys.fakeMeta.capiEventsFor(pxB.pixelId)).toHaveLength(0)
    // Explicit context replacement in the same chat; manual never inherits A's click.
    const manual = await t.c.post('/api/chats/' + ma.chat + '/offer', { offer_id: b.id, replace_active: true })
+@@ -522,7 +525,9 @@ it('round1: HTTP callback before charge commit retries the same job until the pe
+ 
+ it('round2: 100 credential failures cannot starve a healthy event and are backoff-limited per record',async()=>{
+  const m=await ingest('round2 fairness','AD-A2','ROUND2-FAIR'),op=await opportunity(m.id);await accepted(pxA,'offer-lead-'+op.id)
+- const poison=await salesPixel(sys,t);sys.fakeMeta.addPixel(poison.pixelId,'revoked-only-in-local-fake')
++ const poison=await salesPixel(sys,t)
++ expect((await t.c.put('/api/meta/pixels/'+poison.id,{allowed_events:['Purchase','Contact']})).status).toBe(200)
++ sys.fakeMeta.addPixel(poison.pixelId,'revoked-only-in-local-fake')
+  const prefix='round2-poison-'+tag(),healthy='round2-healthy-'+tag()
+  try {
+   const base={companyId:t.companyId,pixelConfigId:poison.id,eventName:'Contact',eventTime:new Date().toISOString(),source:'sale',user:op.snapshot.user}

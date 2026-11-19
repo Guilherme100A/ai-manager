@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-export const TREE = '8aca3985bbfa0c4e2d41bc91211312b6f6dd2298'
+export const TREE = 'd31b5a2fa9099fb470dc53e66ba55915dafe9d9a'
 // Historical immutable release accepted only as the currently installed source.
 // New artifacts must match TREE exactly; never accept arbitrary historical trees.
 export const INSTALLED_CRM_JOURNALS = new Map([
