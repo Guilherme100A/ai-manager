@@ -7,7 +7,7 @@ import { navigate } from '../lib/router'
 import { Logo } from '../components/icons'
 import { ThemeToggle } from '../components/Layout'
 
-export function Login() {
+export function Login({ returnToCrm = false }: { returnToCrm?: boolean }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [remember, setRemember] = useState(false)
@@ -24,7 +24,7 @@ export function Login() {
       const res = await api.login(user, password, remember)
       setToken(res.token, remember ? { remember: true, expiresAt: res.expiresAt } : {})
       setPassword('')
-      navigate({ name: 'home' })
+      navigate({ name: returnToCrm ? 'crm' : 'home' })
     } catch (err) {
       setError(loginErrorMessage(err))
     } finally {

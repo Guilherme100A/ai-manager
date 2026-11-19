@@ -1,0 +1,224 @@
+diff --git a/apps/api/src/routes/meta-oauth/index.ts b/apps/api/src/routes/meta-oauth/index.ts
+index 5bb69587310231b57cdb336788a0ac4b75aff8c5..f9e1c24c3d7065e0912ee7a87ba9e5b82f96a8d9 100644
+--- a/apps/api/src/routes/meta-oauth/index.ts
++++ b/apps/api/src/routes/meta-oauth/index.ts
+@@ -1,6 +1,6 @@
+ // OAuth da Meta (SPEC T99; 11 §5.1, §4.6). `start` devolve a URL do Facebook Login com `state` assinado (empresa +
+ // usuário da sessão); o `callback` volta do navegador com a sessão (cookie SameSite=Lax numa navegação de topo),
+-// confere o `state` contra a sessão e SEMPRE redireciona para `/facebook/profiles?meta_oauth=success|error`.
++// confere o `state` contra a sessão e volta à tela de perfis (pelo painel quando publicado sob /crm).
+ import { Hono } from 'hono'
+ import { z } from 'zod'
+ import { BusinessAreasService, MetaProfilesError, metaConfigFromEnv } from '@crm/core'
+@@ -18,7 +18,7 @@ const short = (msg: string) => msg.replace(/\s+/g, ' ').slice(0, 200)
+ 
+ export function metaOAuthRoutes(deps: ResolvedDeps) {
+   const svc = () => metaProfilesServiceFor(deps)
+-  const webUrl = () => ({ ...metaConfigFromEnv(), ...deps.metaConfig }).webUrl
++  const config = () => ({ ...metaConfigFromEnv(), ...deps.metaConfig })
+   const app = new Hono<AppEnv>()
+ 
+   app.post('/api/meta/oauth/start', requirePerm('facebook.profiles'), requireMetaManager, validate('json', startSchema), async (c) => {
+@@ -30,8 +30,13 @@ export function metaOAuthRoutes(deps: ResolvedDeps) {
+   })
+ 
+   app.get('/api/meta/oauth/callback', async (c) => {
++    let workspace: string | undefined
+     const back = (status: 'success' | 'error', message?: string) => {
+-      const url = new URL('facebook/profiles', webUrl().replace(/\/+$/, '') + '/')
++      const { redirectUri, webUrl } = config()
++      const callback = new URL(redirectUri, webUrl)
++      const panelReturn = callback.protocol === 'https:' && callback.pathname === '/crm/api/meta/oauth/callback'
++      const url = panelReturn ? new URL('/#/crm', callback.origin) : new URL('facebook/profiles', webUrl.replace(/\/+$/, '') + '/')
++      if (panelReturn && workspace) url.searchParams.set('meta_workspace', workspace)
+       c.header('Cache-Control', 'no-store')
+       c.header('Referrer-Policy', 'no-referrer')
+       url.searchParams.set('meta_oauth', status)
+@@ -40,16 +45,21 @@ export function metaOAuthRoutes(deps: ResolvedDeps) {
+     }
+     const ctx = getCtx(c)
+     const q = c.req.query()
+-    if (q.error) return back('error', 'Autorização recusada ou cancelada na Meta')
++
+     if (!ctx.companyId || !ctx.user || !canManageMetaProfiles(ctx)) return back('error', 'Sem permissão para conectar perfis Meta')
+     try {
+       const state = svc().readOAuthState(q.state)
+-      if (!state || state.companyId !== ctx.companyId || state.userId !== ctx.user.id || !q.code) return back('error', 'Autorização inválida ou expirada')
++      if (!state || state.companyId !== ctx.companyId || state.userId !== ctx.user.id) return back('error', 'Autorização inválida ou expirada')
+       const area = state.businessAreaId
+       if (area) {
+         const areas = new BusinessAreasService(deps.db)
+         if (!await areas.administrator(ctx.companyId, ctx.user.id)) return back('error', 'Workspace indisponível')
+         await areas.get(ctx.companyId, area)
++        workspace = area
++      }
++      if (q.error) return back('error', 'Autorização recusada ou cancelada na Meta')
++      if (!q.code) return back('error', 'Autorização inválida ou expirada')
++      if (area) {
+         const claimed = await deps.redis.set(`crm:meta-oauth:state:${state.nonce}`, 'used', 'EX', 900, 'NX')
+         if (!claimed) return back('error', 'Autorização já utilizada. Inicie uma nova conexão.')
+       }
+diff --git a/apps/web/src/features/business-areas/workspace.tsx b/apps/web/src/features/business-areas/workspace.tsx
+index c27ceaa28400dbc4507bd36aa4665394aa2b0fa3..12adad34e018a3a80d77b535e8c07832f64e7dfe 100644
+--- a/apps/web/src/features/business-areas/workspace.tsx
++++ b/apps/web/src/features/business-areas/workspace.tsx
+@@ -13,6 +13,7 @@ const unscoped = { headers: { [BUSINESS_AREA_HEADER]: '' } }
+ export function WorkspaceBoundary({ session, children }: { session: Session; children: ReactNode }) {
+   const [workspaces, setWorkspaces] = useState<Workspace[] | null>(null)
+   const [choice] = useState(selectedWorkspace)
++  const [checkedOAuthWorkspace, setCheckedOAuthWorkspace] = useState<string | null>(null)
+   const [choosing, setChoosing] = useState(false)
+   const [legacy, setLegacy] = useState(false)
+   const [error, setError] = useState('')
+@@ -20,6 +21,12 @@ export function WorkspaceBoundary({ session, children }: { session: Session; chi
+   const [initializing, setInitializing] = useState(false)
+   const canEdit = session.perms.has('settings.products.edit')
+   const pathname = useRouterState({ select: state => state.location.pathname })
++  const search = useRouterState({ select: state => state.location.searchStr })
++  const params = new URLSearchParams(search)
++  const status = params.get('meta_oauth')
++  const oauthWorkspace = stripAppBase(pathname) === '/facebook/profiles' && (status === 'success' || status === 'error')
++    ? params.get('meta_workspace') : null
++  const pendingOAuthWorkspace = oauthWorkspace && oauthWorkspace !== checkedOAuthWorkspace
+   useEffect(() => { setLegacy(false) }, [pathname])
+ 
+   useEffect(() => {
+@@ -32,6 +39,21 @@ export function WorkspaceBoundary({ session, children }: { session: Session; chi
+     return () => { cancelled = true }
+   }, [attempt])
+ 
++  useEffect(() => {
++    if (!pendingOAuthWorkspace || !workspaces) return
++    const requested = workspaces.find(item => item.id === oauthWorkspace)
++    if (requested && requested.id !== choice) {
++      if (selectBusinessArea(requested.id)) {
++        const url = new URL(window.location.href)
++        url.searchParams.delete('meta_workspace')
++        window.location.replace(url)
++        return
++      }
++      setError('Não foi possível selecionar o workspace desta autorização.')
++    }
++    setCheckedOAuthWorkspace(oauthWorkspace)
++  }, [oauthWorkspace, pendingOAuthWorkspace, workspaces, choice])
++
+   const current = workspaces?.find(item => item.id === choice)
+   const hasWorkspace = choice === null || Boolean(current) || (choice === undefined && workspaces?.length === 0)
+ 
+@@ -60,7 +82,7 @@ export function WorkspaceBoundary({ session, children }: { session: Session; chi
+     }
+   }
+ 
+-  const ready = workspaces !== null && hasWorkspace
++  const ready = workspaces !== null && hasWorkspace && !pendingOAuthWorkspace
+   const chooser = (!ready || choosing) ? (
+       <section className="mx-auto max-w-5xl py-6 lg:py-12" data-testid="workspace-entry" aria-labelledby="workspace-entry-heading">
+         <div className="mb-7 flex items-start justify-between gap-4">
+diff --git a/apps/web/src/features/facebook/profiles-page.tsx b/apps/web/src/features/facebook/profiles-page.tsx
+index cacc030ef3442a3de0d5c520d7203b0580e82919..7875bf458e7677dcc6b1dee0506f5d03202bfae7 100644
+--- a/apps/web/src/features/facebook/profiles-page.tsx
++++ b/apps/web/src/features/facebook/profiles-page.tsx
+@@ -80,7 +80,9 @@ export function ProfilesPage({ search, onClearSearch }: { search: ProfilesSearch
+   const connect = async (profileId?: string) => {
+     setBusy(profileId ? `reconnect-${profileId}` : 'connect')
+     try {
+-      window.location.assign(await startOAuth(profileId))
++      const url = await startOAuth(profileId)
++      const browser = window.top ?? window
++      browser.location.assign(url)
+     } catch (err) {
+       notify('facebook-oauth-start-error', t('profiles.oauth.startError'), serverMessage(err) ?? undefined)
+       setBusy(null)
+diff --git a/apps/web/src/features/facebook/search.ts b/apps/web/src/features/facebook/search.ts
+index dedbe077c7b9c9d509a9a6d1c56ce0ec8fc6886f..60ece9d414624d9c08fb9265100bb7499e7571be 100644
+--- a/apps/web/src/features/facebook/search.ts
++++ b/apps/web/src/features/facebook/search.ts
+@@ -16,5 +16,6 @@ export const campaignsSearchSchema = z.object({
+ /** Retorno do callback OAuth (T99): `?meta_oauth=success|error&meta_message=`. */
+ export const profilesSearchSchema = z.object({
+   meta_oauth: z.string().max(20).optional().catch(undefined),
++  meta_workspace: z.uuid().optional().catch(undefined),
+   meta_message: z.string().max(500).optional().catch(undefined),
+ })
+diff --git a/packages/core/src/meta-ads/profiles/service.ts b/packages/core/src/meta-ads/profiles/service.ts
+index 697fd14e734d64dd2510fb6a0138e254f415d803..9e84bed902aedcf2b3c249114b3d3314ebf306a3 100644
+--- a/packages/core/src/meta-ads/profiles/service.ts
++++ b/packages/core/src/meta-ads/profiles/service.ts
+@@ -216,7 +216,7 @@ export class MetaProfilesService {
+         }).where(and(eq(metaAdAccounts.companyId, companyId), eq(metaAdAccounts.businessAreaId, area), eq(metaAdAccounts.profileId, id), eq(metaAdAccounts.fbAccountId, a.fb_account_id)))
+       }
+     } else await this.syncAccounts(p, this.token(p))
+-    return this.get(companyId, id)
++    return this.get(companyId, id, area)
+   }
+ 
+   async setIncluded(companyId: string, adAccountId: string, included: boolean, area: string | null = null): Promise<MetaAdAccountDto> {
+diff --git a/tests/acceptance/T125/business-areas.test.ts b/tests/acceptance/T125/business-areas.test.ts
+index 7639e2d69eefe2d7195d7b6e3f0d942ecc447e1c..fd753b7de9f5d357188d71314cc7e65572789041 100644
+--- a/tests/acceptance/T125/business-areas.test.ts
++++ b/tests/acceptance/T125/business-areas.test.ts
+@@ -30,7 +30,7 @@ async function tool(token: string, name: string, args: any = {}) {
+   return { error: !!(body.error || result?.isError), data }
+ }
+ beforeAll(async () => {
+-  sys = await startSystem(); t = await tenant(sys); foreign = await tenant(sys)
++  sys = await startSystem({ metaRedirectUri: 'https://panel.t125.test/crm/api/meta/oauth/callback' }); t = await tenant(sys); foreign = await tenant(sys)
+   process.env.SHARED_OFFERS_COMPANY_ID = t.companyId
+   const accounts = await connectMeta(sys, t, 3), user = (await t.c.get('/api/auth/profile')).body.user.id
+   bundles = []
+@@ -100,7 +100,11 @@ it('authorizes one Facebook profile separately in three workspaces and binds dis
+       const modified = { ...JSON.parse(Buffer.from(body!, 'base64url').toString('utf8')), businessAreaId: areas[1].id }
+       expect((await open(Buffer.from(JSON.stringify(modified)).toString('base64url') + '.' + sig)).headers.get('location')).toContain('meta_oauth=error')
+     }
+-    expect((await open(state, t, areas[(i+1)%3].id)).headers.get('location')).toContain('meta_oauth=success')
++    const returnUrl = new URL((await open(state, t, areas[(i+1)%3].id)).headers.get('location')!)
++    expect(returnUrl.origin).toBe('https://panel.t125.test')
++    expect(returnUrl.pathname).toBe('/')
++    expect(returnUrl.hash).toBe('#/crm')
++    expect([...returnUrl.searchParams]).toEqual([['meta_workspace', business_area_id], ['meta_oauth', 'success']])
+     expect((await open(state)).headers.get('location')).toContain('meta_oauth=error')
+     const connected = await tool(reader, 'get_workspace_meta_status', workspace)
+     expect(connected.data.profiles).toHaveLength(1)
+@@ -119,6 +123,8 @@ it('authorizes one Facebook profile separately in three workspaces and binds dis
+     const ad = await tool(writer, 'link_workspace_meta_ad_account', link)
+     expect(ad.error, JSON.stringify(ad.data)).toBe(false)
+     const ad_account_id = ad.data.ad_account.id
++    const refresh = await call('POST', '/api/meta/profiles/' + profile_id + '/refresh-ad-accounts', business_area_id)
++    expect(refresh).toMatchObject({ status: 200, body: { profile: { id: profile_id, ad_accounts_count: 1 } } })
+     expect((await tool(writer, 'link_workspace_meta_ad_account', link)).data.ad_account.id).toBe(ad_account_id)
+     expect((await tool(reader, 'list_workspace_meta_pixels', { ...workspace, ad_account_id })).data.items).toEqual([{ pixel_id: datasetIds[i], name: 'Workspace Pixel ' + (i+1) }])
+     expect((await tool(writer, 'link_workspace_meta_pixel', { ...workspace, ad_account_id, pixel_id: '7777' })).data.status).toBe(404)
+@@ -417,6 +423,11 @@ it('desktop/mobile navigation selects the actual business area, filters offers a
+       await expect.poll(()=>page.getByTestId('workspace-current').textContent()).toBe('Geral')
+       expect(await page.getByRole('button',{name:/Business offer [01]/}).count()).toBe(0)
+       expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true)
++      await page.goto(base+'/crm/facebook/profiles?'+new URLSearchParams({ meta_oauth: 'success', meta_workspace: areas[1].id }))
++      await expect.poll(()=>page.getByTestId('workspace-current').textContent()).toBe(areas[1].name)
++      expect(new URL(page.url()).pathname).toBe('/crm/facebook/profiles')
++      expect(await page.locator('html').getAttribute('data-skin')).toBe('ai-manager')
++      expect(await page.getByTestId('workspace-entry').count()).toBe(0)
+       expect(errors).toEqual([])
+     } finally {await context.close()}
+   }
+diff --git a/tests/acceptance/T125/setup.ts b/tests/acceptance/T125/setup.ts
+index b08bbf6b6880f9db0e09b98bec7133a10ed66388..9750754a3596c91e6d3786ba25f0b4f5065f2a1e 100644
+--- a/tests/acceptance/T125/setup.ts
++++ b/tests/acceptance/T125/setup.ts
+@@ -36,7 +36,7 @@ export interface System {
+   close: () => Promise<void>
+ }
+ 
+-export async function startSystem(): Promise<System> {
++export async function startSystem(options: { metaRedirectUri?: string } = {}): Promise<System> {
+   // Filas isoladas pelo CRM_QUEUE_PREFIX desta execução (definido na config da aceitação, T121).
+   const REDIS_URL = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379/1'
+   const wenv = newWorkerEnv()
+@@ -51,7 +51,7 @@ export async function startSystem(): Promise<System> {
+     META_GRAPH_URL: metaUrl,
+     META_APP_ID,
+     META_APP_SECRET,
+-    META_OAUTH_REDIRECT_URI: 'https://api.t125.test/api/meta/oauth/callback',
++    META_OAUTH_REDIRECT_URI: options.metaRedirectUri ?? 'https://api.t125.test/api/meta/oauth/callback',
+     META_OAUTH_DIALOG_URL: 'http://facebook.t125.test/dialog/oauth',
+     WEB_PUBLIC_URL: 'http://web.t125.test',
+     META_FX_RATES: JSON.stringify({ 'USD:BRL': 5 }),
