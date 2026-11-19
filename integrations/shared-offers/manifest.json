@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/Guilherme100A/crm-copy.git",
   "base_sha": "acf78e2da49865afa06fe6a4cee77bcf0e888152",
-  "expected_tree": "b0768b479dcddf637bfc5832753be02b972cfc4b",
+  "expected_tree": "fcee155da84cc9abc440f479a06ca42585d5a4d4",
   "sanitization": {
     "excluded_files": [
       "scripts/elevenlabs-account-diagnose.ts",
@@ -28,7 +28,7 @@
     ],
     "reason": "Exclude unrelated operator scripts/private deployment context and audit-only harnesses; replace operational hosts in documentation and URL fixtures with reserved example.test hosts. Original local source preserved.",
     "baseline_tree": "539e4a6dac07e50188e418d0e1a3d669e5f6d687",
-    "final_tree": "b0768b479dcddf637bfc5832753be02b972cfc4b"
+    "final_tree": "fcee155da84cc9abc440f479a06ca42585d5a4d4"
   },
   "test_only_changes": [
     {
@@ -481,6 +481,34 @@
         "packages/core/src/mcp/spy-capture-url.unit.test.ts",
         "packages/core/src/mcp/tools/spy.ts",
         "packages/core/src/mcp/tools/spy.unit.test.ts"
+      ]
+    },
+    {
+      "file": "16-mcp-purchase-pixels.patch",
+      "description": "Register workspace Meta pixels with Page ID and allow Purchase by default.",
+      "sha256": "19e731cbfe5a9f9a0a7bc3a838762e117d605bb623fb3cc4af7da344fe96e7e5",
+      "bytes": 37653,
+      "files": [
+        "apps/api/src/routes/meta-pixels/index.ts",
+        "apps/api/src/routes/meta-profiles/index.ts",
+        "apps/worker/src/jobs/meta-capi/meta-capi.db.unit.test.ts",
+        "docs/mcp-meta-workspaces.md",
+        "packages/core/src/flows/nodes/pixel/index.ts",
+        "packages/core/src/flows/nodes/pixel/pixel.db.unit.test.ts",
+        "packages/core/src/mcp/tools/meta-workspaces.ts",
+        "packages/core/src/mcp/tools/pixels.ts",
+        "packages/core/src/meta-ads/profiles/service.ts",
+        "packages/core/src/meta-capi/capi.db.unit.test.ts",
+        "packages/core/src/meta-capi/pixels.ts",
+        "packages/core/src/meta-capi/rastreamento.db.unit.test.ts",
+        "packages/core/src/meta-capi/service.ts",
+        "packages/core/src/offers/service.ts",
+        "packages/db/drizzle/crm/0048_pixel_allowed_events.sql",
+        "packages/db/drizzle/crm/meta/_journal.json",
+        "packages/db/src/schema/crm/meta-pixels.ts",
+        "tests/acceptance/T125/business-areas.test.ts",
+        "tests/acceptance/T125/revisor-shared-offers.test.ts",
+        "tests/acceptance/T125/shared-offers.test.ts"
       ]
     }
   ],

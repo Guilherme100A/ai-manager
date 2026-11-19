@@ -1,0 +1,534 @@
+diff --git a/apps/api/src/routes/meta-pixels/index.ts b/apps/api/src/routes/meta-pixels/index.ts
+index 4943a39d385ad6ed12851610744eb8c9df3dfabf..c91e484852ccbcc0a718d2cb3270f974d04b20b2 100644
+--- a/apps/api/src/routes/meta-pixels/index.ts
++++ b/apps/api/src/routes/meta-pixels/index.ts
+@@ -7,7 +7,7 @@
+ // Doc: https://developers.facebook.com/docs/marketing-api/conversions-api/business-messaging
+ //      https://developers.facebook.com/docs/marketing-api/conversions-api/using-the-api
+ import { CapiEventLogService, PixelConfigError, PixelConfigService } from '@crm/core'
+-import { CAPI_EVENT_STATUSES } from '@crm/db'
++import { CAPI_EVENT_STATUSES, PIXEL_EVENT_NAMES } from '@crm/db'
+ import { pageQuerySchema } from '@crm/shared'
+ import { Hono } from 'hono'
+ import { z } from 'zod'
+@@ -35,6 +35,7 @@ const fields = {
+   auto_lead_on_ad: z.boolean().optional(),
+ }
+ const extras = {
++  allowed_events: z.array(z.enum(PIXEL_EVENT_NAMES)).min(1).max(PIXEL_EVENT_NAMES.length).optional(),
+   page_id: fields.page_id,
+   whatsapp_business_account_id: fields.whatsapp_business_account_id,
+   test_event_code: fields.test_event_code,
+diff --git a/apps/api/src/routes/meta-profiles/index.ts b/apps/api/src/routes/meta-profiles/index.ts
+index e1fb8c0c5108eaf761a40d5604b2119a073b6829..54a5c371a42070c9c27bc65b466ab45411b24973 100644
+--- a/apps/api/src/routes/meta-profiles/index.ts
++++ b/apps/api/src/routes/meta-profiles/index.ts
+@@ -1,6 +1,7 @@
+ // Perfis Meta e contas de anúncio (SPEC T99; 11 §5.1, §6, §8). Ler: `facebook.profiles`; escrever (remover,
+ // atualizar lista, marcar conta no dashboard): `facebook.profiles` + owner/admin. Nenhuma resposta traz o token.
+ import { Hono } from 'hono'
++import { PIXEL_EVENT_NAMES } from '@crm/db'
+ import { z } from 'zod'
+ import { getCompanyCtx } from '../../lib/context'
+ import { ApiError } from '../../lib/errors'
+@@ -15,7 +16,13 @@ const adAccountSchema = z.preprocess(
+   z.object({ included_in_dashboard: z.boolean() }),
+ )
+ const linkAccount = z.strictObject({ profile_id: z.uuid(), fb_account_id: z.string().regex(/^act_\d{1,32}$/) })
+-const linkPixel = z.strictObject({ ad_account_id: z.uuid(), pixel_id: z.string().regex(/^\d{1,32}$/), refresh_oauth_token: z.boolean().optional() })
++const linkPixel = z.strictObject({
++  ad_account_id: z.uuid(), pixel_id: z.string().regex(/^\d{1,32}$/),
++  name: z.string().trim().min(2).max(255).optional(),
++  page_id: z.string().trim().regex(/^\d{1,32}$/).optional(),
++  allowed_events: z.array(z.enum(PIXEL_EVENT_NAMES)).min(1).max(PIXEL_EVENT_NAMES.length).optional(),
++  refresh_oauth_token: z.boolean().optional(),
++})
+ const pixelAccount = z.strictObject({ ad_account_id: z.uuid() })
+ const candidateProfile = z.strictObject({ profile_id: z.uuid() })
+ const workspaceId = (area: string | null | undefined) => {
+@@ -93,8 +100,10 @@ export function metaProfilesRoutes(deps: ResolvedDeps) {
+   app.post('/api/meta/workspace/pixels', view, pixel, requireMetaManager, validate('json', linkPixel), async (c) => {
+     const { companyId } = getCompanyCtx(c)
+     const area = workspaceId(c.get('businessArea'))
+-    const { ad_account_id, pixel_id, refresh_oauth_token } = c.req.valid('json')
+-    const linked = await metaDomain(() => svc().linkWorkspacePixel(companyId, area, ad_account_id, pixel_id, refresh_oauth_token))
++    const { ad_account_id, pixel_id, name, page_id, allowed_events, refresh_oauth_token } = c.req.valid('json')
++    const linked = await metaDomain(() => svc().linkWorkspacePixel(companyId, area, ad_account_id, pixel_id, {
++      name, pageId: page_id, allowedEvents: allowed_events, refreshToken: refresh_oauth_token,
++    }))
+     setAudit(c, { action: 'meta.workspace.pixel.link', targetType: 'pixel_config', targetId: linked.id, detail: { business_area_id: area } })
+     return c.json({ pixel: linked, capi_delivery_verified: false })
+   })
+diff --git a/apps/worker/src/jobs/meta-capi/meta-capi.db.unit.test.ts b/apps/worker/src/jobs/meta-capi/meta-capi.db.unit.test.ts
+index a37ae161d9cf58d7e1e0b9817214e8a27f02f6d9..41748a8e3ea5cf1308fc54b0c9ef38bf0c02cf2e 100644
+--- a/apps/worker/src/jobs/meta-capi/meta-capi.db.unit.test.ts
++++ b/apps/worker/src/jobs/meta-capi/meta-capi.db.unit.test.ts
+@@ -33,7 +33,7 @@ async function world() {
+   const pixelId = String(300000000000000 + Math.floor(Math.random() * 1e9))
+   const token = `EAAB${randomBytes(12).toString('hex')}`
+   fake.addPixel(pixelId, token)
+-  const pixel = await new PixelConfigService({ db }).create(c!.id, { name: 'Pixel', pixel_id: pixelId, access_token: token, auto_lead_on_ad: true })
++  const pixel = await new PixelConfigService({ db }).create(c!.id, { name: 'Pixel', pixel_id: pixelId, access_token: token, auto_lead_on_ad: true, allowed_events: ["Purchase", "Lead"] })
+   const [contact] = await db.insert(contacts).values({ companyId: c!.id, name: 'Ana', phoneE164: `+5511${String(Math.floor(Math.random() * 1e9)).padStart(9, '0')}` }).returning()
+   return { companyId: c!.id, pixel, pixelId, contact: contact! }
+ }
+diff --git a/docs/mcp-meta-workspaces.md b/docs/mcp-meta-workspaces.md
+index 01952eb4010c32a4682b96b7fd25da91bcc754bf..a5c14f47356c1af74aa1bd7bdd929bbc6570f9e0 100644
+--- a/docs/mcp-meta-workspaces.md
++++ b/docs/mcp-meta-workspaces.md
+@@ -15,3 +15,9 @@ O vínculo do pixel usa uma leitura de `/act_<id>/adspixels` para confirmar aces
+ Ofertas novas ou editadas em um workspace exigem conta e pixel desse workspace, com o pixel vinculado à conta selecionada. Fluxos privados podem usar o pixel do próprio workspace. Fluxos compartilhados usam o destino da oferta quando rodados por uma oferta. Cadastros anteriores ficam em Geral e os destinos históricos das ofertas são preservados. Uma BM declarada continua um identificador informado pelo usuário.
+ 
+ Referências: [Marketing API](https://developers.facebook.com/docs/marketing-api/reference/v27.0/) e [pixels por conta de anúncio](https://developers.facebook.com/documentation/ads-commerce/marketing-api/reference/ad-account/adspixels.md).
++
++### Cadastro por ID
++
++Exemplo de prompt: "No Admin 1, cadastre o pixel Compra Loja, Pixel ID 123456789, Page ID 987654321, na conta de anuncios ja vinculada, somente Purchase."
++
++O MCP usa `link_workspace_meta_pixel` para cadastrar um pixel existente da conta vinculada. Envie `pixel_id` e `page_id` como strings para preservar os digitos. O Page ID e opcional e configura a atribuicao Click-to-WhatsApp. A credencial vem do perfil Meta conectado. Novos cadastros permitem somente `Purchase` por padrao. Para habilitar outros eventos, informe `allowed_events` explicitamente. O cadastro por si so nao envia eventos.
+diff --git a/packages/core/src/flows/nodes/pixel/index.ts b/packages/core/src/flows/nodes/pixel/index.ts
+index 041077394fce6a0096e4f1ce824c62bd54e42e2f..6f3f5dec1ab1f91f9ede50ad4a956573c3453c77 100644
+--- a/packages/core/src/flows/nodes/pixel/index.ts
++++ b/packages/core/src/flows/nodes/pixel/index.ts
+@@ -13,7 +13,7 @@ import type { Database } from '@crm/db'
+ import { sql } from 'drizzle-orm'
+ import { parseMoney } from '../../../meta-capi/hashing'
+ import { eventJobId, type CapiEventEnqueue } from '../../../meta-capi/ad-lead'
+-import { CAPI_EVENT_NAMES, CapiService, type CapiEventName, type CapiSendResult, type CapiServiceOptions } from '../../../meta-capi/service'
++import { CAPI_EVENT_DISABLED, CAPI_EVENT_NAMES, CapiService, type CapiEventName, type CapiSendResult, type CapiServiceOptions } from '../../../meta-capi/service'
+ import type { NodeContext, NodeHandler, NodeOutcome } from '../../engine/context'
+ import type { NodeRegistry } from '../../engine/registry'
+ 
+@@ -64,8 +64,8 @@ export function pixelHandler(deps: PixelNodeDeps = {}): NodeHandler {
+           const c=configOf(ctx), eventName=pixelEventName(c.event_type)
+           if(eventName==='Purchase') {ctx.setVar('pixel',{status:'deferred',reason:'offer_outbox_canonical'});return ok}
+           const amount=parseMoney(typeof c.item_value==='string'?ctx.render(c.item_value):c.item_value as number)
+-          await new OffersService(db).queueEvent(offer,eventName,ctx.idempotencyKey('pixel'),amount==null?undefined:Math.round(amount*100))
+-          ctx.setVar('pixel',{status:'queued',event:eventName,event_id:ctx.idempotencyKey('pixel')});return ok
++          const queued = await new OffersService(db).queueEvent(offer,eventName,ctx.idempotencyKey('pixel'),amount==null?undefined:Math.round(amount*100))
++          ctx.setVar('pixel',{status:queued?'queued':'skipped',event:eventName,event_id:ctx.idempotencyKey('pixel')});return ok
+         }
+         const c = configOf(ctx)
+         const pixelConfigId = String(c.pixel_config_id ?? '').trim()
+@@ -115,6 +115,10 @@ export function pixelHandler(deps: PixelNodeDeps = {}): NodeHandler {
+           )
+         }
+         if (result.status === 'failed') throw new PixelNodeError('capi_failed', result.error)
++        if (result.status === 'discarded' && result.reason === CAPI_EVENT_DISABLED) {
++          ctx.setVar('pixel', { status: 'skipped', reason: result.reason, event: eventName })
++          return ok
++        }
+         if (result.status === 'discarded') throw new PixelNodeError('capi_discarded', result.reason)
+         ctx.setVar('pixel', { event_id: result.eventId, status: result.status, event: eventName, ...(result.status === 'sent' ? { mode: result.mode } : {}) })
+         return ok
+diff --git a/packages/core/src/flows/nodes/pixel/pixel.db.unit.test.ts b/packages/core/src/flows/nodes/pixel/pixel.db.unit.test.ts
+index 7b90cc8692077cd27289a5e96e99b89b45765e0d..69faa7528aa81bf7be321c9be7de37f632584514 100644
+--- a/packages/core/src/flows/nodes/pixel/pixel.db.unit.test.ts
++++ b/packages/core/src/flows/nodes/pixel/pixel.db.unit.test.ts
+@@ -47,7 +47,7 @@ async function world() {
+   const pixelId = String(200000000000000 + Math.floor(Math.random() * 1e9))
+   const token = `EAAB${randomBytes(12).toString('hex')}`
+   fake.addPixel(pixelId, token)
+-  const pixel = await new PixelConfigService({ db }).create(co, { name: 'Pixel', pixel_id: pixelId, access_token: token })
++  const pixel = await new PixelConfigService({ db }).create(co, { name: 'Pixel', pixel_id: pixelId, access_token: token, allowed_events: ["Purchase", "Lead", "Schedule", "Contact", "Subscribe", "CompleteRegistration", "AddToCart"] })
+   return { co, contact, pixelId, pixelConfigId: pixel.id }
+ }
+ 
+diff --git a/packages/core/src/mcp/tools/meta-workspaces.ts b/packages/core/src/mcp/tools/meta-workspaces.ts
+index 6325266c48d4973958c7dee59a5465e0ec5b8b9f..8cfadf66b95160dcee2169098cd29a95e27aabf9 100644
+--- a/packages/core/src/mcp/tools/meta-workspaces.ts
++++ b/packages/core/src/mcp/tools/meta-workspaces.ts
+@@ -1,4 +1,5 @@
+ import { z } from 'zod'
++import { PIXEL_EVENT_NAMES } from '@crm/db'
+ import { fromApi, tool, UUID } from './shared'
+ 
+ const workspace = { business_area_id: UUID.describe('Workspace Admin 1/2/3 obtido com list_business_areas') }
+@@ -38,8 +39,10 @@ export const metaWorkspaceTools = [
+   }),
+   tool({
+     name: 'link_workspace_meta_pixel', title: 'Vincular pixel ao workspace', perm: 'facebook.pixel', kind: 'write', idempotent: true, openWorld: true,
+-    description: 'Vincula pixel existente e acessível na conta escolhida. Retorna o UUID CRM para a oferta. A vinculação não envia eventos. Após reconectar, refresh_oauth_token=true substitui explicitamente a credencial CAPI pela nova credencial do perfil.',
+-    input: { ...workspace, ...adAccount, pixel_id: z.string().regex(/^\d{1,32}$/), refresh_oauth_token: z.boolean().optional() },
++    description: 'Cadastra no CRM um pixel existente e acessível na conta escolhida. Informe name para nomear o cadastro e page_id para Click-to-WhatsApp. Por padrão, um novo vínculo permite apenas Purchase; para outros eventos use allowed_events. A chamada retorna o UUID CRM e não envia eventos. Após reconectar, refresh_oauth_token=true troca a credencial CAPI pela do perfil.',
++    input: { ...workspace, ...adAccount, pixel_id: z.string().regex(/^\d{1,32}$/), name: z.string().trim().min(2).max(255).optional(),
++      page_id: z.string().trim().regex(/^\d{1,32}$/).optional(),
++      allowed_events: z.array(z.enum(PIXEL_EVENT_NAMES)).min(1).max(PIXEL_EVENT_NAMES.length).optional(), refresh_oauth_token: z.boolean().optional() },
+     run: async ({ business_area_id, ...body }, api) => fromApi(await api.request('POST', '/api/meta/workspace/pixels', { businessAreaId: business_area_id, body })),
+   }),
+ ]
+diff --git a/packages/core/src/mcp/tools/pixels.ts b/packages/core/src/mcp/tools/pixels.ts
+index a966d40d3c21283ceb1f7d94bbe1fe5824fc9783..d4170edbd02c8b6db596fd7dcadcc55bd2b4f915 100644
+--- a/packages/core/src/mcp/tools/pixels.ts
++++ b/packages/core/src/mcp/tools/pixels.ts
+@@ -1,6 +1,6 @@
+ // Ferramentas MCP de Pixels da Meta / Conversions API e links rastreáveis (via API do CRM; tudo exige `facebook.pixel`).
+ // Rotas: `/api/meta/pixels[/:id[/events]]` e `/api/meta/tracked-links[/:id]`. O token da Meta nunca volta em claro.
+-import { CAPI_EVENT_STATUSES, TRACKED_LINK_CODE_MODES } from '@crm/db'
++import { CAPI_EVENT_STATUSES, PIXEL_EVENT_NAMES, TRACKED_LINK_CODE_MODES } from '@crm/db'
+ import { z } from 'zod'
+ import { compact, fromApi, tool, UUID, type ToolSpec } from './shared'
+ import type { ZodRawShape } from 'zod'
+@@ -14,6 +14,7 @@ const paging = {
+ }
+ 
+ const pixelFields = {
++  allowed_events: z.array(z.enum(PIXEL_EVENT_NAMES)).min(1).max(PIXEL_EVENT_NAMES.length).optional().describe('Eventos permitidos. Em pixel novo, omitir usa só Purchase.'),
+   name: z.string().min(2).max(255).describe('Nome do pixel no CRM (2–255 caracteres)'),
+   pixel_id: digits.max(64).describe('ID do pixel / dataset da Meta (só dígitos)'),
+   access_token: z.string().max(4096).describe('Token de acesso da Conversions API (Gerenciador de Eventos → Configurações)'),
+@@ -83,6 +84,7 @@ export const pixelsTools: readonly ToolSpec<ZodRawShape>[] = [
+     kind: 'write',
+     input: {
+       id: UUID.describe('id do pixel no CRM'),
++      allowed_events: pixelFields.allowed_events,
+       name: pixelFields.name.optional(),
+       pixel_id: pixelFields.pixel_id.optional(),
+       access_token: pixelFields.access_token.optional(),
+diff --git a/packages/core/src/meta-ads/profiles/service.ts b/packages/core/src/meta-ads/profiles/service.ts
+index 44f521c9e460681b9287b38e0e65dd6156680ef4..697fd14e734d64dd2510fb6a0138e254f415d803 100644
+--- a/packages/core/src/meta-ads/profiles/service.ts
++++ b/packages/core/src/meta-ads/profiles/service.ts
+@@ -3,7 +3,7 @@
+ // `included_in_dashboard`), marcar conta no dashboard e remover o perfil. O token longo só existe cifrado.
+ import { randomUUID } from 'node:crypto'
+ import { and, asc, eq, inArray, isNotNull, sql } from 'drizzle-orm'
+-import { metaAdAccounts, metaProfiles, pixelConfigs, type Database } from '@crm/db'
++import { metaAdAccounts, metaProfiles, pixelConfigs, type Database, type PixelEventName } from '@crm/db'
+ import { getCredentialsCipher, parseEncrypted, serializeEncrypted, type CredentialCipher } from '@crm/node-kit'
+ import { tokenAad as pixelTokenAad } from '../../meta-capi/pixels'
+ import { GraphClient, MetaGraphError } from '../client/graph'
+@@ -302,23 +302,35 @@ export class MetaProfilesService {
+     return pixels.filter(pixel => !unavailable.has(pixel.pixel_id))
+   }
+ 
+-  async linkWorkspacePixel(companyId: string, area: string, accountId: string, pixelId: string, refreshToken = false) {
++  async linkWorkspacePixel(companyId: string, area: string, accountId: string, pixelId: string, options: { refreshToken?: boolean; name?: string; pageId?: string; allowedEvents?: PixelEventName[] } = {}) {
+     const { pixels, token } = await this.workspacePixelAccess(companyId, area, accountId)
+     const pixel = pixels.find(p => p.pixel_id === pixelId)
+     if (!pixel) throw new MetaProfilesError('not_found', 'Pixel não disponível nesta conta de anúncio')
+     const id = randomUUID()
+     const encrypted = (recordId: string) => serializeEncrypted(this.cipher().encrypt(token, pixelTokenAad(recordId)))
++    const settings = {
++      ...(options.pageId === undefined ? {} : { pageId: options.pageId }),
++      ...(options.name === undefined ? {} : { name: options.name }),
++      ...(options.allowedEvents === undefined ? {} : { allowedEvents: [...new Set(options.allowedEvents)] }),
++    }
++    const selected = { id: pixelConfigs.id, name: pixelConfigs.name, page_id: pixelConfigs.pageId, allowed_events: pixelConfigs.allowedEvents }
+     const [created] = await this.db.insert(pixelConfigs).values({
+       id, companyId, businessAreaId: area, metaAdAccountId: accountId, pixelId,
+       name: (pixel.name && pixel.name.trim().length >= 2 ? pixel.name.trim() : `Pixel ${pixelId}`).slice(0, 255), accessTokenEnc: encrypted(id),
+-    }).onConflictDoNothing().returning({ id: pixelConfigs.id })
+-    if (created) return { id: created.id, ...pixel, ad_account_id: accountId }
+-    const [existing] = await this.db.select({ id: pixelConfigs.id }).from(pixelConfigs).where(and(
++      ...settings,
++    }).onConflictDoNothing().returning(selected)
++    if (created) return { ...created, pixel_id: pixelId, ad_account_id: accountId }
++    const identity = and(
+       eq(pixelConfigs.companyId, companyId), eq(pixelConfigs.businessAreaId, area), eq(pixelConfigs.metaAdAccountId, accountId), eq(pixelConfigs.pixelId, pixelId),
+-    )).limit(1)
++    )
++    const [existing] = await this.db.select(selected).from(pixelConfigs).where(identity).limit(1)
+     if (!existing) throw new MetaProfilesError('conflict', 'Pixel já vinculado a outra conta ou workspace')
+-    if (refreshToken) await this.db.update(pixelConfigs).set({ accessTokenEnc: encrypted(existing.id), updatedAt: this.now() }).where(eq(pixelConfigs.id, existing.id))
+-    return { id: existing.id, ...pixel, ad_account_id: accountId }
++    const existingIdentity = and(identity, eq(pixelConfigs.id, existing.id))
++    const [saved] = options.refreshToken || Object.keys(settings).length
++      ? await this.db.update(pixelConfigs).set({ ...settings, ...(options.pageId !== undefined && options.pageId !== existing.page_id ? { bmStatus: null, bmCheckedAt: null, bmError: null } : {}), ...(options.refreshToken ? { accessTokenEnc: encrypted(existing.id) } : {}), updatedAt: this.now() }).where(existingIdentity).returning(selected)
++      : [existing]
++    if (!saved) throw new MetaProfilesError('not_found', 'Pixel não encontrado')
++    return { ...saved, pixel_id: pixelId, ad_account_id: accountId }
+   }
+ 
+   /** Read checks never mutate cached credentials or return provider text which may include private values. */
+diff --git a/packages/core/src/meta-capi/capi.db.unit.test.ts b/packages/core/src/meta-capi/capi.db.unit.test.ts
+index c4890293b5d8a51e5fe70a7b6e56435d49752c55..950298db7ec4833a9e918db674e3320ed2c604b3 100644
+--- a/packages/core/src/meta-capi/capi.db.unit.test.ts
++++ b/packages/core/src/meta-capi/capi.db.unit.test.ts
+@@ -29,13 +29,13 @@ afterAll(async () => {
+   await tmp?.drop()
+ })
+ 
+-async function world(opts: { autoSendSales?: boolean } = {}) {
++async function world(opts: { autoSendSales?: boolean; purchaseOnly?: boolean } = {}) {
+   const tag = randomBytes(4).toString('hex')
+   const [c] = await db.insert(companies).values({ name: `P${tag}`, slug: `p-t104-${tag}` }).returning()
+   const pixelId = String(100000000000000 + Math.floor(Math.random() * 1e9))
+   const token = `EAAB${randomBytes(12).toString('hex')}`
+   fake.addPixel(pixelId, token)
+-  const pixel = await new PixelConfigService({ db }).create(c!.id, { name: 'Pixel loja', pixel_id: pixelId, access_token: token, auto_send_sales: opts.autoSendSales ?? false })
++  const pixel = await new PixelConfigService({ db }).create(c!.id, { name: 'Pixel loja', pixel_id: pixelId, access_token: token, auto_send_sales: opts.autoSendSales ?? false, allowed_events: opts.purchaseOnly ? undefined : ["Purchase", "Lead"] })
+   const [contact] = await db
+     .insert(contacts)
+     .values({ companyId: c!.id, name: 'José da Silva', phoneE164: `+5511${String(Math.floor(Math.random() * 1e9)).padStart(9, '0')}`, email: '  Jose@Example.COM ', city: 'São Paulo' })
+@@ -47,6 +47,19 @@ const capi = (o: Partial<CapiServiceOptions> = {}) => new CapiService({ db, grap
+ type Pub = { publish(c: string, t: string, d: unknown): Promise<unknown> }
+ 
+ describe('CapiService', () => {
++  it('permits only Purchase by default and sends Lead only after opt-in', async () => {
++    const w = await world({ purchaseOnly: true })
++    const event = { companyId: w.companyId, pixelConfigId: w.pixel.id, source: 'manual' as const }
++    expect(w.pixel.allowed_events).toEqual(['Purchase'])
++    expect(await capi().send({ ...event, eventId: 'disabled-lead', eventName: 'Lead' })).toMatchObject({
++      status: 'discarded', reason: 'event_disabled_for_pixel',
++    })
++    expect(fake.capiEventsFor(w.pixelId)).toHaveLength(0)
++    expect(await capi().send({ ...event, eventId: 'purchase', eventName: 'Purchase', value: 10 })).toMatchObject({ status: 'sent' })
++    await new PixelConfigService({ db }).update(w.companyId, w.pixel.id, { allowed_events: ['Purchase', 'Lead'] })
++    expect(await capi().send({ ...event, eventId: 'enabled-lead', eventName: 'Lead' })).toMatchObject({ status: 'sent' })
++    expect(fake.capiEventsFor(w.pixelId).map(x => x.event.event_name)).toEqual(['Purchase', 'Lead'])
++  })
+   it('envia JSON com token do pixel, hash do telefone e e-mail normalizados (AC-T104-01)', async () => {
+     const w = await world()
+     const r = await capi().send({
+diff --git a/packages/core/src/meta-capi/pixels.ts b/packages/core/src/meta-capi/pixels.ts
+index b578390c1da1dd88120a93176742948a2b6f9005..0fd3924b9281b99fdf2288b94938be8e565bf321 100644
+--- a/packages/core/src/meta-capi/pixels.ts
++++ b/packages/core/src/meta-capi/pixels.ts
+@@ -7,7 +7,7 @@ import { isOfferDestinationLocked } from '../offers/service'
+ // Doc: https://developers.facebook.com/docs/marketing-api/conversions-api/business-messaging
+ import { randomUUID } from 'node:crypto'
+ import { and, asc, eq, sql } from 'drizzle-orm'
+-import { pixelConfigs, type Database } from '@crm/db'
++import { PIXEL_EVENT_NAMES, pixelConfigs, type Database, type PixelEventName } from '@crm/db'
+ import { getCredentialsCipher, parseEncrypted, serializeEncrypted, type CredentialCipher } from '@crm/node-kit'
+ 
+ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+@@ -25,6 +25,7 @@ export class PixelConfigError extends Error {
+ }
+ 
+ export interface PixelConfigInput {
++  allowed_events?: PixelEventName[]
+   name?: string | null
+   pixel_id?: string | number | null
+   access_token?: string | null
+@@ -38,6 +39,7 @@ export interface PixelConfigInput {
+ }
+ 
+ export interface PixelConfigDto {
++  allowed_events: PixelEventName[]
+   id: string
+   name: string
+   platform: string
+@@ -60,6 +62,7 @@ export interface PixelConfigDto {
+ 
+ type Row = typeof pixelConfigs.$inferSelect
+ interface Validated {
++  allowedEvents?: PixelEventName[]
+   name?: string
+   pixelId?: string
+   token?: string
+@@ -113,6 +116,7 @@ export class PixelConfigService {
+         name: v.name!,
+         platform: 'facebook',
+         pixelId: v.pixelId!,
++        ...(v.allowedEvents ? { allowedEvents: v.allowedEvents } : {}),
+         accessTokenEnc: serializeEncrypted(this.cipher().encrypt(v.token!, tokenAad(id))),
+         autoSendSales: input.auto_send_sales ?? false,
+         pageId: v.pageId ?? null,
+@@ -135,6 +139,7 @@ export class PixelConfigService {
+     const [row] = await this.opts.db
+       .update(pixelConfigs)
+       .set({
++        ...(v.allowedEvents ? { allowedEvents: v.allowedEvents } : {}),
+         ...(v.name !== undefined ? { name: v.name! } : {}),
+         ...(v.pixelId !== undefined ? { pixelId: v.pixelId! } : {}),
+         ...(v.token ? { accessTokenEnc: serializeEncrypted(this.cipher().encrypt(v.token, tokenAad(cur.id))) } : {}),
+@@ -176,6 +181,12 @@ export class PixelConfigService {
+   private validate(input: PixelConfigInput, creating: boolean): Validated {
+     const fields: { path: string; message: string }[] = []
+     const out: Validated = {}
++    if (input.allowed_events !== undefined) {
++      const events = input.allowed_events
++      if (!Array.isArray(events) || !events.length || events.length > PIXEL_EVENT_NAMES.length || events.some(event => !PIXEL_EVENT_NAMES.includes(event))) {
++        fields.push({ path: 'allowed_events', message: 'Selecione eventos válidos do pixel' })
++      } else out.allowedEvents = [...new Set(events)]
++    }
+     if (creating || input.name !== undefined) {
+       const name = (input.name ?? '').trim()
+       if (name.length < 2 || name.length > 255) fields.push({ path: 'name', message: 'O nome deve ter de 2 a 255 caracteres' })
+@@ -223,6 +234,7 @@ export class PixelConfigService {
+       platform: r.platform,
+       masked_pixel_id: maskPixelId(r.pixelId),
+       masked_access_token: maskToken(token),
++      allowed_events: r.allowedEvents,
+       auto_send_sales: r.autoSendSales,
+       page_id: r.pageId,
+       whatsapp_business_account_id: r.whatsappBusinessAccountId,
+diff --git a/packages/core/src/meta-capi/rastreamento.db.unit.test.ts b/packages/core/src/meta-capi/rastreamento.db.unit.test.ts
+index 78ff924559047a9b43c4e16e66c3b4dccaa75ca0..ca47e3132293f55e314932bdca328b0295265c59 100644
+--- a/packages/core/src/meta-capi/rastreamento.db.unit.test.ts
++++ b/packages/core/src/meta-capi/rastreamento.db.unit.test.ts
+@@ -43,7 +43,7 @@ async function world(pixel: Partial<PixelConfigInput> = {}) {
+   const pixelId = String(200000000000000 + Math.floor(Math.random() * 1e9))
+   const token = `EAAB${randomBytes(12).toString('hex')}`
+   fake.addPixel(pixelId, token)
+-  const px = await new PixelConfigService({ db }).create(c!.id, { name: 'Pixel', pixel_id: pixelId, access_token: token, ...pixel })
++  const px = await new PixelConfigService({ db }).create(c!.id, { name: 'Pixel', pixel_id: pixelId, access_token: token, allowed_events: ["Purchase", "Lead", "Contact", "Schedule"], ...pixel })
+   const [contact] = await db
+     .insert(contacts)
+     .values({
+diff --git a/packages/core/src/meta-capi/service.ts b/packages/core/src/meta-capi/service.ts
+index b7c214dfaa6b557d5e5d62ab8442e6337966149b..8c510739b55e4ca431d636a49d15b4737de32014 100644
+--- a/packages/core/src/meta-capi/service.ts
++++ b/packages/core/src/meta-capi/service.ts
+@@ -25,13 +25,14 @@
+ // - `fetch` próprio (não o GraphClient): o token CAPI do pixel não usa `appsecret_proof`.
+ // Escreve só no executor recebido (`db`): dentro de um passo de fluxo é a transação do passo (`ctx.repo.db`).
+ import { and, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm'
+-import { capiEventLog, contactAttribution, contacts, pixelConfigs, trackedLinkClicks, type Database } from '@crm/db'
++import { capiEventLog, contactAttribution, contacts, PIXEL_EVENT_NAMES, pixelConfigs, trackedLinkClicks, type Database } from '@crm/db'
+ import { META_GRAPH_VERSION, parseGraphUrl } from '../meta-ads/client/graph'
+ import { buildUserData, matchScore, normalizeCapiCurrency, parseMoney, type CapiUserInput } from './hashing'
+ import { PixelConfigService } from './pixels'
+ 
+ /** Eventos padrão da Meta aceitos pelo CRM (nó Pixel, vendas, Lead automático). */
+-export const CAPI_EVENT_NAMES = ['Purchase', 'Lead', 'InitiateCheckout', 'AddToCart', 'CompleteRegistration', 'Contact', 'Schedule', 'Subscribe'] as const
++export const CAPI_EVENT_NAMES = PIXEL_EVENT_NAMES
++export const CAPI_EVENT_DISABLED = 'event_disabled_for_pixel'
+ export type CapiEventName = (typeof CAPI_EVENT_NAMES)[number]
+ /** Origens do modo padrão: `chat` (conversa no WhatsApp) e `system_generated` (venda registrada no CRM). */
+ export const CAPI_ACTION_SOURCES = ['chat', 'system_generated'] as const
+@@ -264,6 +265,7 @@ export class CapiService {
+     const [existing] = await db.select().from(capiEventLog).where(logKey).limit(1)
+     if (existing?.status === 'sent' || existing?.status === 'pending') return { status: 'duplicate', eventId: input.eventId }
+     if (existing?.status === 'discarded') return { status: 'discarded', eventId: input.eventId, reason: existing.error ?? 'descartado' }
++    if (!pixel.allowedEvents.includes(input.eventName)) return { status: 'discarded', eventId: input.eventId, reason: CAPI_EVENT_DISABLED }
+     const pinned = ((existing?.response ?? {}) as { pinned_mode?: CapiMode }).pinned_mode ?? null
+     const eventTimeIn = existing?.eventTime ?? input.eventTime
+     const sendInput = { ...input, ...(eventTimeIn ? { eventTime: eventTimeIn } : {}) }
+diff --git a/packages/core/src/offers/service.ts b/packages/core/src/offers/service.ts
+index 696a94294a6ee96c8a28a99796b0394456e6c101..371bef929d961abec2b7acb281046441f4fd8715 100644
+--- a/packages/core/src/offers/service.ts
++++ b/packages/core/src/offers/service.ts
+@@ -308,6 +308,13 @@ export class OffersService {
+     eventTime = new Date(),
+   ) {
+     requireSharedOffersCompany(op.company_id)
++    if (eventName !== 'Purchase') {
++      const [allowed] = await offerRows<{ enabled: boolean }>(this.db, sql`
++        select ${eventName} = any(allowed_events) as enabled from crm.pixel_configs
++        where company_id=${op.company_id} and id=${op.snapshot.pixel_id}
++      `)
++      if (!allowed?.enabled) return false
++    }
+     const payload: CapiSendInput = {
+       companyId: op.company_id,
+       pixelConfigId: op.snapshot.pixel_id,
+@@ -324,6 +331,7 @@ export class OffersService {
+     await this.db.execute(
+       sql`insert into crm.offer_event_outbox(company_id,opportunity_id,event_id,payload) values(${op.company_id},${op.id},${eventId},${json(payload)}::jsonb) on conflict(event_id) do nothing`,
+     )
++    return true
+   }
+   async report(company: string, owner?: string, offer?: string, area?: string | null) {
+     requireSharedOffersCompany(company)
+diff --git a/packages/db/drizzle/crm/0048_pixel_allowed_events.sql b/packages/db/drizzle/crm/0048_pixel_allowed_events.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..7a219986f56e58901d34884cf50eb7a73622d960
+--- /dev/null
++++ b/packages/db/drizzle/crm/0048_pixel_allowed_events.sql
+@@ -0,0 +1,6 @@
++ALTER TABLE crm.pixel_configs
++  ADD COLUMN allowed_events text[] NOT NULL DEFAULT ARRAY['Purchase']::text[],
++  ADD CONSTRAINT pixel_configs_allowed_events_ck CHECK (
++    cardinality(allowed_events) BETWEEN 1 AND 8
++    AND allowed_events <@ ARRAY['Purchase','Lead','InitiateCheckout','AddToCart','CompleteRegistration','Contact','Schedule','Subscribe']::text[]
++  );
+diff --git a/packages/db/drizzle/crm/meta/_journal.json b/packages/db/drizzle/crm/meta/_journal.json
+index 265680ff22f7d19a9c9fd2cd82a11082ee2674bf..92970cfac45e896c55dbcc8cf34a3fd17e9b12f7 100644
+--- a/packages/db/drizzle/crm/meta/_journal.json
++++ b/packages/db/drizzle/crm/meta/_journal.json
+@@ -337,6 +337,13 @@
+       "when": 1795037400000,
+       "tag": "0047_workspace_meta",
+       "breakpoints": true
++    },
++    {
++      "idx": 48,
++      "version": "7",
++      "when": 1795104000000,
++      "tag": "0048_pixel_allowed_events",
++      "breakpoints": true
+     }
+   ]
+ }
+diff --git a/packages/db/src/schema/crm/meta-pixels.ts b/packages/db/src/schema/crm/meta-pixels.ts
+index e14a99da5d210a3245553215fa665ff4ce7bfb8a..25ff1d0855c564482a1ab1bd6176f0b29b0e71bb 100644
+--- a/packages/db/src/schema/crm/meta-pixels.ts
++++ b/packages/db/src/schema/crm/meta-pixels.ts
+@@ -25,6 +25,8 @@ export type PixelPlatform = (typeof PIXEL_PLATFORMS)[number]
+ 
+ export const PIXEL_BM_STATUSES = ['accepted', 'rejected'] as const
+ export type PixelBmStatus = (typeof PIXEL_BM_STATUSES)[number]
++export const PIXEL_EVENT_NAMES = ['Purchase', 'Lead', 'InitiateCheckout', 'AddToCart', 'CompleteRegistration', 'Contact', 'Schedule', 'Subscribe'] as const
++export type PixelEventName = (typeof PIXEL_EVENT_NAMES)[number]
+ 
+ export const pixelConfigs = crm.table(
+   'pixel_configs',
+@@ -37,6 +39,7 @@ export const pixelConfigs = crm.table(
+     platform: text('platform').$type<PixelPlatform>().notNull().default('facebook'),
+     /** Id numérico do pixel/dataset. */
+     pixelId: text('pixel_id').notNull(),
++    allowedEvents: text('allowed_events').array().$type<PixelEventName[]>().notNull().default(sql`ARRAY['Purchase']::text[]`),
+     /** `serializeEncrypted` (AES-256-GCM, AAD `pixel_config/<id>/token`). Nunca sai pela API sem pedido explícito. */
+     accessTokenEnc: text('access_token_enc').notNull(),
+     /** Envia `Purchase` automaticamente a cada venda registrada (`sale.recorded`). */
+@@ -68,6 +71,7 @@ export const pixelConfigs = crm.table(
+     check('pixel_configs_workspace_ck', sql`(${t.businessAreaId} is null and ${t.metaAdAccountId} is null) or (${t.businessAreaId} is not null and ${t.metaAdAccountId} is not null and not ${t.autoSendSales} and not ${t.autoLeadOnAd})`),
+     index('pixel_configs_company_idx').on(t.companyId, t.createdAt),
+     check('pixel_configs_pixel_id_ck', sql`${t.pixelId} ~ '^[0-9]+$'`),
++    check('pixel_configs_allowed_events_ck', sql`cardinality(${t.allowedEvents}) between 1 and 8 and ${t.allowedEvents} <@ ARRAY['Purchase','Lead','InitiateCheckout','AddToCart','CompleteRegistration','Contact','Schedule','Subscribe']::text[]`),
+     check('pixel_configs_name_ck', sql`char_length(${t.name}) between 2 and 255`),
+     check('pixel_configs_page_id_ck', sql`${t.pageId} is null or ${t.pageId} ~ '^[0-9]+$'`),
+     check('pixel_configs_waba_id_ck', sql`${t.whatsappBusinessAccountId} is null or ${t.whatsappBusinessAccountId} ~ '^[0-9]+$'`),
+diff --git a/tests/acceptance/T125/business-areas.test.ts b/tests/acceptance/T125/business-areas.test.ts
+index 1a908884d837d35c5dc8f6b24e184692e5444e66..8c72d44c6a4f4165ae8e767a2f10e058ad9cb9b6 100644
+--- a/tests/acceptance/T125/business-areas.test.ts
++++ b/tests/acceptance/T125/business-areas.test.ts
+@@ -122,10 +122,11 @@ it('authorizes one Facebook profile separately in three workspaces and binds dis
+     expect((await tool(writer, 'link_workspace_meta_ad_account', link)).data.ad_account.id).toBe(ad_account_id)
+     expect((await tool(reader, 'list_workspace_meta_pixels', { ...workspace, ad_account_id })).data.items).toEqual([{ pixel_id: datasetIds[i], name: 'Workspace Pixel ' + (i+1) }])
+     expect((await tool(writer, 'link_workspace_meta_pixel', { ...workspace, ad_account_id, pixel_id: '7777' })).data.status).toBe(404)
+-    const config = { ...workspace, ad_account_id, pixel_id: datasetIds[i] }
++    const config = { ...workspace, ad_account_id, pixel_id: datasetIds[i], page_id: String(2001+i), name: "Pixel Compra " + (i+1) }
++    expect((await tool(writer, "link_workspace_meta_pixel", { ...config, page_id: "not-an-id" })).error).toBe(true)
+     const pixel = await tool(writer, 'link_workspace_meta_pixel', config)
+     expect(pixel.error, JSON.stringify(pixel.data)).toBe(false)
+-    expect(pixel.data).toMatchObject({ capi_delivery_verified: false, pixel: { ad_account_id, pixel_id: datasetIds[i] } })
++    expect(pixel.data).toMatchObject({ capi_delivery_verified: false, pixel: { ad_account_id, pixel_id: datasetIds[i], page_id: config.page_id, name: config.name, allowed_events: ["Purchase"] } })
+     expect((await tool(writer, 'link_workspace_meta_pixel', config)).data.pixel.id).toBe(pixel.data.pixel.id)
+     expect((await call('GET', '/api/meta/pixels/' + pixel.data.pixel.id + '?include_access_token=true', business_area_id)).body.pixel).not.toHaveProperty('access_token')
+     expect((await call('PUT', '/api/meta/pixels/' + pixel.data.pixel.id, business_area_id, { auto_send_sales: true })).status).toBe(422)
+diff --git a/tests/acceptance/T125/revisor-shared-offers.test.ts b/tests/acceptance/T125/revisor-shared-offers.test.ts
+index c723a825a8b591b0da25f09043a7b30d44e822a7..482d14ab0e270e96825e2ebc2bacf803e1947d9c 100644
+--- a/tests/acceptance/T125/revisor-shared-offers.test.ts
++++ b/tests/acceptance/T125/revisor-shared-offers.test.ts
+@@ -1,4 +1,4 @@
+-﻿import { hashPassword } from '@crm/node-kit'
++import { hashPassword } from '@crm/node-kit'
+ import { createClient } from '../helpers/http'
+ import { createHash, randomBytes } from 'node:crypto'
+ import { createServer } from 'node:http'
+@@ -121,7 +121,7 @@ beforeAll(async () => {
+   pxB = await salesPixel(sys, t)
+   pxC = await salesPixel(sys,t); sentinel = await salesPixel(sys,t)
+   for (const px of [pxA, pxB, pxC, sentinel]) {
+-    await t.c.put('/api/meta/pixels/' + px.id, { auto_lead_on_ad: true, whatsapp_business_account_id: '123456789' })
++    await t.c.put('/api/meta/pixels/' + px.id, { auto_lead_on_ad: true, allowed_events: ["Purchase", "Lead", "InitiateCheckout"], whatsapp_business_account_id: '123456789' })
+     sys.fakeMeta.setBusinessMessagingMode(px.pixelId, 'accept')
+   }
+   const prod = await t.c.post('/api/products', {
+diff --git a/tests/acceptance/T125/shared-offers.test.ts b/tests/acceptance/T125/shared-offers.test.ts
+index 2eb9b9ad8059a6b4c951c55443be65c55fddf920..be3b6020d1c42adad0561e40f8897cfaca44220e 100644
+--- a/tests/acceptance/T125/shared-offers.test.ts
++++ b/tests/acceptance/T125/shared-offers.test.ts
+@@ -114,7 +114,7 @@ beforeAll(async () => {
+   pxA = await salesPixel(sys, t)
+   pxB = await salesPixel(sys, t)
+   for (const px of [pxA, pxB]) {
+-    await t.c.put('/api/meta/pixels/' + px.id, { auto_lead_on_ad: true, whatsapp_business_account_id: '123456789' })
++    await t.c.put('/api/meta/pixels/' + px.id, { auto_lead_on_ad: true, allowed_events: ["Purchase", "Lead", "InitiateCheckout"], whatsapp_business_account_id: '123456789' })
+     sys.fakeMeta.setBusinessMessagingMode(px.pixelId, 'accept')
+   }
+   const prod = await t.c.post('/api/products', {
