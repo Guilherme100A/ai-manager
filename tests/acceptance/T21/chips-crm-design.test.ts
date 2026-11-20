@@ -36,9 +36,10 @@ describe('T21 — visual de chips alinhado ao CRM', () => {
         const style = getComputedStyle(el)
         return { bg: style.getPropertyValue('--bg').trim(), surface: style.getPropertyValue('--surface').trim(), accent: style.getPropertyValue('--accent').trim() }
       })
-      expect(skin).toEqual(colorScheme === 'dark'
+      const expected = colorScheme === 'dark'
         ? { bg: '#171326', surface: '#1d1831', accent: '#a78bfa' }
-        : { bg: '#f5f3fa', surface: '#ffffff', accent: '#6d28d9' })
+        : { bg: '#f5f3fa', surface: '#ffffff', accent: '#6d28d9' }
+      expect(skin, `scheme=${colorScheme}, theme=${await page.evaluate(() => document.documentElement.dataset.theme)}, actual=${JSON.stringify(skin)}`).toEqual(expected)
       await page.locator(tid('add-session')).click()
       await page.locator(tid('page-new-session')).waitFor({ state: 'visible' })
       expect(await page.locator(tid('new-name')).isVisible()).toBe(true)
