@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/Guilherme100A/crm-copy.git",
   "base_sha": "acf78e2da49865afa06fe6a4cee77bcf0e888152",
-  "expected_tree": "da9a28906e0766b05440a0e68c7fe1822e2e07aa",
+  "expected_tree": "8d43f8aa65e4907c3af76975360199b64c38f5d8",
   "sanitization": {
     "excluded_files": [
       "scripts/elevenlabs-account-diagnose.ts",
@@ -28,7 +28,7 @@
     ],
     "reason": "Exclude unrelated operator scripts/private deployment context and audit-only harnesses; replace operational hosts in documentation and URL fixtures with reserved example.test hosts. Original local source preserved.",
     "baseline_tree": "539e4a6dac07e50188e418d0e1a3d669e5f6d687",
-    "final_tree": "da9a28906e0766b05440a0e68c7fe1822e2e07aa"
+    "final_tree": "8d43f8aa65e4907c3af76975360199b64c38f5d8"
   },
   "test_only_changes": [
     {
@@ -580,6 +580,20 @@
       "bytes": 1514,
       "files": [
         "tests/acceptance/T69/chat-list.e2e.ts"
+      ]
+    },
+    {
+      "file": "21-remove-kanban-board-ui.patch",
+      "description": "Remove the Kanban board from desktop and mobile navigation, redirect old board URLs to Flows, preserve existing data and backend behavior.",
+      "sha256": "948e469158f304b119910c637108f3a926af11b8f3e8aa1597468f329b2687e4",
+      "bytes": 9278,
+      "files": [
+        "apps/web/src/app/access.unit.test.ts",
+        "apps/web/src/app/nav.ts",
+        "apps/web/src/routes/crms/$crmId.tsx",
+        "apps/web/src/routes/crms/index.tsx",
+        "tests/acceptance/T23/shell.e2e.ts",
+        "tests/acceptance/T59/ai-integrations.e2e.ts"
       ]
     }
   ],
