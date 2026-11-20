@@ -98,10 +98,19 @@ index a168719..ce40699 100644
        await page.getByTestId('flows-search').fill(privateFlow.name)
        await page.getByTestId('flows-item-menu-'+privateFlow.id).click()
 diff --git a/tests/acceptance/T59/ai-integrations.e2e.ts b/tests/acceptance/T59/ai-integrations.e2e.ts
-index 974b266..ff93c52 100644
+index 974b266..86665fa 100644
 --- a/tests/acceptance/T59/ai-integrations.e2e.ts
 +++ b/tests/acceptance/T59/ai-integrations.e2e.ts
-@@ -115,11 +115,15 @@ test.describe('T59 — navegação sem saldo de IA', () => {
+@@ -5,7 +5,7 @@
+ // ("Entrega do operário"). Carteira e cotas pela API da plataforma (platform@demo.test); uso de IA não tem rota de
+ // carga: page.route em /api/ai/usage e /api/ai/usage/summary. Só desktop (nenhum AC cita mobile).
+ import { expect, test, type APIRequestContext, type Page, type Request } from '@playwright/test'
+-import { loginAs, resetSeed, SEED_PASSWORD, SEED_USERS } from '../helpers/e2e'
++import { isMobile, loginAs, resetSeed, SEED_PASSWORD, SEED_USERS } from '../helpers/e2e'
+ import { XRW } from '../helpers/chats-e2e'
+ 
+ test.beforeEach(async ({ request }) => {
+@@ -115,11 +115,16 @@ test.describe('T59 — navegação sem saldo de IA', () => {
      await expect(page).toHaveURL(/\/flows$/)
    })
  
@@ -112,6 +121,7 @@ index 974b266..ff93c52 100644
 -    await expect(page.getByTestId('settings-wa-sessions')).toBeVisible()
 -    await expect(page.getByTestId('open-wa-sessions')).toHaveAttribute('href', '/#/sessions')
 +    await page.goto('/settings')
++    if (isMobile(page)) await page.getByTestId('shell-drawer-open').click()
 +    const manager = page.getByTestId('nav-item-wa-session-manager')
 +    await expect(manager).toHaveAttribute('href', '/?return=sessions#/sessions')
 +    await expect(manager).toHaveAttribute('target', '_top')
