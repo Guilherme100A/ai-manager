@@ -19,7 +19,7 @@ export function ConversationPanel({ sessionId }: { sessionId: string }) {
   const [config, setConfig] = useState<Config>()
   const [sessions, setSessions] = useState<Session[]>([])
   const sourceSession = sessions.find((session) => session.id === sessionId)
-  const sourceHasProxy = sourceSession?.proxyId != null
+  const sourceHasProxy = sourceSession?.proxyId != null && !sourceSession.requiresRestart
   const [error, setError] = useState<unknown>()
   const [busy, setBusy] = useState(false)
   const [ai, setAi] = useState<{ enabled: boolean; hasApiKey: boolean }>()
@@ -65,7 +65,7 @@ export function ConversationPanel({ sessionId }: { sessionId: string }) {
     <ErrorText error={error} />
     {config ? <>
       <label><input type="checkbox" checked={config.enabled} disabled={busy || (!config.enabled && !sourceHasProxy)} onChange={(e) => setConfig({ ...config, enabled: e.target.checked })} /> Ativar conversas nesta conta</label>
-      {sourceSession && !sourceHasProxy && <p className="hint" role="status">Este chip usa conexão direta. Configure um proxy para poder ativar conversas automáticas.</p>}
+      {sourceSession && !sourceHasProxy && <p className="hint" role="status">{sourceSession.requiresRestart ? 'Reinicie o chip para aplicar o proxy antes de ativar conversas automáticas.' : 'Este chip usa conexão direta. Configure um proxy para poder ativar conversas automáticas.'}</p>}
       <div className="dialog-field"><label htmlFor="conversation-mode">Distribuição</label>
         <select id="conversation-mode" disabled={busy} value={config.mode} onChange={(e) => setConfig({ ...config, mode: e.target.value as Config['mode'], targetSessionId: null })}>
           <option value="rotating">Rodízio automático entre contas habilitadas</option><option value="fixed">Par fixo escolhido por mim</option>
@@ -74,7 +74,7 @@ export function ConversationPanel({ sessionId }: { sessionId: string }) {
       {config.mode === 'fixed' ? <div className="dialog-field"><label htmlFor="conversation-target">Outra conta</label>
         <select id="conversation-target" disabled={busy} value={config.targetSessionId ?? ''} onChange={(e) => setConfig({ ...config, targetSessionId: e.target.value || null })}>
           <option value="">Selecione…</option>
-          {sessions.filter((s) => s.id !== sessionId && (s.proxyId != null || s.id === config.targetSessionId)).map((s) => <option key={s.id} value={s.id}>{s.name} ({s.phone ?? 'sem número'})</option>)}
+          {sessions.filter((s) => s.id !== sessionId && ((s.proxyId != null && !s.requiresRestart) || s.id === config.targetSessionId)).map((s) => <option key={s.id} value={s.id}>{s.name} ({s.phone ?? 'sem número'})</option>)}
         </select>
         <small className="hint">Autorize os dois números em Contatos. Ative o par apenas aqui; não é necessário criar o vínculo inverso na outra conta.</small>
       </div> : <p className="hint">Ative também o rodízio nas outras contas. Só entram no sorteio contas conectadas e com cota. Se o número de contas for ímpar, quem ficar de fora ganha prioridade na próxima formação.</p>}

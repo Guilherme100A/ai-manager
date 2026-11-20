@@ -10,13 +10,16 @@ describe('proxy obrigatorio na automacao de conversas', () => {
   it('exige proxy nas duas pontas ao habilitar, mas permite desligar chip direto', async () => {
     const source = setup()
     source.sessions.get(A)!.proxyId = null
-    await expect(source.automation.configure(A, source.config)).rejects.toThrow('proxy nos dois chips')
+    await expect(source.automation.configure(A, source.config)).rejects.toThrow('proxy ativo nos dois chips')
     await source.automation.configure(A, { ...source.config, enabled: false })
     expect(source.configs.get(A)!.enabled).toBe(false)
 
     const target = setup()
     target.sessions.get(B)!.proxyId = null
-    await expect(target.automation.configure(A, target.config)).rejects.toThrow('proxy nos dois chips')
+    await expect(target.automation.configure(A, target.config)).rejects.toThrow('proxy ativo nos dois chips')
+    const pendingRestart = setup()
+    pendingRestart.sessions.get(B)!.requiresRestart = true
+    await expect(pendingRestart.automation.configure(A, pendingRestart.config)).rejects.toThrow('reinício pendente')
   })
   it('configuracao antiga nao envia se o proxy de qualquer ponta foi removido', async () => {
     for (const directId of [A, B]) {
@@ -26,6 +29,12 @@ describe('proxy obrigatorio na automacao de conversas', () => {
       expect(s.pipeline.send).not.toHaveBeenCalled()
       expect(s.model.message).not.toHaveBeenCalled()
     }
+  })
+  it('configuracao antiga nao envia antes do proxy novo ser aplicado', async () => {
+    const s = setup()
+    s.sessions.get(B)!.requiresRestart = true
+    await s.automation.run(A)
+    expect(s.pipeline.send).not.toHaveBeenCalled()
   })
   it('nao enfileira se o proxy for removido durante o tempo de digitacao', async () => {
     const s = setup()

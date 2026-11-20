@@ -10,6 +10,7 @@ import type { ConversationStore } from './store'
 const MINUTE = 60_000
 const DAY = 86_400_000
 const OFFLINE_GRACE = 10 * MINUTE
+const hasActiveProxy = (session: SessionView) => session.proxyId != null && !session.requiresRestart
 export interface ConversationOptions {
   manager: AutomationManager; store: ConversationStore
   limits: Pick<SessionLimitsService, 'get' | 'countOutbound'>
@@ -184,7 +185,7 @@ export class ConversationAutomation {
       for (const s of sessions) {
         const state = states.get(s.id)!
         const config = configs.get(s.id)!
-        if (!occupied.has(s.id) && s.proxyId != null && config.enabled && config.mode === 'rotating' &&
+        if (!occupied.has(s.id) && hasActiveProxy(s) && config.enabled && config.mode === 'rotating' &&
           (state.nextAt ?? 0) <= this.now() && this.opts.manager.isConnected(s.id) && SENDABLE_STATES.includes(s.status) &&
           await this.hasCapacity(s, config)) available.push(s)
       }
@@ -227,8 +228,8 @@ export class ConversationAutomation {
     if (!parsed.success || input.targetSessionId === id) throw new SessionError('VALIDATION_ERROR', 'Selecione outra conta e limites válidos.')
     const source = await this.opts.manager.get(id)
     const target = input.targetSessionId ? await this.opts.manager.get(input.targetSessionId) : undefined
-    if (input.enabled && (source.proxyId == null || (target && target.proxyId == null))) {
-      throw new SessionError('VALIDATION_ERROR', 'Automação de conversas exige proxy nos dois chips.')
+    if (input.enabled && (!hasActiveProxy(source) || (target && !hasActiveProxy(target)))) {
+      throw new SessionError('VALIDATION_ERROR', 'Automação de conversas exige proxy ativo nos dois chips; conclua qualquer reinício pendente.')
     }
     const lease = await this.opts.store.claim()
     if (!lease) throw new SessionError('VALIDATION_ERROR', 'Conversa em processamento. Tente salvar novamente em alguns segundos.')
@@ -294,7 +295,7 @@ export class ConversationAutomation {
   }
   private async active(id: string, targetId: string) {
     const sessions = await Promise.all([id, targetId].map((sessionId) => this.opts.manager.get(sessionId)))
-    if (sessions.some((session) => session.proxyId == null)) return false
+    if (sessions.some((session) => !hasActiveProxy(session))) return false
     const config = await this.opts.store.config(id)
     const peer = await this.opts.store.config(targetId)
     const matches = config.mode === 'rotating'
@@ -310,7 +311,7 @@ export class ConversationAutomation {
     if (!config.enabled || !peer.enabled || peer.mode !== 'rotating' || state.partnerId !== targetId) return false
     try {
       const sessions = await Promise.all([id, targetId].map((s) => this.opts.manager.get(s)))
-      return sessions.every((s) => s.proxyId != null && SENDABLE_STATES.includes(s.status)) && sessions.some((s) => !this.opts.manager.isConnected(s.id))
+      return sessions.every((s) => hasActiveProxy(s) && SENDABLE_STATES.includes(s.status)) && sessions.some((s) => !this.opts.manager.isConnected(s.id))
     } catch { return false }
   }
   private async hasCapacity(account: SessionView, config: ConversationConfig) {

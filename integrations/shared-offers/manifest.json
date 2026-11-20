@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/Guilherme100A/crm-copy.git",
   "base_sha": "acf78e2da49865afa06fe6a4cee77bcf0e888152",
-  "expected_tree": "c943df12d7c3260538e3b95a6af2e15a9ab092eb",
+  "expected_tree": "ec03300f4ff4a101899f707506fea2bcca5a95c6",
   "sanitization": {
     "excluded_files": [
       "scripts/elevenlabs-account-diagnose.ts",
@@ -28,7 +28,7 @@
     ],
     "reason": "Exclude unrelated operator scripts/private deployment context and audit-only harnesses; replace operational hosts in documentation and URL fixtures with reserved example.test hosts. Original local source preserved.",
     "baseline_tree": "539e4a6dac07e50188e418d0e1a3d669e5f6d687",
-    "final_tree": "c943df12d7c3260538e3b95a6af2e15a9ab092eb"
+    "final_tree": "ec03300f4ff4a101899f707506fea2bcca5a95c6"
   },
   "test_only_changes": [
     {
@@ -599,9 +599,10 @@
     {
       "file": "22-crm-primary-sessions.patch",
       "description": "Open the CRM as the main page, link the complete sessions panel below Settings, and clarify the Flows workspace chooser.",
-      "sha256": "92a36d7dda00e5918f3f3231b1ef36ae1ca9f495c2dcad916151950cd02fd2d0",
-      "bytes": 7245,
+      "sha256": "14ff2910f78b8f01079b445e623d63d2515eb5970ce40c693ecce52af655dddf",
+      "bytes": 8285,
       "files": [
+        "apps/web/src/app/access.unit.test.ts",
         "apps/web/src/app/nav.ts",
         "apps/web/src/app/shell/nav-list.tsx",
         "apps/web/src/features/business-areas/workspace.tsx",

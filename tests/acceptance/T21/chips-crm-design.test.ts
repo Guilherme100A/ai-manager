@@ -8,6 +8,10 @@ describe('T21 — visual de chips alinhado ao CRM', () => {
     const connected = await seedSession(ctx)
     await createSession(ctx, { name: `chip-pendente-${Date.now()}` })
     const page = await openPage(ctx)
+    await page.route('**/api/sessions/*/conversation', (route) => route.fulfill({ json: {
+      config: { mode: 'rotating', enabled: false, targetSessionId: null, topic: 'teste', maxMessagesPerDay: 20, turnsPerConversation: 2, intervalMinutes: 5 },
+      activePartnerId: null, state: { turns: 0, pending: null }, accounts: [],
+    } }))
     await go(ctx, page, '/sessions')
     await page.locator(tid('session-row')).first().waitFor({ state: 'visible' })
 

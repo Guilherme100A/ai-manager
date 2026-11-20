@@ -1,3 +1,16 @@
+diff --git a/apps/web/src/app/access.unit.test.ts b/apps/web/src/app/access.unit.test.ts
+index 78b16c2..5aa0f75 100644
+--- a/apps/web/src/app/access.unit.test.ts
++++ b/apps/web/src/app/access.unit.test.ts
+@@ -21,7 +21,7 @@ const ids = (s: Session) => visibleSections(s).flatMap((sec) => sec.items.map((i
+ 
+ describe('navegação por papel (AC-T23-02)', () => {
+   it('owner, admin e member do seed', () => {
+-    expect(ids(session('owner'))).toEqual(['dashboard', 'chats', 'contacts', 'flows', 'connections', 'inbound-webhooks', 'mass-dispatch', 'facebook', 'settings', 'tutorials'])
++    expect(ids(session('owner'))).toEqual(['dashboard', 'chats', 'contacts', 'flows', 'connections', 'inbound-webhooks', 'mass-dispatch', 'facebook', 'settings', 'wa-session-manager', 'tutorials'])
+     expect(ids(session('admin'))).toEqual(ids(session('owner')))
+     expect(ids(session('member'))).toEqual(['chats', 'contacts', 'flows', 'mass-dispatch', 'settings', 'tutorials'])
+     expect(ids(session('admin', 'platform_admin'))).toContain('admin')
 diff --git a/apps/web/src/app/nav.ts b/apps/web/src/app/nav.ts
 index cc28494..8f49c32 100644
 --- a/apps/web/src/app/nav.ts
