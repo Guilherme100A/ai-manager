@@ -178,6 +178,11 @@ jobs:
           pnpm --filter @crm/api exec vitest run src/routes/meta-profiles src/routes/meta-structure src/routes/meta-entities src/routes/meta-pixels --maxWorkers=2 --reporter=json --outputFile="$CRM_REPORT_DIR/meta-routes.json"
           pnpm --filter @crm/worker test
           git diff --exit-code
+      - name: Verify CRM navigation, chip filter and mass dispatch in separate Playwright browser
+        run: |
+          cd "$RUNNER_TEMP/crm-source"
+          pnpm exec playwright test --config tests/acceptance/playwright.config.ts tests/acceptance/T59/ai-integrations.e2e.ts tests/acceptance/T69/chat-list.e2e.ts tests/acceptance/T83/mass-dispatch.e2e.ts --project=desktop
+          pnpm exec playwright test --config tests/acceptance/playwright.config.ts tests/acceptance/T69/chat-list.e2e.ts --project=mobile --grep 'escolher chip'
       - name: Build immutable Alpine/musl release (never copy runner node_modules)
         run: |
           printf '.git\n**/node_modules\n**/dist\noutput\n.env\ntests/acceptance/T125/operational-ci.test.ts\ntests/acceptance/T125/revisor-gated-ci.test.ts\ntests/acceptance/T125/persistent-login-ci.test.ts\n' > "$RUNNER_TEMP/crm-source/.dockerignore"
