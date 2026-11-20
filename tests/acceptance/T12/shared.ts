@@ -298,7 +298,8 @@ async function gotoHash(page: any, url: string) {
 
 /** Login do painel com usuário/senha (T18 substitui o login por token do AC-T12-01). */
 export async function doLogin(ctx: DCtx, page: any, username = ADMIN_USERNAME, password = ADMIN_PASSWORD) {
-  await gotoHash(page, `${ctx.base}/#/login`)
+  // Os testes deste painel entram no gerenciador explicitamente; o login normal abre o CRM.
+  await gotoHash(page, `${ctx.base}/?return=sessions#/login`)
   await page.locator(tid('login-username')).waitFor({ state: 'visible', timeout: NAV_TIMEOUT })
   await page.locator(tid('login-username')).fill(username)
   await page.locator(tid('login-password')).fill(password)

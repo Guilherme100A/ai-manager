@@ -32,6 +32,9 @@ describe('T21 — visual de chips alinhado ao CRM', () => {
       const page = await openPage(ctx, { ...MOBILE, colorScheme })
       await go(ctx, page, '/sessions')
       await page.locator(tid('page-sessions')).waitFor({ state: 'visible' })
+      const listWidth = await page.evaluate(() => ({ viewport: innerWidth, document: document.documentElement.scrollWidth }))
+      expect(listWidth.document, 'a lista de chips não deve exigir rolagem horizontal').toBeLessThanOrEqual(listWidth.viewport + 1)
+      expect(await page.locator(tid('chip-list')).count()).toBe(1)
       const skin = await page.locator('.layout-chips').evaluate((el: Element) => {
         const style = getComputedStyle(el)
         return { bg: style.getPropertyValue('--bg').trim(), surface: style.getPropertyValue('--surface').trim(), accent: style.getPropertyValue('--accent').trim() }

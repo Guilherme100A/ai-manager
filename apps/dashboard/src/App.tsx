@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect } from 'react'
 import { api } from './lib/api'
 import { Layout } from './components/Layout'
 import { useRoute, useToken } from './lib/hooks'
@@ -9,7 +9,7 @@ import { AutoReply } from './pages/AutoReply'
 import { AiSettingsPage } from './pages/AiSettings'
 import { Contacts } from './pages/Contacts'
 import { Crm } from './pages/Crm'
-import { backRoute, metaProfilesDestination } from './pages/Crm.logic'
+import { metaProfilesDestination } from './pages/Crm.logic'
 import { Groups } from './pages/Groups'
 import { Home } from './pages/Home'
 import { Login } from './pages/Login'
@@ -67,11 +67,10 @@ export function App() {
   const route = useRoute()
   const token = useToken()
   const metaDestination = metaProfilesDestination(window.location.search)
-  // Última página do painel antes de entrar no CRM: destino do "Voltar ao painel".
-  const lastPanelRoute = useRef<Route | null>(null)
+  // A raiz autenticada abre o CRM; as rotas explícitas do gerenciador continuam acessíveis.
   useEffect(() => {
-    if (route.name !== 'crm' && route.name !== 'login') lastPanelRoute.current = route
-  }, [route])
+    if (token && route.name === 'home' && !window.location.hash) navigate({ name: 'crm' })
+  }, [token, route.name])
 
   // Página Proxies removida (AC-T18-03): #/proxies vai para #/sessions.
   useEffect(() => {
@@ -86,7 +85,7 @@ export function App() {
   // Sem token, toda rota vai para o login (AC-T18-01); com token, o login vai para a home.
   useEffect(() => {
     if (!token && route.name !== 'login') navigate({ name: 'login' })
-    else if (token && route.name === 'login') navigate({ name: metaDestination ? 'crm' : 'home' })
+    else if (token && route.name === 'login') navigate({ name: new URLSearchParams(window.location.search).get('return') === 'sessions' && !metaDestination ? 'sessions' : 'crm' })
     else if (token && route.name !== 'crm' && metaDestination) {
       const url = new URL(window.location.href)
       for (const key of ['meta_oauth', 'meta_workspace', 'meta_message']) url.searchParams.delete(key)
@@ -94,9 +93,9 @@ export function App() {
     }
   }, [token, route.name, metaDestination])
 
-  if (!token || route.name === 'login') return <Login returnToCrm={Boolean(metaDestination)} />
+  if (!token || route.name === 'login') return <Login returnToSessions={new URLSearchParams(window.location.search).get('return') === 'sessions' && !metaDestination} />
   // CRM = outra parte do site: tela cheia, sem o menu lateral do painel (a barra do topo leva de volta).
-  if (route.name === 'crm') return <Crm back={backRoute(lastPanelRoute.current)} flowId={route.flowId} metaDestination={metaDestination} />
+  if (route.name === 'crm') return <Crm flowId={route.flowId} metaDestination={metaDestination} />
   return (
     <Layout route={route}>
       <Page route={route} />

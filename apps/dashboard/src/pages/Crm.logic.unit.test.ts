@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { ApiRequestError } from '../lib/api'
 import { parseHash, routeHref } from '../lib/router'
-import { backRoute, crmErrorState, freshCrmUrl, metaProfilesDestination, safeCrmUrl } from './Crm.logic'
+import { backRoute, crmEntryUrl, crmErrorState, freshCrmUrl, metaProfilesDestination, safeCrmUrl } from './Crm.logic'
 
 describe('página CRM', () => {
   it('keeps only the validated OAuth result and workspace on the fixed CRM destination', () => {
@@ -18,6 +18,11 @@ describe('página CRM', () => {
     expect(freshCrmUrl('https://crm.example/auth/sso#token=private', 'three')).toBe('https://crm.example/auth/sso?crm_entry=three#token=private')
     expect(freshCrmUrl('javascript:alert(1)', 'four')).toBeUndefined()
     expect(freshCrmUrl('//example.com', 'five')).toBeUndefined()
+  })
+  it('replaces the tab only at the fixed same-origin CRM SSO entry', () => {
+    expect(crmEntryUrl('/crm/auth/sso#token=private', '/flows')).toMatch(/^\/crm\/auth\/sso\?crm_entry=.*#token=private&redirect=%2Fflows$/)
+    expect(crmEntryUrl('https://elsewhere.example/auth/sso#token=private')).toBeUndefined()
+    expect(crmEntryUrl('/crm/flows#token=private')).toBeUndefined()
   })
   it('rota #/crm', () => {
     expect(parseHash('#/crm')).toEqual({ name: 'crm' })

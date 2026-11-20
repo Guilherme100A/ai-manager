@@ -6,12 +6,12 @@ const key = 'wsm.remembered-session'
 describe('dashboard remembered login', () => {
   const ctx = useDashboard()
   async function signIn(page: any, remember: boolean) {
-    await go(ctx, page, '/login')
+    await page.goto(`${ctx.base}/?return=sessions#/login`)
     await page.getByTestId('login-username').fill(ADMIN_USERNAME)
     await page.getByTestId('login-password').fill(ADMIN_PASSWORD)
     await page.getByTestId('login-remember').setChecked(remember)
     await page.getByTestId('login-submit').click()
-    await page.getByTestId('page-home').waitFor()
+    await page.getByTestId('page-sessions').waitFor()
   }
   it('unchecked stays session-only and reopening requires login', async () => {
     const page = await ctx.newPage({ login: false })
