@@ -6,6 +6,53 @@ import type { ConversationStore } from './store'
 const A = '11111111-1111-4111-8111-111111111111'
 const B = '22222222-2222-4222-8222-222222222222'
 const C = '33333333-3333-4333-8333-333333333333'
+describe('proxy obrigatorio na automacao de conversas', () => {
+  it('exige proxy nas duas pontas ao habilitar, mas permite desligar chip direto', async () => {
+    const source = setup()
+    source.sessions.get(A)!.proxyId = null
+    await expect(source.automation.configure(A, source.config)).rejects.toThrow('proxy ativo nos dois chips')
+    await source.automation.configure(A, { ...source.config, enabled: false })
+    expect(source.configs.get(A)!.enabled).toBe(false)
+
+    const target = setup()
+    target.sessions.get(B)!.proxyId = null
+    await expect(target.automation.configure(A, target.config)).rejects.toThrow('proxy ativo nos dois chips')
+    const pendingRestart = setup()
+    pendingRestart.sessions.get(B)!.requiresRestart = true
+    await expect(pendingRestart.automation.configure(A, pendingRestart.config)).rejects.toThrow('reinício pendente')
+  })
+  it('configuracao antiga nao envia se o proxy de qualquer ponta foi removido', async () => {
+    for (const directId of [A, B]) {
+      const s = setup()
+      s.sessions.get(directId)!.proxyId = null
+      await s.automation.run(A)
+      expect(s.pipeline.send).not.toHaveBeenCalled()
+      expect(s.model.message).not.toHaveBeenCalled()
+    }
+  })
+  it('configuracao antiga nao envia antes do proxy novo ser aplicado', async () => {
+    const s = setup()
+    s.sessions.get(B)!.requiresRestart = true
+    await s.automation.run(A)
+    expect(s.pipeline.send).not.toHaveBeenCalled()
+  })
+  it('nao enfileira se o proxy for removido durante o tempo de digitacao', async () => {
+    const s = setup()
+    const automation = new ConversationAutomation({ ...s.options, sleep: async () => { s.sessions.get(B)!.proxyId = null } })
+    await automation.run(A)
+    expect(s.pipeline.send).not.toHaveBeenCalled()
+    expect(s.states.get(A)!.pending).toBeUndefined()
+  })
+  it('rodizio ignora chip direto mesmo se sua configuracao antiga continua enabled', async () => {
+    const s = setup()
+    for (const id of [A, B, C]) s.configs.set(id, { ...s.config, mode: 'rotating', targetSessionId: null })
+    s.sessions.get(B)!.proxyId = null
+    await s.automation.distribute()
+    expect(s.states.get(A)!.partnerId).toBe(C)
+    expect(s.states.get(B)?.partnerId).toBeUndefined()
+    expect(s.states.get(B)?.ownerId).toBeUndefined()
+  })
+})
 function setup(over: { random?: () => number } = {}) {
   let now = 1_800_000_000_000
   let locked = false
@@ -21,7 +68,7 @@ function setup(over: { random?: () => number } = {}) {
     claim: async () => { if (locked) return undefined; locked = true; return 'lease' },
     renew: vi.fn(async () => true), release: async () => { locked = false },
   }
-  const sessions = new Map([A, B, C].map((id, i) => [id, { id, phone: `+551199999000${i}`, status: 'WARMING' } as SessionView]))
+  const sessions = new Map([A, B, C].map((id, i) => [id, { id, phone: `+551199999000${i}`, status: 'WARMING', proxyId: `proxy-${i}` } as SessionView]))
   const connected = new Set([A, B, C])
   const limits = {
     get: vi.fn(async (_id: string) => ({ effective: { perMinute: 5, perHour: 100, perDay: 20 } })),
@@ -278,7 +325,7 @@ describe('conversas entre duas contas', () => {
   it('com quatro contas, forma dois pares sem sobreposição e troca os parceiros', async () => {
     const s = setup()
     const D = '44444444-4444-4444-8444-444444444444'
-    s.sessions.set(D, { id: D, phone: '+5511999990003', status: 'WARMING' } as SessionView); s.connected.add(D)
+    s.sessions.set(D, { id: D, phone: '+5511999990003', status: 'WARMING', proxyId: 'proxy-3' } as SessionView); s.connected.add(D)
     rotation(s, [A, B, C, D]); await s.automation.distribute()
     expect(s.states.get(A)!.partnerId).toBe(B); expect(s.states.get(C)!.partnerId).toBe(D)
     await finish(s, A); await finish(s, C)

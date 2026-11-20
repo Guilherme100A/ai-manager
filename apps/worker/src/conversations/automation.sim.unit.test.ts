@@ -29,7 +29,7 @@ function world(seed: number, ids = ['A', 'B']) {
   const rand = mulberry32(seed)
   let faults = { ...NO_FAULTS }
   let now = Date.parse('2026-10-03T12:00:00Z')
-  const sessions = new Map(ids.map((id, i) => [id, { id, phone: `+5511999990${i}0`, status: 'WARMING' } as SessionView]))
+  const sessions = new Map(ids.map((id, i) => [id, { id, phone: `+5511999990${i}0`, status: 'WARMING', proxyId: `proxy-${i}` } as SessionView]))
   const connected = new Set(ids)
   const offlineUntil = new Map<string, number>()
   const configs = new Map<string, ConversationConfig>(ids.map((id) => [id, { ...DEFAULT_CONVERSATION_CONFIG, mode: 'rotating', enabled: true, maxMessagesPerDay: 60, intervalMinutes: 5, turnsPerConversation: 6 }]))

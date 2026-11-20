@@ -59,8 +59,8 @@ it('one administrator account supports three simultaneous browser sessions, shar
     for (const enabled of [true, false]) {
       process.env.SHARED_OFFERS_COMPANY_ID = enabled ? company : ''
       const context = await browser.newContext(), page = await context.newPage()
-      await page.goto(base + '/#/login'); await page.getByTestId('login-username').fill(username); await page.getByTestId('login-password').fill(password); await page.getByTestId('login-submit').click(); await page.getByTestId('nav-crm').click()
-      const frame = page.frameLocator('[data-testid="crm-frame"]'); await frame.getByTestId('nav-item-chats').waitFor()
+      await page.goto(base + '/#/login'); await page.getByTestId('login-username').fill(username); await page.getByTestId('login-password').fill(password); await page.getByTestId('login-submit').click()
+      const frame = page; await frame.getByTestId('nav-item-chats').waitFor()
       if (enabled) {
         await frame.getByTestId('nav-item-offers').click(); await frame.getByRole('heading', { name: 'Ofertas compartilhadas' }).waitFor()
         const contexts = [context]
@@ -69,8 +69,8 @@ it('one administrator account supports three simultaneous browser sessions, shar
           const other = await browser.newContext({ viewport: { width: 1280, height: 800 } })
           contexts.push(other)
           const p = await other.newPage()
-          await p.goto(base + '/#/login'); await p.getByTestId('login-username').fill(username); await p.getByTestId('login-password').fill(password); await p.getByTestId('login-submit').click(); await p.getByTestId('nav-crm').click()
-          const f = p.frameLocator('[data-testid="crm-frame"]'); await f.getByTestId('nav-item-offers').click(); await f.getByRole('heading', { name: 'Ofertas compartilhadas' }).waitFor()
+          await p.goto(base + '/#/login'); await p.getByTestId('login-username').fill(username); await p.getByTestId('login-password').fill(password); await p.getByTestId('login-submit').click()
+          const f = p; await f.getByTestId('nav-item-offers').click(); await f.getByRole('heading', { name: 'Ofertas compartilhadas' }).waitFor()
           await p.screenshot({ path: join(process.env.CRM_REPORT_DIR!, `same-account-session-${i + 1}.png`), fullPage: true })
         }
         const profiles = await Promise.all(contexts.map(async c => { const r = await c.request.get(base + '/crm/api/auth/profile'); expect(r.status()).toBe(200); return r.json() }))

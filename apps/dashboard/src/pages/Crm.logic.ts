@@ -50,6 +50,13 @@ export function freshCrmUrl(url: string, nonce = `${Date.now()}-${Math.random().
   return `${path}${path.includes('?') ? '&' : '?'}crm_entry=${encodeURIComponent(nonce)}${fragment}`
 }
 
+/** SSO returned by our API may replace this tab only at the CRM's fixed entry. */
+export function crmEntryUrl(url: string, target?: string): string | undefined {
+  const fresh = freshCrmUrl(url)
+  if (!fresh || !fresh.startsWith('/crm/auth/sso?')) return undefined
+  return target ? `${fresh}&redirect=${encodeURIComponent(target)}` : fresh
+}
+
 /**
  * Para onde o "Voltar ao painel" leva: a última página do painel antes de entrar no CRM (ou o início, quando o CRM foi
  * aberto direto). Nunca volta para o próprio CRM nem para o login.

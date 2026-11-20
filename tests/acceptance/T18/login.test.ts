@@ -14,9 +14,11 @@ describe('T18 — login de administrador', () => {
     await go(ctx, page, '/login')
     await page.locator(tid('login-username')).waitFor({ state: 'visible' })
     await page.locator(tid('login-password')).waitFor({ state: 'visible' })
+    await page.getByRole('heading', { name: 'Bem-vindo de volta' }).waitFor()
     expect(await page.locator(tid('login-password')).getAttribute('type')).toBe('password')
     for (const label of ['Usuário', 'Senha']) expect(await page.getByText(label, { exact: true }).count(), `rótulo ${label}`).toBeGreaterThan(0)
     expect(await page.locator(tid('login-token')).count(), 'campo antigo de API token').toBe(0)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true)
   })
 
   it('AC-T18-01 login admin/nimda chama POST /api/auth/login e guarda o token só em memória/sessionStorage', async () => {
@@ -64,7 +66,7 @@ describe('T18 — login de administrador', () => {
     expect(t === null || t === '').toBe(true)
   })
 
-  it('returns from real panel login to the embedded CRM Meta destination', async () => {
+  it('opens the CRM as the main page and keeps the validated Meta destination', async () => {
     const page = await ctx.newPage({ login: false })
     const area = '11111111-2222-4333-8444-555555555555'
     await page.route('**/api/crm/sso', (route) => route.fulfill({ json: { url: '/crm/auth/sso#token=fixture' } }))
@@ -73,12 +75,26 @@ describe('T18 — login de administrador', () => {
     await page.locator(tid('login-username')).fill(ADMIN_USERNAME)
     await page.locator(tid('login-password')).fill(ADMIN_PASSWORD)
     await page.locator(tid('login-submit')).click()
-    await page.locator(tid('crm-topbar')).waitFor()
-    const src = await page.locator(tid('crm-frame')).getAttribute('src')
-    const url = new URL(src!, ctx.base)
+    await page.getByText('CRM fixture').waitFor()
+    const url = new URL(page.url())
+    expect(url.pathname).toBe('/crm/auth/sso')
+    expect(await page.locator(tid('crm-frame')).count()).toBe(0)
     const fragment = new URLSearchParams(url.hash.slice(1))
     expect(fragment.get('redirect')).toBe('/facebook/profiles?meta_oauth=success&meta_workspace=' + area)
     expect(url.searchParams.has('token')).toBe(false)
+  })
+
+  it('normal login opens the CRM in the same tab without an iframe', async () => {
+    const page = await ctx.newPage({ login: false })
+    await page.route('**/api/crm/sso', (route) => route.fulfill({ json: { url: '/crm/auth/sso#token=fixture' } }))
+    await page.route('**/crm/auth/sso?*', (route) => route.fulfill({ contentType: 'text/html', body: '<p>CRM principal</p>' }))
+    await page.goto(ctx.base + '/#/login')
+    await page.locator(tid('login-username')).fill(ADMIN_USERNAME)
+    await page.locator(tid('login-password')).fill(ADMIN_PASSWORD)
+    await page.locator(tid('login-submit')).click()
+    await page.getByText('CRM principal').waitFor()
+    expect(new URL(page.url()).pathname).toBe('/crm/auth/sso')
+    expect(await page.locator(tid('crm-frame')).count()).toBe(0)
   })
 
   it('AC-T18-01 sem token, as rotas voltam ao login', async () => {

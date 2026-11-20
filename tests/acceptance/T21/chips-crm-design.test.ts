@@ -8,6 +8,10 @@ describe('T21 — visual de chips alinhado ao CRM', () => {
     const connected = await seedSession(ctx)
     await createSession(ctx, { name: `chip-pendente-${Date.now()}` })
     const page = await openPage(ctx)
+    await page.route('**/api/sessions/*/conversation', (route) => route.fulfill({ json: {
+      config: { mode: 'rotating', enabled: false, targetSessionId: null, topic: 'teste', maxMessagesPerDay: 20, turnsPerConversation: 2, intervalMinutes: 5 },
+      activePartnerId: null, state: { turns: 0, pending: null }, accounts: [],
+    } }))
     await go(ctx, page, '/sessions')
     await page.locator(tid('session-row')).first().waitFor({ state: 'visible' })
 
@@ -23,8 +27,10 @@ describe('T21 — visual de chips alinhado ao CRM', () => {
     expect(await row.locator(tid('session-delete')).isVisible()).toBe(true)
     await row.locator(tid('session-link')).click()
     await page.locator(tid('session-card')).waitFor({ state: 'visible' })
-    expect(await page.locator(tid('session-proxy-panel')).isVisible()).toBe(true)
+    await page.locator(tid('session-proxy-panel')).waitFor({ state: 'visible' })
     expect(await page.locator(tid('btn-logs')).isVisible()).toBe(true)
+    expect(await page.getByLabel('Ativar conversas nesta conta').isDisabled()).toBe(true)
+    expect(await page.getByText('Este chip usa conexão direta.', { exact: false }).isVisible()).toBe(true)
   })
 
   it('usa a paleta do CRM em claro e escuro; cadastro continua acessível no celular', async () => {
@@ -32,6 +38,9 @@ describe('T21 — visual de chips alinhado ao CRM', () => {
       const page = await openPage(ctx, { ...MOBILE, colorScheme })
       await go(ctx, page, '/sessions')
       await page.locator(tid('page-sessions')).waitFor({ state: 'visible' })
+      const listWidth = await page.evaluate(() => ({ viewport: innerWidth, document: document.documentElement.scrollWidth }))
+      expect(listWidth.document, 'a lista de chips não deve exigir rolagem horizontal').toBeLessThanOrEqual(listWidth.viewport + 1)
+      expect(await page.locator(tid('chip-list')).count()).toBe(1)
       const skin = await page.locator('.layout-chips').evaluate((el: Element) => {
         const style = getComputedStyle(el)
         return { bg: style.getPropertyValue('--bg').trim(), surface: style.getPropertyValue('--surface').trim(), accent: style.getPropertyValue('--accent').trim() }

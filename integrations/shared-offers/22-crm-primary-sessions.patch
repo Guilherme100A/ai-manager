@@ -1,0 +1,133 @@
+diff --git a/apps/web/src/app/access.unit.test.ts b/apps/web/src/app/access.unit.test.ts
+index 78b16c2..5aa0f75 100644
+--- a/apps/web/src/app/access.unit.test.ts
++++ b/apps/web/src/app/access.unit.test.ts
+@@ -21,7 +21,7 @@ const ids = (s: Session) => visibleSections(s).flatMap((sec) => sec.items.map((i
+ 
+ describe('navegação por papel (AC-T23-02)', () => {
+   it('owner, admin e member do seed', () => {
+-    expect(ids(session('owner'))).toEqual(['dashboard', 'chats', 'contacts', 'flows', 'connections', 'inbound-webhooks', 'mass-dispatch', 'facebook', 'settings', 'tutorials'])
++    expect(ids(session('owner'))).toEqual(['dashboard', 'chats', 'contacts', 'flows', 'connections', 'inbound-webhooks', 'mass-dispatch', 'facebook', 'settings', 'wa-session-manager', 'tutorials'])
+     expect(ids(session('admin'))).toEqual(ids(session('owner')))
+     expect(ids(session('member'))).toEqual(['chats', 'contacts', 'flows', 'mass-dispatch', 'settings', 'tutorials'])
+     expect(ids(session('admin', 'platform_admin'))).toContain('admin')
+diff --git a/apps/web/src/app/nav.ts b/apps/web/src/app/nav.ts
+index cc28494..8f49c32 100644
+--- a/apps/web/src/app/nav.ts
++++ b/apps/web/src/app/nav.ts
+@@ -27,6 +27,8 @@ export interface NavItem {
+   /** Rota interna; ou `href` externo (abre em nova aba). */
+   to?: string
+   href?: string
++  /** Links de produto podem substituir a página atual; tutoriais continuam em nova aba. */
++  target?: '_top' | '_blank'
+   permissions?: readonly string[]
+   /** Só para `system_role === 'platform_admin'`. */
+   platformAdminOnly?: boolean
+@@ -70,6 +72,7 @@ export const NAV_SECTIONS: NavSection[] = [
+     items: [
+       // Cobranças fora de escopo (SPEC 8): sem item de billing.
+       { id: 'settings', labelKey: 'nav.items.settings', icon: Settings, to: '/settings', permissions: ['settings.view'] },
++      { id: 'wa-session-manager', labelKey: 'pages.waSessions', icon: Cable, href: '/?return=sessions#/sessions', target: '_top', permissions: ['connections.view'] },
+       { id: 'admin', labelKey: 'nav.items.admin', icon: ShieldCheck, to: '/admin', platformAdminOnly: true },
+       { id: 'tutorials', labelKey: 'nav.items.tutorials', icon: ExternalLink, href: TUTORIALS_URL },
+     ],
+diff --git a/apps/web/src/app/shell/nav-list.tsx b/apps/web/src/app/shell/nav-list.tsx
+index 1531831..8ab345d 100644
+--- a/apps/web/src/app/shell/nav-list.tsx
++++ b/apps/web/src/app/shell/nav-list.tsx
+@@ -57,8 +57,8 @@ export function NavList({ session, collapsed = false, onNavigate }: { session: S
+                 <a
+                   key={item.id}
+                   href={item.href}
+-                  target="_blank"
+-                  rel={TUTORIALS_LINK_REL}
++                  target={item.target ?? '_blank'}
++                  rel={item.target === '_top' ? undefined : TUTORIALS_LINK_REL}
+                   data-testid={`nav-item-${item.id}`}
+                   title={collapsed ? label(item) : undefined}
+                   className={itemClass(false)}
+diff --git a/apps/web/src/features/business-areas/workspace.tsx b/apps/web/src/features/business-areas/workspace.tsx
+index 35efc57..2156c3c 100644
+--- a/apps/web/src/features/business-areas/workspace.tsx
++++ b/apps/web/src/features/business-areas/workspace.tsx
+@@ -84,8 +84,8 @@ export function WorkspaceBoundary({ session, children }: { session: Session; chi
+       <section className="mx-auto max-w-5xl py-6 lg:py-12" data-testid="workspace-entry" aria-labelledby="workspace-entry-heading">
+         <div className="mb-7 flex items-start justify-between gap-4">
+           <div>
+-            <h1 id="workspace-entry-heading" className="text-3xl font-semibold tracking-tight">Escolher workspace</h1>
+-            <p className="mt-2 text-muted-foreground">Entre no espaço onde quer trabalhar nesta sessão.</p>
++            <h1 id="workspace-entry-heading" className="text-3xl font-semibold tracking-tight">{stripAppBase(pathname) === '/flows' ? 'Escolha onde estão seus fluxos' : 'Escolher workspace'}</h1>
++            <p className="mt-2 text-muted-foreground">{stripAppBase(pathname) === '/flows' ? 'Selecione Admin 1, 2 ou 3 para abrir os fluxos desse workspace; Geral reúne os anteriores.' : 'Entre no espaço onde quer trabalhar nesta sessão.'}</p>
+           </div>
+           {choosing && hasWorkspace && <button type="button" className="rounded-md border px-3 py-2 text-sm" onClick={() => { setError(''); setChoosing(false) }}>Voltar</button>}
+         </div>
+diff --git a/apps/web/src/features/settings/tabs.ts b/apps/web/src/features/settings/tabs.ts
+index 5f75029..2e2d45e 100644
+--- a/apps/web/src/features/settings/tabs.ts
++++ b/apps/web/src/features/settings/tabs.ts
+@@ -36,7 +36,6 @@ export const SETTINGS_TABS: SettingsTab[] = [
+   { id: 'team', labelKey: 'settings-team:tab', group: 'account', permissions: ['team.view'], load: () => import('@/features/settings-team/tab') },
+   { id: 'platform_invitations', labelKey: 'settings-invitations:tab', group: 'account', permissions: ['settings.platform_invitations.view'], load: () => import('@/features/settings-invitations/tab') },
+   { id: 'support_access', labelKey: 'settings-support:tab', group: 'account', roles: ['owner', 'admin'], hiddenForSupport: true, load: () => import('@/features/settings-support/tab') },
+-  { id: 'wa_sessions', labelKey: 'shell:pages.waSessions', group: 'integrations', permissions: ['connections.view'], load: () => import('@/features/settings-wa-sessions/tab') },
+   // T94: credenciais do servidor MCP (09 §2).
+   { id: 'mcp_credentials', labelKey: 'settings-mcp:tab', group: 'integrations', permissions: ['settings.mcp.view'], load: () => import('@/features/settings-mcp/mcp-tab') },
+   // T58: conteúdo (17 §2.1); modelos internos usam o id `message_templates`.
+diff --git a/tests/acceptance/T125/business-areas.test.ts b/tests/acceptance/T125/business-areas.test.ts
+index a168719..ce40699 100644
+--- a/tests/acceptance/T125/business-areas.test.ts
++++ b/tests/acceptance/T125/business-areas.test.ts
+@@ -371,13 +371,17 @@ it('desktop/mobile navigation selects the actual business area, filters offers a
+     try {
+       await context.addCookies([{name:'crm_session',value:t.token,url:base,httpOnly:true,sameSite:'Lax'}])
+       const page=await context.newPage(),errors:string[]=[];page.on('pageerror',e=>errors.push(e.message))
+-      await page.goto(base+'/crm/offers')
++      await page.goto(base+'/crm/flows')
+       await page.getByTestId('workspace-entry').waitFor()
++      expect(await page.getByRole('heading',{name:'Escolha onde estão seus fluxos'}).isVisible()).toBe(true)
+       expect(await page.getByRole('heading',{name:'Ofertas compartilhadas'}).count()).toBe(0)
+       await page.getByTestId('workspace-enter-1').click()
+       await page.getByTestId('workspace-current').waitFor()
+       await page.getByTestId('page-flows').waitFor()
+       expect(new URL(page.url()).pathname).toBe('/crm/flows')
++      await page.reload()
++      expect(await page.getByTestId('workspace-current').textContent()).toContain('Admin 1')
++      await page.getByTestId('page-flows').waitFor()
+       expect(await page.getByTestId('nav-item-offers').count()).toBe(0)
+       await page.getByTestId('flows-search').fill(privateFlow.name)
+       await page.getByTestId('flows-item-menu-'+privateFlow.id).click()
+diff --git a/tests/acceptance/T59/ai-integrations.e2e.ts b/tests/acceptance/T59/ai-integrations.e2e.ts
+index 974b266..86665fa 100644
+--- a/tests/acceptance/T59/ai-integrations.e2e.ts
++++ b/tests/acceptance/T59/ai-integrations.e2e.ts
+@@ -5,7 +5,7 @@
+ // ("Entrega do operário"). Carteira e cotas pela API da plataforma (platform@demo.test); uso de IA não tem rota de
+ // carga: page.route em /api/ai/usage e /api/ai/usage/summary. Só desktop (nenhum AC cita mobile).
+ import { expect, test, type APIRequestContext, type Page, type Request } from '@playwright/test'
+-import { loginAs, resetSeed, SEED_PASSWORD, SEED_USERS } from '../helpers/e2e'
++import { isMobile, loginAs, resetSeed, SEED_PASSWORD, SEED_USERS } from '../helpers/e2e'
+ import { XRW } from '../helpers/chats-e2e'
+ 
+ test.beforeEach(async ({ request }) => {
+@@ -115,11 +115,16 @@ test.describe('T59 — navegação sem saldo de IA', () => {
+     await expect(page).toHaveURL(/\/flows$/)
+   })
+ 
+-  test('sessões ficam em Configurações e Agentes de IA sai do menu', async ({ page }) => {
++  test('o gerenciador completo fica abaixo de Configurações e abre na mesma aba', async ({ page }) => {
+     await loginAs(page, 'owner')
+-    await page.goto('/settings?tab=wa_sessions')
+-    await expect(page.getByTestId('settings-wa-sessions')).toBeVisible()
+-    await expect(page.getByTestId('open-wa-sessions')).toHaveAttribute('href', '/#/sessions')
++    await page.goto('/settings')
++    if (isMobile(page)) await page.getByTestId('shell-drawer-open').click()
++    const manager = page.getByTestId('nav-item-wa-session-manager')
++    await expect(manager).toHaveAttribute('href', '/?return=sessions#/sessions')
++    await expect(manager).toHaveAttribute('target', '_top')
++    await expect(page.getByTestId('settings-tab-wa_sessions')).toHaveCount(0)
++    const order = await page.locator('[data-testid^="nav-item-"]').evaluateAll(items => items.map(item => item.getAttribute('data-testid')))
++    expect(order.indexOf('nav-item-wa-session-manager')).toBe(order.indexOf('nav-item-settings') + 1)
+     await expect(page.getByTestId('nav-item-agents')).toHaveCount(0)
+   })
+ 
