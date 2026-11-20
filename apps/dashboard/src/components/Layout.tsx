@@ -6,7 +6,7 @@ import { IconBell, IconBriefcase, IconClose, IconGroups, IconHome, IconLogout, I
 
 const LINKS: Array<{ route: Route['name']; href: string; label: string; testId: string; icon: () => ReactNode }> = [
   { route: 'home', href: '#/', label: 'Início', testId: 'nav-home', icon: IconHome },
-  { route: 'sessions', href: '#/sessions', label: 'Sessões', testId: 'nav-sessions', icon: IconPhone },
+  { route: 'sessions', href: '#/sessions', label: 'Chips', testId: 'nav-sessions', icon: IconPhone },
   { route: 'session-links', href: '#/session-links', label: 'Vínculos de sessões', testId: 'nav-session-links', icon: IconPhone },
   { route: 'contacts', href: '#/contacts', label: 'Contatos', testId: 'nav-contacts', icon: IconUsers },
   { route: 'groups', href: '#/groups', label: 'Grupos', testId: 'nav-groups', icon: IconGroups },
@@ -36,7 +36,7 @@ export function Layout({ route, children }: { route: Route; children: ReactNode 
   useEffect(() => setOpen(false), [route])
 
   return (
-    <div className="layout">
+    <div className={active === 'sessions' ? 'layout layout-chips' : 'layout'}>
       <aside className="sidebar" data-open={open ? 'true' : 'false'}>
         <div className="sidebar-head">
           <a className="brand" href="#/">

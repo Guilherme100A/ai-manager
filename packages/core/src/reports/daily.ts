@@ -96,11 +96,17 @@ export async function buildDailyReport(db: Database, opts: DailyReportOptions = 
     select id, name, phone, status, proxy_id, warmup_started_at, last_connected_at from sessions order by created_at`)).rows as Array<Record<string, unknown>>
 
   const msgRows = (await db.execute(sql`
-    select ${day('created_at')} as day, session_id,
-      count(*) filter (where direction = 'outbound' and status in ('sent', 'delivered', 'read')) as sent,
-      count(*) filter (where status = 'failed') as failed,
-      count(*) filter (where direction = 'inbound') as received
-    from messages where created_at > ${since} group by 1, 2`)).rows as Array<Record<string, unknown>>
+    select day, session_id, sum(sent) as sent, sum(failed) as failed, sum(received) as received from (
+      select ${day('sent_at')} as day, session_id, count(*) as sent, 0::bigint as failed, 0::bigint as received
+      from messages where direction = 'outbound' and status in ('sent', 'delivered', 'read') and sent_at > ${since}
+      group by 1, 2
+      union all
+      select ${day('created_at')} as day, session_id, 0::bigint as sent,
+        count(*) filter (where status = 'failed') as failed,
+        count(*) filter (where direction = 'inbound') as received
+      from messages where created_at > ${since} and (status = 'failed' or direction = 'inbound')
+      group by 1, 2
+    ) message_days group by day, session_id`)).rows as Array<Record<string, unknown>>
 
   const evRows = (await db.execute(sql`
     select ${day('created_at')} as day, session_id, type,

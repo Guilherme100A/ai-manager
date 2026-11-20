@@ -110,13 +110,15 @@ export function NewSession() {
   }
 
   return (
-    <div data-testid="page-new-session">
-      <PageHeader title="Adicionar número" subtitle="Cadastre o número e o proxy e autentique por QR Code ou pairing code.">
+    <div className="chip-workspace" data-testid="page-new-session">
+      <nav className="chip-breadcrumb" aria-label="Caminho"><a href={routeHref({ name: 'sessions' })}>Chips</a><span aria-hidden="true">/</span><span>Adicionar número</span></nav>
+      <PageHeader title="Adicionar chip" subtitle="Configure a conexão e depois escaneie o QR Code ou use um código de pareamento.">
         <a className="button secondary-link" href={routeHref({ name: 'sessions' })}>
           Voltar
         </a>
       </PageHeader>
-      <form className="panel form" onSubmit={(e) => start(e, 'qr')}>
+      <form className="panel form chip-onboarding" onSubmit={(e) => start(e, 'qr')}>
+        <h2>Dados do chip</h2>
         <label htmlFor="new-name">Nome</label>
         <input id="new-name" data-testid="new-name" value={name} onChange={(e) => setName(e.target.value)} disabled={!!session} required />
         <label htmlFor="new-phone">Número</label>
@@ -132,6 +134,7 @@ export function NewSession() {
         <p className="hint" id="new-phone-hint">
           Opcional no QR Code: o número é preenchido sozinho quando o WhatsApp conecta. Obrigatório só para o pairing code.
         </p>
+        <h2>Conexão</h2>
         <label className="check direct-connection" htmlFor="new-direct-connection">
           <input
             id="new-direct-connection"
@@ -156,7 +159,7 @@ export function NewSession() {
         ) : null}
         <label htmlFor="new-note">Observação</label>
         <textarea id="new-note" data-testid="new-note" value={note} onChange={(e) => setNote(e.target.value)} disabled={!!session} />
-        <div className="actions">
+        <div className="actions chip-onboarding-actions">
           <button type="submit" data-testid="gen-qr" disabled={busy || connected}>
             Gerar QR Code
           </button>

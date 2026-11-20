@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/Guilherme100A/crm-copy.git",
   "base_sha": "acf78e2da49865afa06fe6a4cee77bcf0e888152",
-  "expected_tree": "5d4d9a5897bf1ae6a4014a6ab892ff35709bf7b9",
+  "expected_tree": "3eb4600919b335eb7f919e1e5fb4e8df0fe5d877",
   "sanitization": {
     "excluded_files": [
       "scripts/elevenlabs-account-diagnose.ts",
@@ -28,7 +28,7 @@
     ],
     "reason": "Exclude unrelated operator scripts/private deployment context and audit-only harnesses; replace operational hosts in documentation and URL fixtures with reserved example.test hosts. Original local source preserved.",
     "baseline_tree": "539e4a6dac07e50188e418d0e1a3d669e5f6d687",
-    "final_tree": "5d4d9a5897bf1ae6a4014a6ab892ff35709bf7b9"
+    "final_tree": "3eb4600919b335eb7f919e1e5fb4e8df0fe5d877"
   },
   "test_only_changes": [
     {
@@ -523,6 +523,22 @@
         "packages/core/src/meta-ads/profiles/service.ts",
         "tests/acceptance/T125/business-areas.test.ts",
         "tests/acceptance/T125/setup.ts"
+      ]
+    },
+    {
+      "file": "18-flow-workspace-commercial.patch",
+      "description": "Open each workspace in Flows and configure payment, ads, pixel and results on the owned flow; preserve historical offers and require explicit chip opt-in.",
+      "sha256": "4ff8d6722d44deaa06ee8ad9a8b1dac203923b989d0bdebd004646ee874f1463",
+      "bytes": 48463,
+      "files": [
+        "apps/api/src/routes/offers/index.ts",
+        "apps/web/src/app/access.ts",
+        "apps/web/src/features/business-areas/workspace.tsx",
+        "apps/web/src/features/flow-editor/canvas/editor.tsx",
+        "apps/web/src/features/flows/commercial-dialog.tsx",
+        "apps/web/src/features/flows/flows-page.tsx",
+        "packages/core/src/offers/service.ts",
+        "tests/acceptance/T125/business-areas.test.ts"
       ]
     }
   ],

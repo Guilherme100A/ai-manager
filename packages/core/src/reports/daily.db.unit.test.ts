@@ -38,8 +38,9 @@ async function chip(name: string, proxyId?: string) {
     warmupStartedAt: at('2026-10-05T19:00:00Z'), ...(proxyId ? { proxyId } : {}) }).returning()
   return s!
 }
-const msg = (sessionId: string, status: 'delivered' | 'failed' | 'queued', createdAt: Date, direction: 'outbound' | 'inbound' = 'outbound') =>
-  db.insert(messages).values({ sessionId, phone: '+5531900000000', content: { text: 'x' }, status, direction, createdAt })
+const msg = (sessionId: string, status: 'delivered' | 'failed' | 'queued', createdAt: Date, direction: 'outbound' | 'inbound' = 'outbound', sentAt = createdAt) =>
+  db.insert(messages).values({ sessionId, phone: '+5531900000000', content: { text: 'x' }, status, direction, createdAt,
+    ...(status === 'delivered' && direction === 'outbound' ? { sentAt } : {}) })
 const ev = (sessionId: string, type: string, createdAt: Date, detail: Record<string, unknown> | null = null) =>
   db.insert(healthEvents).values({ sessionId, type, detail, createdAt })
 const audit = (action: string, targetId: string, detail: Record<string, unknown>, createdAt: Date) =>
@@ -116,5 +117,14 @@ describe('relatório diário', () => {
     expect(r.days).toEqual(['2026-10-07'])
     expect(r.rows).toEqual([])
     expect(r.chips).toHaveLength(1)
+  })
+
+  it('atribui envio ao dia em que saiu, mesmo quando a fila foi criada no dia anterior', async () => {
+    const a = await chip('chip A')
+    await msg(a.id, 'delivered', at('2026-10-06T22:55:00Z'), 'outbound', at('2026-10-07T03:05:00Z'))
+    await msg(a.id, 'delivered', at('2026-10-06T22:56:00Z'), 'inbound')
+    const report = await buildDailyReport(db, { days: 2, now: () => NOW })
+    expect(report.rows.find((row) => row.sessionId === a.id && row.day === '2026-10-07')).toMatchObject({ sent: 1, received: 0 })
+    expect(report.rows.find((row) => row.sessionId === a.id && row.day === '2026-10-06')).toMatchObject({ sent: 0, received: 1 })
   })
 })
