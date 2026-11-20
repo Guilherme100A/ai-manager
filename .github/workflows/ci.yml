@@ -45,6 +45,7 @@ jobs:
           tests/acceptance/T12/sessions.test.ts
           tests/acceptance/T18/new-session.test.ts
           tests/acceptance/T12/auth.test.ts
+          tests/acceptance/T12/privacy-policy.test.ts
           tests/acceptance/T18/login.test.ts
           tests/acceptance/T18/persistent-login.test.ts
           --reporter=json --outputFile=qr-ui-results.json
