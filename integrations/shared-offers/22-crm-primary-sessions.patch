@@ -75,16 +75,18 @@ index 5f75029..2e2d45e 100644
    { id: 'mcp_credentials', labelKey: 'settings-mcp:tab', group: 'integrations', permissions: ['settings.mcp.view'], load: () => import('@/features/settings-mcp/mcp-tab') },
    // T58: conteúdo (17 §2.1); modelos internos usam o id `message_templates`.
 diff --git a/tests/acceptance/T59/ai-integrations.e2e.ts b/tests/acceptance/T59/ai-integrations.e2e.ts
-index 974b266..378eda7 100644
+index 974b266..20f1467 100644
 --- a/tests/acceptance/T59/ai-integrations.e2e.ts
 +++ b/tests/acceptance/T59/ai-integrations.e2e.ts
-@@ -104,6 +104,19 @@ async function mockUsage(page: Page) {
+@@ -104,6 +104,21 @@ async function mockUsage(page: Page) {
  
  // =================================================================================================== AC-T59-01
  test.describe('T59 — navegação sem saldo de IA', () => {
 +  test('Fluxos pede o workspace uma vez e mantém a seleção na mesma aba', async ({ page }) => {
 +    await loginAs(page, 'owner')
-+    await api(page, 'post', '/api/business-areas/initialize')
++    await page.route('**/api/business-areas', route => route.fulfill({ json: { items: [1, 2, 3].map(slot => ({
++      id: `00000000-0000-4000-8000-00000000000${slot}`, slot, name: `Admin ${slot}`, bm_id: null,
++    })) } }))
 +    await page.goto('/flows')
 +    await expect(page.getByTestId('workspace-entry')).toBeVisible()
 +    await expect(page.getByRole('heading', { name: 'Escolha onde estão seus fluxos' })).toBeVisible()
@@ -98,7 +100,7 @@ index 974b266..378eda7 100644
    test('Kanban sai do menu e links antigos levam a Fluxos sem apagar dados', async ({ page }) => {
      await loginAs(page, 'owner')
      await page.goto('/chats')
-@@ -115,11 +128,15 @@ test.describe('T59 — navegação sem saldo de IA', () => {
+@@ -115,11 +130,15 @@ test.describe('T59 — navegação sem saldo de IA', () => {
      await expect(page).toHaveURL(/\/flows$/)
    })
  
