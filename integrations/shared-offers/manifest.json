@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/Guilherme100A/crm-copy.git",
   "base_sha": "acf78e2da49865afa06fe6a4cee77bcf0e888152",
-  "expected_tree": "5d4d9a5897bf1ae6a4014a6ab892ff35709bf7b9",
+  "expected_tree": "8d43f8aa65e4907c3af76975360199b64c38f5d8",
   "sanitization": {
     "excluded_files": [
       "scripts/elevenlabs-account-diagnose.ts",
@@ -28,7 +28,7 @@
     ],
     "reason": "Exclude unrelated operator scripts/private deployment context and audit-only harnesses; replace operational hosts in documentation and URL fixtures with reserved example.test hosts. Original local source preserved.",
     "baseline_tree": "539e4a6dac07e50188e418d0e1a3d669e5f6d687",
-    "final_tree": "5d4d9a5897bf1ae6a4014a6ab892ff35709bf7b9"
+    "final_tree": "8d43f8aa65e4907c3af76975360199b64c38f5d8"
   },
   "test_only_changes": [
     {
@@ -523,6 +523,77 @@
         "packages/core/src/meta-ads/profiles/service.ts",
         "tests/acceptance/T125/business-areas.test.ts",
         "tests/acceptance/T125/setup.ts"
+      ]
+    },
+    {
+      "file": "18-flow-workspace-commercial.patch",
+      "description": "Open each workspace in Flows and configure payment, ads, pixel and results on the owned flow; preserve historical offers and require explicit chip opt-in.",
+      "sha256": "bcb7d9c03f3934e6e41e0a3c223c0aaf3aaa0ac009459667a16fea3f669aa202",
+      "bytes": 48592,
+      "files": [
+        "apps/api/src/routes/offers/index.ts",
+        "apps/web/src/app/access.ts",
+        "apps/web/src/features/business-areas/workspace.tsx",
+        "apps/web/src/features/flow-editor/canvas/editor.tsx",
+        "apps/web/src/features/flows/commercial-dialog.tsx",
+        "apps/web/src/features/flows/flows-page.tsx",
+        "packages/core/src/offers/service.ts",
+        "tests/acceptance/T125/business-areas.test.ts"
+      ]
+    },
+    {
+      "file": "19-crm-navigation-and-targeting.patch",
+      "description": "Move WhatsApp sessions under Settings, hide unused sidebar items, choose chat chip and mass-dispatch chip/audience explicitly, and clarify connection status layout.",
+      "sha256": "d5e47ef17d88fbd577856f4dc57aa665ac60f60ba1bb36b0d68aacd75d3ee14f",
+      "bytes": 37028,
+      "files": [
+        "apps/web/src/app/nav.ts",
+        "apps/web/src/app/shell/app-shell.tsx",
+        "apps/web/src/features/chat-list/chat-list-panel.tsx",
+        "apps/web/src/features/connections/page.tsx",
+        "apps/web/src/features/mass-dispatch/logic.ts",
+        "apps/web/src/features/mass-dispatch/mass-dispatch.unit.test.ts",
+        "apps/web/src/features/mass-dispatch/wizard.tsx",
+        "apps/web/src/features/settings-wa-sessions/tab.tsx",
+        "apps/web/src/features/settings/tabs.ts",
+        "apps/web/src/i18n/en/chat-list.json",
+        "apps/web/src/i18n/en/connections.json",
+        "apps/web/src/i18n/en/mass-dispatch.json",
+        "apps/web/src/i18n/en/shell.json",
+        "apps/web/src/i18n/es/chat-list.json",
+        "apps/web/src/i18n/es/connections.json",
+        "apps/web/src/i18n/es/mass-dispatch.json",
+        "apps/web/src/i18n/es/shell.json",
+        "apps/web/src/i18n/pt-BR/chat-list.json",
+        "apps/web/src/i18n/pt-BR/connections.json",
+        "apps/web/src/i18n/pt-BR/mass-dispatch.json",
+        "apps/web/src/i18n/pt-BR/shell.json",
+        "tests/acceptance/T59/ai-integrations.e2e.ts",
+        "tests/acceptance/T69/chat-list.e2e.ts",
+        "tests/acceptance/T83/mass-dispatch.e2e.ts"
+      ]
+    },
+    {
+      "file": "20-mobile-chat-chip-test.patch",
+      "description": "Exercise chip selection from the mobile chat list and verify it persists after opening and leaving a conversation.",
+      "sha256": "da07779620c9da60aa79a192ad63fdde8bbc452df1c396dd8fb85b14f062c823",
+      "bytes": 1514,
+      "files": [
+        "tests/acceptance/T69/chat-list.e2e.ts"
+      ]
+    },
+    {
+      "file": "21-remove-kanban-board-ui.patch",
+      "description": "Remove the Kanban board from desktop and mobile navigation, redirect old board URLs to Flows, preserve existing data and backend behavior.",
+      "sha256": "948e469158f304b119910c637108f3a926af11b8f3e8aa1597468f329b2687e4",
+      "bytes": 9278,
+      "files": [
+        "apps/web/src/app/access.unit.test.ts",
+        "apps/web/src/app/nav.ts",
+        "apps/web/src/routes/crms/$crmId.tsx",
+        "apps/web/src/routes/crms/index.tsx",
+        "tests/acceptance/T23/shell.e2e.ts",
+        "tests/acceptance/T59/ai-integrations.e2e.ts"
       ]
     }
   ],

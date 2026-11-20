@@ -1,0 +1,165 @@
+diff --git a/apps/web/src/app/access.unit.test.ts b/apps/web/src/app/access.unit.test.ts
+index a3e3e2f..78b16c2 100644
+--- a/apps/web/src/app/access.unit.test.ts
++++ b/apps/web/src/app/access.unit.test.ts
+@@ -21,16 +21,16 @@ const ids = (s: Session) => visibleSections(s).flatMap((sec) => sec.items.map((i
+ 
+ describe('navegação por papel (AC-T23-02)', () => {
+   it('owner, admin e member do seed', () => {
+-    expect(ids(session('owner'))).toEqual(['dashboard', 'chats', 'kanban', 'contacts', 'flows', 'agents', 'connections', 'inbound-webhooks', 'mass-dispatch', 'facebook', 'settings', 'tutorials'])
++    expect(ids(session('owner'))).toEqual(['dashboard', 'chats', 'contacts', 'flows', 'connections', 'inbound-webhooks', 'mass-dispatch', 'facebook', 'settings', 'tutorials'])
+     expect(ids(session('admin'))).toEqual(ids(session('owner')))
+-    expect(ids(session('member'))).toEqual(['chats', 'kanban', 'contacts', 'flows', 'agents', 'mass-dispatch', 'settings', 'tutorials'])
++    expect(ids(session('member'))).toEqual(['chats', 'contacts', 'flows', 'mass-dispatch', 'settings', 'tutorials'])
+     expect(ids(session('admin', 'platform_admin'))).toContain('admin')
+     expect(ids(session('member', 'support'))).toEqual(['support-access'])
+   })
+ 
+   it('barra inferior e home', () => {
+-    expect(visibleBottomNav(session('member')).map((i) => i.id)).toEqual(['chats', 'kanban', 'flows'])
+-    expect(visibleBottomNav(session('owner')).map((i) => i.id)).toEqual(['home', 'chats', 'kanban', 'flows'])
++    expect(visibleBottomNav(session('member')).map((i) => i.id)).toEqual(['chats', 'flows'])
++    expect(visibleBottomNav(session('owner')).map((i) => i.id)).toEqual(['home', 'chats', 'flows'])
+     expect(homeOf(session('owner'))).toBe('/welcome')
+     expect(homeOf(session('member'))).toBe('/chats')
+     expect(homeOf(session('member', 'support'))).toBe('/support/access')
+diff --git a/apps/web/src/app/nav.ts b/apps/web/src/app/nav.ts
+index c0e9c3c..cc28494 100644
+--- a/apps/web/src/app/nav.ts
++++ b/apps/web/src/app/nav.ts
+@@ -6,7 +6,6 @@ import {
+   Cable,
+   ExternalLink,
+   Megaphone,
+-  Kanban,
+   LayoutDashboard,
+   MessagesSquare,
+   Send,
+@@ -50,7 +49,6 @@ export const NAV_SECTIONS: NavSection[] = [
+     items: [
+       { id: 'dashboard', labelKey: 'nav.items.dashboard', icon: LayoutDashboard, to: '/welcome', permissions: ['dashboard.sales', 'dashboard.support'] },
+       { id: 'chats', labelKey: 'nav.items.chats', icon: MessagesSquare, to: '/chats', permissions: ['chat.view'] },
+-      { id: 'kanban', labelKey: 'nav.items.kanban', icon: Kanban, to: '/crms', permissions: ['kanban.view'] },
+       { id: 'contacts', labelKey: 'nav.items.contacts', icon: Users, to: '/customers', permissions: ['contacts.view'] },
+     ],
+   },
+@@ -92,7 +90,7 @@ export const SUPPORT_NAV_SECTIONS: NavSection[] = [
+ 
+ export interface BottomNavItem {
+   /** `data-testid="bottom-nav-<id>"`. */
+-  id: 'home' | 'chats' | 'kanban' | 'flows'
++  id: 'home' | 'chats' | 'flows'
+   labelKey: string
+   icon: LucideIcon
+   /** `home` vai para a home do papel. */
+@@ -104,6 +102,5 @@ export interface BottomNavItem {
+ export const BOTTOM_NAV: BottomNavItem[] = [
+   { id: 'home', labelKey: 'bottomNav.home', icon: Home, to: 'home', permissions: ['dashboard.sales', 'dashboard.support'] },
+   { id: 'chats', labelKey: 'nav.items.chats', icon: MessagesSquare, to: '/chats', permissions: ['chat.view'] },
+-  { id: 'kanban', labelKey: 'nav.items.kanban', icon: Kanban, to: '/crms', permissions: ['kanban.view'] },
+   { id: 'flows', labelKey: 'nav.items.flows', icon: Workflow, to: '/flows', permissions: ['flows.view'] },
+ ]
+diff --git a/apps/web/src/routes/crms/$crmId.tsx b/apps/web/src/routes/crms/$crmId.tsx
+index 06be90c..6b158df 100644
+--- a/apps/web/src/routes/crms/$crmId.tsx
++++ b/apps/web/src/routes/crms/$crmId.tsx
+@@ -1,22 +1,7 @@
+-// `/crms/$crmId` (spec 18; permissão kanban.view): quadro kanban arrastável (T70) com filtros na URL (T76).
+-import { createFileRoute, useNavigate } from '@tanstack/react-router'
+-import { CrmBoardPage } from '@/features/crms/board-page'
+-import { registerCrmsRealtime } from '@/features/crms/realtime'
+-import { boardSearchSchema, cleanSearch, type BoardSearch } from '@/features/kanban-tools/filters'
+-import { registerKanbanToolsRealtime } from '@/features/kanban-tools/realtime'
+-
+-registerCrmsRealtime()
+-registerKanbanToolsRealtime()
++// Links antigos para quadros seguem para a área principal de Fluxos.
++import { createFileRoute, redirect } from '@tanstack/react-router'
+ 
+ export const Route = createFileRoute('/crms/$crmId')({
+-  validateSearch: boardSearchSchema,
+-  component: CrmBoardRoute,
++  beforeLoad: () => { throw redirect({ to: '/flows', replace: true } as never) },
++  component: () => null,
+ })
+-
+-function CrmBoardRoute() {
+-  const { crmId } = Route.useParams()
+-  const search = Route.useSearch()
+-  const navigate = useNavigate({ from: Route.fullPath })
+-  const onSearch = (next: BoardSearch) => void navigate({ search: cleanSearch(next), replace: true })
+-  return <CrmBoardPage key={crmId} crmId={crmId} search={search} onSearch={onSearch} />
+-}
+diff --git a/apps/web/src/routes/crms/index.tsx b/apps/web/src/routes/crms/index.tsx
+index f22481a..e4464d9 100644
+--- a/apps/web/src/routes/crms/index.tsx
++++ b/apps/web/src/routes/crms/index.tsx
+@@ -1,11 +1,7 @@
+-// `/crms` (spec 18; permissão kanban.view): lista de quadros com indicadores (T70).
+-import { createFileRoute } from '@tanstack/react-router'
+-import { CrmsListPage } from '@/features/crms/list-page'
+-import { registerCrmsRealtime } from '@/features/crms/realtime'
+-
+-// Handlers do SSE registrados junto com a árvore de rotas (antes de o shell abrir a conexão).
+-registerCrmsRealtime()
++// Mantém links antigos válidos sem expor o quadro retirado da navegação.
++import { createFileRoute, redirect } from '@tanstack/react-router'
+ 
+ export const Route = createFileRoute('/crms/')({
+-  component: CrmsListPage,
++  beforeLoad: () => { throw redirect({ to: '/flows', replace: true } as never) },
++  component: () => null,
+ })
+diff --git a/tests/acceptance/T23/shell.e2e.ts b/tests/acceptance/T23/shell.e2e.ts
+index 18408c8..9cc93ca 100644
+--- a/tests/acceptance/T23/shell.e2e.ts
++++ b/tests/acceptance/T23/shell.e2e.ts
+@@ -71,14 +71,14 @@ test.describe('T23 — sidebar e permissões', () => {
+     await page.goto('/chats')
+     await expect(page.getByTestId('chat-page')).toBeVisible()
+     const items = await visibleItems(page)
+-    expect(items).toEqual(['dashboard', 'chats', 'kanban', 'contacts', 'flows', 'agents', 'connections', 'inbound-webhooks', 'mass-dispatch', 'facebook', 'settings'])
++    expect(items).toEqual(['dashboard', 'chats', 'contacts', 'flows', 'connections', 'inbound-webhooks', 'mass-dispatch', 'facebook', 'settings'])
+   })
+ 
+   test('AC-T23-02 member vê só os itens da matriz do papel', async ({ page }) => {
+     await loginAs(page, 'member')
+     await page.goto('/chats')
+     await expect(page.getByTestId('chat-page')).toBeVisible()
+-    expect(await visibleItems(page)).toEqual(['chats', 'kanban', 'contacts', 'flows', 'agents', 'mass-dispatch', 'settings'])
++    expect(await visibleItems(page)).toEqual(['chats', 'contacts', 'flows', 'mass-dispatch', 'settings'])
+   })
+ 
+   test('AC-T23-02 rota sem permissão por URL leva à primeira rota permitida e mostra o aviso uma vez', async ({ page }) => {
+@@ -135,7 +135,8 @@ test.describe('T23 — mobile e layout', () => {
+     if (isMobile(page)) {
+       const bottom = page.getByTestId('shell-bottom-nav')
+       await expect(bottom).toBeVisible()
+-      for (const id of ['home', 'chats', 'kanban', 'flows', 'more']) await expect(bottom.getByTestId(`bottom-nav-${id}`)).toBeVisible()
++      for (const id of ['home', 'chats', 'flows', 'more']) await expect(bottom.getByTestId(`bottom-nav-${id}`)).toBeVisible()
++      await expect(bottom.getByTestId('bottom-nav-kanban')).toHaveCount(0)
+       await expect(page.getByTestId('shell-sidebar')).toBeHidden()
+       await page.getByTestId('bottom-nav-more').click()
+       await expect(page.getByTestId('shell-drawer')).toBeVisible()
+diff --git a/tests/acceptance/T59/ai-integrations.e2e.ts b/tests/acceptance/T59/ai-integrations.e2e.ts
+index f9aaf98..974b266 100644
+--- a/tests/acceptance/T59/ai-integrations.e2e.ts
++++ b/tests/acceptance/T59/ai-integrations.e2e.ts
+@@ -104,6 +104,17 @@ async function mockUsage(page: Page) {
+ 
+ // =================================================================================================== AC-T59-01
+ test.describe('T59 — navegação sem saldo de IA', () => {
++  test('Kanban sai do menu e links antigos levam a Fluxos sem apagar dados', async ({ page }) => {
++    await loginAs(page, 'owner')
++    await page.goto('/chats')
++    await expect(page.getByTestId('nav-item-kanban')).toHaveCount(0)
++    await expect(page.getByTestId('bottom-nav-kanban')).toHaveCount(0)
++    await page.goto('/crms')
++    await expect(page).toHaveURL(/\/flows$/)
++    await page.goto('/crms/00000000-0000-4000-8000-000000000001')
++    await expect(page).toHaveURL(/\/flows$/)
++  })
++
+   test('sessões ficam em Configurações e Agentes de IA sai do menu', async ({ page }) => {
+     await loginAs(page, 'owner')
+     await page.goto('/settings?tab=wa_sessions')

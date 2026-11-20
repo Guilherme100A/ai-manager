@@ -17,7 +17,7 @@ export async function messageCountsBySession(db: Database, now: Date = new Date(
     select session_id,
       count(*) filter (where direction = 'outbound' and status in ('sent', 'delivered', 'read')) as sent_total,
       count(*) filter (where direction = 'inbound') as received_total,
-      count(*) filter (where direction = 'outbound' and status in ('sent', 'delivered', 'read') and created_at > ${since}) as sent_24h,
+      count(*) filter (where direction = 'outbound' and status in ('sent', 'delivered', 'read') and sent_at > ${since}) as sent_24h,
       count(*) filter (where direction = 'inbound' and created_at > ${since}) as received_24h
     from messages group by session_id`)).rows as Array<Record<string, unknown>>
   return Object.fromEntries(rows.map((r) => [String(r.session_id), {

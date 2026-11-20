@@ -10,7 +10,7 @@ import { appendSample, bucketMessages, formatDateTime, latencySeries, parseProme
 import { api } from '../lib/api'
 import { useChartColors, useReducedMotion, type ChartColors } from '../lib/chart-theme'
 import { POLL, usePoll } from '../lib/hooks'
-import { navigate } from '../lib/router'
+import { navigate, routeHref } from '../lib/router'
 import { CONNECTED_STATES, indicatorText, STATE_INDICATORS, STATE_LEVEL } from '../lib/states'
 import type { Message, SessionState } from '../lib/types'
 
@@ -95,7 +95,8 @@ export function SessionDetail({ id }: { id: string }) {
   const s = session.data
 
   return (
-    <div data-testid="page-session">
+    <div className="chip-workspace" data-testid="page-session">
+      <nav className="chip-breadcrumb" aria-label="Caminho"><a href={routeHref({ name: 'sessions' })}>Chips</a><span aria-hidden="true">/</span><span>{s?.name ?? 'Sessão'}</span></nav>
       <PageHeader
         title={
           <>
@@ -106,6 +107,7 @@ export function SessionDetail({ id }: { id: string }) {
       />
 
       <section className="panel session-card" data-testid="session-card">
+        <div className="chip-section-head"><h2>Estado e operação</h2><p>Dados atualizados automaticamente.</p></div>
         <dl>
           <div>
             <dt>Connected</dt>
@@ -146,7 +148,7 @@ export function SessionDetail({ id }: { id: string }) {
             <dd data-testid="detail-disconnects">{h?.disconnects ?? '…'}</dd>
           </div>
         </dl>
-        <div className="actions">
+        <div className="actions chip-actions">
           {state === 'PAUSED' ? (
             <button type="button" data-testid="btn-resume" disabled={busy} onClick={() => act('resume')}>
               Resume

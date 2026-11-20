@@ -1417,6 +1417,245 @@ legend {
   font-weight: 600;
 }
 
+/* Chips use the same purple surfaces and hierarchy as the CRM. The scope keeps
+   the rest of the operational dashboard and its theme unchanged. */
+.layout-chips {
+  --bg: #f5f3fa;
+  --surface: #ffffff;
+  --surface-2: #f0edf7;
+  --surface-3: #e9e3f6;
+  --text: #211b36;
+  --text-muted: #69617b;
+  --border: #e0d9ed;
+  --border-strong: #c9bfdc;
+  --accent: #6d28d9;
+  --accent-fg: #ffffff;
+  --accent-soft: rgb(124 58 237 / 0.09);
+  --ring: 0 0 0 3px rgb(124 58 237 / 0.25);
+  --shadow: 0 2px 3px rgb(51 32 82 / 0.02), 0 6px 20px rgb(51 32 82 / 0.04);
+  --shadow-lg: 0 20px 70px -20px rgb(51 32 82 / 0.25);
+  --radius: 14px;
+  color: var(--text);
+  background: var(--bg);
+}
+
+:root[data-theme='dark'] .layout-chips {
+  --bg: #171326;
+  --surface: #1d1831;
+  --surface-2: #241e3a;
+  --surface-3: #30264b;
+  --text: #f2effb;
+  --text-muted: #b5abc9;
+  --border: #38304f;
+  --border-strong: #514269;
+  --accent: #a78bfa;
+  --accent-fg: #201438;
+  --accent-soft: rgb(167 139 250 / 0.11);
+  --ring: 0 0 0 3px rgb(167 139 250 / 0.28);
+  --shadow: 0 1px 0 rgb(255 255 255 / 0.02) inset, 0 6px 24px rgb(8 4 17 / 0.15);
+  --shadow-lg: 0 24px 70px -16px rgb(8 4 17 / 0.65);
+}
+
+.layout-chips .sidebar {
+  background: var(--surface);
+  border-color: var(--border);
+}
+
+.layout-chips .nav a.active {
+  color: var(--text);
+  background: var(--accent-soft);
+  box-shadow: inset 3px 0 var(--accent);
+}
+
+.layout-chips .main {
+  background: radial-gradient(ellipse at 92% 0%, var(--accent-soft), transparent 55%), var(--bg);
+}
+
+.layout-chips .main-inner {
+  max-width: 1440px;
+}
+
+.chip-workspace .page-head h1 {
+  font-size: clamp(1.55rem, 2vw, 1.9rem);
+  font-weight: 700;
+  letter-spacing: -0.035em;
+}
+
+.chip-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin-bottom: 1.25rem;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.chip-breadcrumb a {
+  color: var(--text-muted);
+}
+
+.chip-breadcrumb a:hover {
+  color: var(--accent);
+}
+
+.chip-overview {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.chip-overview-card {
+  display: flex;
+  min-height: 92px;
+  flex-direction: column;
+  justify-content: space-between;
+  min-width: 0;
+  padding: 1rem 1.15rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.chip-overview-card span {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.chip-overview-card strong {
+  color: var(--text);
+  font-size: 1.6rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.chip-list-head,
+.chip-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+}
+
+.chip-list-head {
+  margin: 1.5rem 0 0.75rem;
+}
+
+.chip-section-head {
+  margin-bottom: 1rem;
+}
+
+.chip-list-head h2,
+.chip-section-head h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.chip-list-head p,
+.chip-section-head p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.chip-table th {
+  padding-top: 0.85rem;
+  padding-bottom: 0.85rem;
+  font-size: 0.69rem;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+}
+
+.chip-table td {
+  padding-top: 0.95rem;
+  padding-bottom: 0.95rem;
+}
+
+.chip-table .cell-strong a {
+  color: var(--text);
+  font-weight: 650;
+}
+
+.chip-table .cell-strong a:hover {
+  color: var(--accent);
+}
+
+.chip-onboarding {
+  max-width: 900px;
+  grid-template-columns: minmax(145px, 190px) minmax(0, 1fr);
+  gap: 0.85rem 1.3rem;
+  padding: clamp(1.2rem, 3vw, 2rem);
+}
+
+.chip-onboarding > h2 {
+  padding-bottom: 0.65rem;
+  margin: 0.7rem 0 0.2rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.95rem;
+}
+
+.chip-onboarding > h2:first-child {
+  margin-top: 0;
+}
+
+.chip-onboarding #new-phone-hint {
+  grid-column: 2;
+  margin: -0.4rem 0 0.25rem;
+}
+
+.chip-onboarding .direct-connection {
+  margin-right: 0;
+}
+
+.chip-onboarding-actions {
+  margin-top: 0.75rem;
+}
+
+.chip-workspace .auth {
+  max-width: 900px;
+  padding-block: 1.75rem;
+}
+
+.chip-workspace .session-card dl {
+  gap: 0.5rem;
+  border: 0;
+  background: transparent;
+}
+
+.chip-workspace .session-card dl > div {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.chip-actions {
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+@media (max-width: 767px) {
+  .chip-overview {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .chip-overview-card:first-child {
+    grid-column: 1 / -1;
+  }
+
+  .chip-onboarding {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .chip-onboarding #new-phone-hint {
+    grid-column: 1;
+    margin: -0.15rem 0 0.3rem;
+  }
+}
+
 /* Conversas do chip (histórico do banco, sem tempo real) */
 .chats-head h2 {
   margin: 0;

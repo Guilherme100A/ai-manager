@@ -1,0 +1,730 @@
+diff --git a/apps/web/src/app/nav.ts b/apps/web/src/app/nav.ts
+index ab3391b..c0e9c3c 100644
+--- a/apps/web/src/app/nav.ts
++++ b/apps/web/src/app/nav.ts
+@@ -3,7 +3,6 @@
+ // `permissions`: qualquer uma basta; owner sempre vê; sem permissões = sempre visível.
+ import type { LucideIcon } from 'lucide-react'
+ import {
+-  Bot,
+   Cable,
+   ExternalLink,
+   Megaphone,
+@@ -60,7 +59,6 @@ export const NAV_SECTIONS: NavSection[] = [
+     labelKey: 'nav.sections.operations',
+     items: [
+       { id: 'flows', labelKey: 'nav.items.flows', icon: Workflow, to: '/flows', permissions: ['flows.view'] },
+-      { id: 'agents', labelKey: 'nav.items.agents', icon: Bot, to: '/agentes', permissions: ['flows.view'], badgeKey: 'nav.badges.new' },
+       { id: 'connections', labelKey: 'nav.items.connections', icon: Cable, to: '/connections', permissions: ['connections.view'] },
+       { id: 'inbound-webhooks', labelKey: 'nav.items.inboundWebhooks', icon: Webhook, to: '/settings/inbound-webhooks', permissions: ['webhooks.view'] },
+       { id: 'mass-dispatch', labelKey: 'nav.items.massDispatch', icon: Send, to: '/mass-dispatches', permissions: ['contacts.view'] },
+diff --git a/apps/web/src/app/shell/app-shell.tsx b/apps/web/src/app/shell/app-shell.tsx
+index 841344b..1300cac 100644
+--- a/apps/web/src/app/shell/app-shell.tsx
++++ b/apps/web/src/app/shell/app-shell.tsx
+@@ -9,8 +9,8 @@ import { WorkspaceBoundary } from '@/features/business-areas/workspace'
+ import { CompanySwitcher } from '@/features/company-switcher/company-switcher'
+ // T84: sino/central de notificações; import ESTÁTICO (registra message.created/notification.created antes do SSE abrir).
+ import { NotificationBell } from '@/features/notifications/bell'
+-// T59: chip de saldo de IA; o import eager registra o handler `ai_wallet.updated` antes de o SSE abrir.
+-import { WalletChip } from '@/features/settings-ai-usage/wallet-chip'
++// Mantém o handler da carteira para a tela de consumo, sem exibir saldo na navegação.
++import '@/features/settings-ai-usage/wallet-chip'
+ // T54: import ESTÁTICO (registra os handlers support_access.* antes do SSE abrir).
+ import { SupportApprovalModal } from '@/features/settings-support/approval-modal'
+ // T97: item "Programa de afiliados" (só com AFFILIATE_PORTAL_URL, via GET /api/app-config).
+@@ -126,7 +126,6 @@ export function AppShell({ session, children }: { session: Session; children: Re
+             </button>
+           </div>
+           <CompanySwitcher session={session} collapsed={collapsed} />
+-          <WalletChip session={session} collapsed={collapsed} />
+           <div className="-mx-1 min-h-0 flex-1 overflow-y-auto px-1">
+             <NavList session={session} collapsed={collapsed} />
+           </div>
+@@ -196,7 +195,6 @@ export function AppShell({ session, children }: { session: Session; children: Re
+               </button>
+             </div>
+             <CompanySwitcher session={session} />
+-            <WalletChip session={session} />
+             <div className="flex-1">
+               <NavList session={session} onNavigate={() => setDrawerOpen(false)} />
+             </div>
+diff --git a/apps/web/src/features/chat-list/chat-list-panel.tsx b/apps/web/src/features/chat-list/chat-list-panel.tsx
+index f9c1a9b..34229fe 100644
+--- a/apps/web/src/features/chat-list/chat-list-panel.tsx
++++ b/apps/web/src/features/chat-list/chat-list-panel.tsx
+@@ -7,7 +7,7 @@ import { useEffect, useRef, useState } from 'react'
+ import { Button } from '@/components/ui/button'
+ import { useI18n, useT } from '@/i18n'
+ import { cn } from '@/lib/utils'
+-import { chatListQuery, connectionNamesQuery, type ChatListItem } from './api'
++import { chatListQuery, connectionNamesQuery, filterOptionsQuery, type ChatListItem } from './api'
+ import { ChatFiltersDialog } from './filters-dialog'
+ import { activeTab, advancedCount, CHAT_TABS, cleanSearch, type ChatSearch, type ChatTab, type QuickFilter } from './search'
+ 
+@@ -102,6 +102,8 @@ export function ChatListPanel({ search, selectedId }: { search: ChatSearch; sele
+   const tab = activeTab(search)
+   const q = useInfiniteQuery(chatListQuery(search))
+   const names = useQuery(connectionNamesQuery()).data ?? {}
++  const chipOptions = useQuery(filterOptionsQuery()).data?.connections ?? []
++  const navigate = useNavigate()
+   const items = q.data?.pages.flatMap((p) => p.items) ?? []
+   const counts = q.data?.pages[0]?.counts
+   const [text, setText] = useState(search.search ?? '')
+@@ -158,6 +160,26 @@ export function ChatListPanel({ search, selectedId }: { search: ChatSearch; sele
+         </Button>
+       </div>
+ 
++      <label className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
++        <span className="shrink-0">{t('chip.label')}</span>
++        <select
++          data-testid="chat-chip-select"
++          aria-label={t('chip.label')}
++          value={search.connection_ids?.length === 1 ? search.connection_ids[0] : search.connection_ids?.length ? '__multiple__' : ''}
++          onChange={(e) => {
++            const connection_ids = e.target.value ? [e.target.value] : undefined
++            void navigate({ to: '/chats', search: cleanSearch({ ...search, connection_ids }), replace: true })
++          }}
++          className="h-9 min-w-0 flex-1 rounded-md border bg-background px-2 text-sm text-foreground"
++        >
++          <option value="">{t('chip.all')}</option>
++          {search.connection_ids && search.connection_ids.length > 1 ? <option value="__multiple__">{t('chip.multiple')}</option> : null}
++          {[...new Set([...Object.keys(names), ...chipOptions, ...(search.connection_ids ?? [])])].map((id) => (
++            <option key={id} value={id}>{names[id] ?? t('filters.connectionFallback', { id: id.slice(0, 8) })}</option>
++          ))}
++        </select>
++      </label>
++
+       <div role="tablist" aria-label={t('tabs.label')} className="grid grid-cols-3 gap-1 rounded-lg bg-muted p-1">
+         {CHAT_TABS.map((s: ChatTab) => {
+           const active = s === tab
+diff --git a/apps/web/src/features/connections/page.tsx b/apps/web/src/features/connections/page.tsx
+index bb1cdad..c474758 100644
+--- a/apps/web/src/features/connections/page.tsx
++++ b/apps/web/src/features/connections/page.tsx
+@@ -197,24 +197,26 @@ export function ConnectionsPage({
+         </p>
+       ) : null}
+ 
+-      <div data-testid="connections-counts" className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
+-        <CountCard
+-          id="total"
+-          label={t('counts.total')}
+-          value={counts ? total : null}
+-          active={!search.filter}
+-          onClick={() => onSearch({ ...search, filter: undefined, page: undefined })}
+-        />
+-        {CONNECTION_STATUSES.map((s) => (
+-          <CountCard
+-            key={s}
+-            id={s}
+-            label={t(`status.${s}`)}
+-            value={counts ? (counts[s] ?? 0) : null}
+-            active={search.filter === s}
+-            onClick={() => onSearch({ ...search, filter: search.filter === s ? undefined : s, page: undefined })}
+-          />
+-        ))}
++      <div data-testid="connections-counts" className="flex flex-col gap-3 rounded-xl border bg-card p-3">
++        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
++          <CountCard id="total" label={t('counts.total')} value={counts ? total : null} active={!search.filter}
++            onClick={() => onSearch({ ...search, filter: undefined, page: undefined })} />
++          {(['connected', 'disconnected'] as const).map((s) => (
++            <CountCard key={s} id={s} label={t(`status.${s}`)} value={counts ? (counts[s] ?? 0) : null}
++              active={search.filter === s}
++              onClick={() => onSearch({ ...search, filter: search.filter === s ? undefined : s, page: undefined })} />
++          ))}
++        </div>
++        <div>
++          <p className="mb-2 text-xs font-medium text-muted-foreground">{t('counts.other')}</p>
++          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
++            {CONNECTION_STATUSES.filter((s) => s !== 'connected' && s !== 'disconnected').map((s) => (
++              <CountCard key={s} id={s} label={t(`status.${s}`)} value={counts ? (counts[s] ?? 0) : null}
++                active={search.filter === s}
++                onClick={() => onSearch({ ...search, filter: search.filter === s ? undefined : s, page: undefined })} />
++            ))}
++          </div>
++        </div>
+       </div>
+ 
+       <div className="flex min-w-0 flex-wrap items-center gap-3">
+diff --git a/apps/web/src/features/mass-dispatch/logic.ts b/apps/web/src/features/mass-dispatch/logic.ts
+index be26b8b..0c56a18 100644
+--- a/apps/web/src/features/mass-dispatch/logic.ts
++++ b/apps/web/src/features/mass-dispatch/logic.ts
+@@ -126,7 +126,7 @@ export interface TargetForm {
+   flow_id: string
+ }
+ 
+-export type AudienceMode = 'draft' | 'all'
++export type AudienceMode = 'draft' | 'all' | 'unselected'
+ 
+ export interface WizardForm {
+   name: string
+@@ -159,7 +159,7 @@ export function initialForm(draft: MassDispatchDraft | null): WizardForm {
+     interval_max: PRESET_INTERVALS.normal.max,
+     daily_limit: '',
+     starts_at: '',
+-    audience: draft ? 'draft' : 'all',
++    audience: draft ? 'draft' : 'unselected',
+   }
+ }
+ 
+@@ -222,6 +222,7 @@ export function validateStep(
+     }
+     if (f.starts_at && Number.isNaN(new Date(f.starts_at).getTime())) e.starts_scheduling_at = 'dateInvalid'
+   } else {
++    if (f.audience === 'unselected') e.manifest = 'selectionRequired'
+     if (ctx.audienceCount !== null && ctx.audienceCount <= 0) e.manifest = 'selectionRequired'
+     if (ctx.remaining !== null && ctx.remaining <= 0) e.quota = 'noQuota'
+   }
+@@ -265,6 +266,8 @@ export function errorPathsOf(field: keyof WizardForm): string[] {
+ 
+ /** Manifesto do público (10 §3.2), como o `bulkDeleteManifest` de Contatos. */
+ export function buildManifest(audience: AudienceMode, draft: MassDispatchDraft | null): Record<string, unknown> {
++  if (audience === 'unselected') throw new Error('Audience must be selected before creating a mass dispatch')
++  if (audience === 'draft' && !draft) throw new Error('The selected contacts are no longer available')
+   if (audience === 'draft' && draft) {
+     return draft.mode === 'ids'
+       ? { version: 1, mode: 'ids', filters: {}, ids: draft.ids }
+diff --git a/apps/web/src/features/mass-dispatch/mass-dispatch.unit.test.ts b/apps/web/src/features/mass-dispatch/mass-dispatch.unit.test.ts
+index 0c6e176..d73713b 100644
+--- a/apps/web/src/features/mass-dispatch/mass-dispatch.unit.test.ts
++++ b/apps/web/src/features/mass-dispatch/mass-dispatch.unit.test.ts
+@@ -253,9 +253,10 @@ describe('wizard: presets e validações (AC-T83-02)', () => {
+   })
+ 
+   it('passo Público: seleção vazia e cota esgotada', () => {
+-    expect(validateStep('audience', form(), { remaining: 10, audienceCount: 3 })).toEqual({})
+-    expect(validateStep('audience', form(), { remaining: 10, audienceCount: null })).toEqual({})
+-    expect(validateStep('audience', form(), { remaining: 0, audienceCount: 0 })).toEqual({
++    expect(validateStep('audience', form(), { remaining: 10, audienceCount: 3 })).toEqual({ manifest: 'selectionRequired' })
++    expect(validateStep('audience', form({ audience: 'all' }), { remaining: 10, audienceCount: 3 })).toEqual({})
++    expect(validateStep('audience', form({ audience: 'all' }), { remaining: 10, audienceCount: null })).toEqual({})
++    expect(validateStep('audience', form({ audience: 'all' }), { remaining: 0, audienceCount: 0 })).toEqual({
+       manifest: 'selectionRequired',
+       quota: 'noQuota',
+     })
+@@ -292,12 +293,13 @@ describe('público e corpo multipart', () => {
+       except_ids: ['x'],
+     })
+     expect(buildManifest('all', draftIds)).toEqual({ version: 1, mode: 'all_except', filters: {}, except_ids: [] })
+-    expect(buildManifest('draft', null)).toEqual({ version: 1, mode: 'all_except', filters: {}, except_ids: [] })
++    expect(() => buildManifest('unselected', null)).toThrow()
++    expect(() => buildManifest('draft', null)).toThrow()
+   })
+ 
+   it('initialForm: com rascunho o público começa nele', () => {
+     expect(initialForm(draftIds).audience).toBe('draft')
+-    expect(initialForm(null).audience).toBe('all')
++    expect(initialForm(null).audience).toBe('unselected')
+   })
+ 
+   it('readDraft: aceita só o formato da T77', () => {
+diff --git a/apps/web/src/features/mass-dispatch/wizard.tsx b/apps/web/src/features/mass-dispatch/wizard.tsx
+index a44133d..6315095 100644
+--- a/apps/web/src/features/mass-dispatch/wizard.tsx
++++ b/apps/web/src/features/mass-dispatch/wizard.tsx
+@@ -95,14 +95,14 @@ export function Wizard({
+   const conns = connections.data ?? []
+   const flowList = flows.data ?? []
+ 
+-  // 1º alvo pré-preenchido com a 1ª conexão conectada e o 1º fluxo acionável (10 §3.1).
++  // O fluxo pode ser sugerido, mas o chip precisa ser escolhido explicitamente.
+   useEffect(() => {
+     if (!open) return
+     setForm((f) => {
+       const first = f.targets[0]
+       if (!first || (first.connection_id && first.flow_id)) return f
+       const next = {
+-        connection_id: first.connection_id || conns[0]?.id || '',
++        connection_id: first.connection_id,
+         flow_id: first.flow_id || flowList[0]?.id || '',
+       }
+       if (next.connection_id === first.connection_id && next.flow_id === first.flow_id) return f
+@@ -111,7 +111,7 @@ export function Wizard({
+   }, [open, connections.data, flows.data])
+ 
+   const remaining = quota?.remaining ?? null
+-  const audienceCount = form.audience === 'draft' && draft ? draft.count : (total.data ?? null)
++  const audienceCount = form.audience === 'draft' && draft ? draft.count : form.audience === 'all' ? (total.data ?? null) : null
+   const ctx = { remaining, audienceCount }
+   const tr = (e: FormErrors): FormErrors => Object.fromEntries(Object.entries(e).map(([k, v]) => [k, t(`errors.${v}`)]))
+ 
+@@ -631,6 +631,19 @@ export function Wizard({
+         <p data-testid={`${P}-confirm-summary`} className="text-sm">
+           {t('confirm.summary', { n: audienceCount ?? '?', targets: form.targets.length })}
+         </p>
++        <div className="rounded-lg border p-3 text-sm">
++          <p className="font-medium">{t('fields.targets')}</p>
++          <ul data-testid={`${P}-confirm-targets`} className="mt-1 list-inside list-disc">
++            {form.targets.map((target, index) => {
++              const chip = conns.find((c) => c.id === target.connection_id)
++              const flow = flowList.find((f) => f.id === target.flow_id)
++              return <li key={index}>{chip?.name ?? target.connection_id} — {flow?.name ?? target.flow_id}</li>
++            })}
++          </ul>
++          <p data-testid={`${P}-confirm-audience`} className="mt-2">
++            {t('fields.audience')}: {t(form.audience === 'draft' ? 'audience.draft' : 'audience.all')} ({audienceCount ?? '?'})
++          </p>
++        </div>
+         <div
+           data-testid={`${P}-confirm-flow-notice`}
+           role="note"
+diff --git a/apps/web/src/features/settings-wa-sessions/tab.tsx b/apps/web/src/features/settings-wa-sessions/tab.tsx
+new file mode 100644
+index 0000000..8838bb0
+--- /dev/null
++++ b/apps/web/src/features/settings-wa-sessions/tab.tsx
+@@ -0,0 +1,19 @@
++import { useT } from '@/i18n'
++
++export default function WaSessionsTab() {
++  const t = useT('shell')
++  return (
++    <section className="rounded-xl border bg-card p-5" data-testid="settings-wa-sessions">
++      <h2 className="text-lg font-semibold">{t('pages.waSessions')}</h2>
++      <p className="mt-2 text-sm text-muted-foreground">{t('pages.waSessionsDescription')}</p>
++      <a
++        href="/#/sessions"
++        target="_top"
++        data-testid="open-wa-sessions"
++        className="mt-5 inline-flex rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground"
++      >
++        {t('pages.openWaSessions')}
++      </a>
++    </section>
++  )
++}
+diff --git a/apps/web/src/features/settings/tabs.ts b/apps/web/src/features/settings/tabs.ts
+index 2e2d45e..5f75029 100644
+--- a/apps/web/src/features/settings/tabs.ts
++++ b/apps/web/src/features/settings/tabs.ts
+@@ -36,6 +36,7 @@ export const SETTINGS_TABS: SettingsTab[] = [
+   { id: 'team', labelKey: 'settings-team:tab', group: 'account', permissions: ['team.view'], load: () => import('@/features/settings-team/tab') },
+   { id: 'platform_invitations', labelKey: 'settings-invitations:tab', group: 'account', permissions: ['settings.platform_invitations.view'], load: () => import('@/features/settings-invitations/tab') },
+   { id: 'support_access', labelKey: 'settings-support:tab', group: 'account', roles: ['owner', 'admin'], hiddenForSupport: true, load: () => import('@/features/settings-support/tab') },
++  { id: 'wa_sessions', labelKey: 'shell:pages.waSessions', group: 'integrations', permissions: ['connections.view'], load: () => import('@/features/settings-wa-sessions/tab') },
+   // T94: credenciais do servidor MCP (09 §2).
+   { id: 'mcp_credentials', labelKey: 'settings-mcp:tab', group: 'integrations', permissions: ['settings.mcp.view'], load: () => import('@/features/settings-mcp/mcp-tab') },
+   // T58: conteúdo (17 §2.1); modelos internos usam o id `message_templates`.
+diff --git a/apps/web/src/i18n/en/chat-list.json b/apps/web/src/i18n/en/chat-list.json
+index b5a3c48..721f19e 100644
+--- a/apps/web/src/i18n/en/chat-list.json
++++ b/apps/web/src/i18n/en/chat-list.json
+@@ -1,5 +1,6 @@
+ {
+   "search": "Search chats...",
++  "chip": { "label": "Chip", "all": "All chips", "multiple": "Multiple chips" },
+   "tabs": {
+     "label": "Service stages",
+     "waiting": "Waiting",
+diff --git a/apps/web/src/i18n/en/connections.json b/apps/web/src/i18n/en/connections.json
+index 461e04a..30d97ce 100644
+--- a/apps/web/src/i18n/en/connections.json
++++ b/apps/web/src/i18n/en/connections.json
+@@ -15,7 +15,8 @@
+     "reachedShort": "The company's connection limit has been reached."
+   },
+   "counts": {
+-    "total": "Total"
++    "total": "Total",
++    "other": "Other statuses"
+   },
+   "status": {
+     "pending": "Pending",
+@@ -38,7 +39,7 @@
+     "connection": "Connection",
+     "status": "Status",
+     "createdAt": "Created at",
+-    "disconnectedAt": "Disconnected at",
++    "disconnectedAt": "Last disconnected",
+     "actions": "Actions"
+   },
+   "actions": {
+diff --git a/apps/web/src/i18n/en/mass-dispatch.json b/apps/web/src/i18n/en/mass-dispatch.json
+index ab57dff..f01466e 100644
+--- a/apps/web/src/i18n/en/mass-dispatch.json
++++ b/apps/web/src/i18n/en/mass-dispatch.json
+@@ -1,6 +1,6 @@
+ {
+   "title": "Mass dispatches",
+-  "subtitle": "Start a flow for many contacts at once, within your subscription cycle quota.",
++  "subtitle": "Choose the chip, flow and contacts before creating a mass dispatch.",
+   "new": "New mass dispatch",
+   "search": "Search by name, flow or number",
+   "empty": "No mass dispatches yet.",
+diff --git a/apps/web/src/i18n/en/shell.json b/apps/web/src/i18n/en/shell.json
+index 36f7d13..629cb86 100644
+--- a/apps/web/src/i18n/en/shell.json
++++ b/apps/web/src/i18n/en/shell.json
+@@ -112,6 +112,9 @@
+     "massDispatch": "Mass messaging",
+     "facebook": "Facebook",
+     "settings": "Settings",
++    "waSessions": "WhatsApp sessions",
++    "waSessionsDescription": "Manage chips, QR codes, proxies and connections in the sessions panel.",
++    "openWaSessions": "Open sessions",
+     "profile": "My profile",
+     "admin": "Administration",
+     "supportAccess": "Support access",
+diff --git a/apps/web/src/i18n/es/chat-list.json b/apps/web/src/i18n/es/chat-list.json
+index 07d1283..995a584 100644
+--- a/apps/web/src/i18n/es/chat-list.json
++++ b/apps/web/src/i18n/es/chat-list.json
+@@ -1,5 +1,6 @@
+ {
+   "search": "Buscar chats...",
++  "chip": { "label": "Chip", "all": "Todos los chips", "multiple": "Varios chips" },
+   "tabs": {
+     "label": "Etapas de atención",
+     "waiting": "En espera",
+diff --git a/apps/web/src/i18n/es/connections.json b/apps/web/src/i18n/es/connections.json
+index 5a748ef..222c315 100644
+--- a/apps/web/src/i18n/es/connections.json
++++ b/apps/web/src/i18n/es/connections.json
+@@ -15,7 +15,8 @@
+     "reachedShort": "Se alcanzó el límite de conexiones de la empresa."
+   },
+   "counts": {
+-    "total": "Total"
++    "total": "Total",
++    "other": "Otros estados"
+   },
+   "status": {
+     "pending": "Pendiente",
+@@ -38,7 +39,7 @@
+     "connection": "Conexión",
+     "status": "Estado",
+     "createdAt": "Creada el",
+-    "disconnectedAt": "Desconectada el",
++    "disconnectedAt": "Última desconexión",
+     "actions": "Acciones"
+   },
+   "actions": {
+diff --git a/apps/web/src/i18n/es/mass-dispatch.json b/apps/web/src/i18n/es/mass-dispatch.json
+index f0b9eb0..c4e6883 100644
+--- a/apps/web/src/i18n/es/mass-dispatch.json
++++ b/apps/web/src/i18n/es/mass-dispatch.json
+@@ -1,6 +1,6 @@
+ {
+   "title": "Envíos masivos",
+-  "subtitle": "Inicia un flujo para muchos contactos a la vez, dentro de la cuota del ciclo de la suscripción.",
++  "subtitle": "Elige el chip, el flujo y los contactos antes de crear un envío masivo.",
+   "new": "Nuevo envío masivo",
+   "search": "Buscar por nombre, flujo o número",
+   "empty": "Todavía no hay envíos masivos.",
+diff --git a/apps/web/src/i18n/es/shell.json b/apps/web/src/i18n/es/shell.json
+index e0751e5..bd7fc44 100644
+--- a/apps/web/src/i18n/es/shell.json
++++ b/apps/web/src/i18n/es/shell.json
+@@ -112,6 +112,9 @@
+     "massDispatch": "Envíos masivos",
+     "facebook": "Facebook",
+     "settings": "Configuración",
++    "waSessions": "Sesiones de WhatsApp",
++    "waSessionsDescription": "Gestiona chips, códigos QR, proxies y conexiones en el panel de sesiones.",
++    "openWaSessions": "Abrir sesiones",
+     "profile": "Mi perfil",
+     "admin": "Administración",
+     "supportAccess": "Accesos de soporte",
+diff --git a/apps/web/src/i18n/pt-BR/chat-list.json b/apps/web/src/i18n/pt-BR/chat-list.json
+index 5525726..ad456ae 100644
+--- a/apps/web/src/i18n/pt-BR/chat-list.json
++++ b/apps/web/src/i18n/pt-BR/chat-list.json
+@@ -1,5 +1,6 @@
+ {
+   "search": "Buscar chats...",
++  "chip": { "label": "Chip", "all": "Todos os chips", "multiple": "Vários chips" },
+   "tabs": {
+     "label": "Etapas do atendimento",
+     "waiting": "Aguardando",
+diff --git a/apps/web/src/i18n/pt-BR/connections.json b/apps/web/src/i18n/pt-BR/connections.json
+index 444b480..70f8bcc 100644
+--- a/apps/web/src/i18n/pt-BR/connections.json
++++ b/apps/web/src/i18n/pt-BR/connections.json
+@@ -15,7 +15,8 @@
+     "reachedShort": "O limite de conexões da empresa foi atingido."
+   },
+   "counts": {
+-    "total": "Total"
++    "total": "Total",
++    "other": "Outros estados"
+   },
+   "status": {
+     "pending": "Pendente",
+@@ -38,7 +39,7 @@
+     "connection": "Conexão",
+     "status": "Status",
+     "createdAt": "Criada em",
+-    "disconnectedAt": "Desconectada em",
++    "disconnectedAt": "Última desconexão",
+     "actions": "Ações"
+   },
+   "actions": {
+diff --git a/apps/web/src/i18n/pt-BR/mass-dispatch.json b/apps/web/src/i18n/pt-BR/mass-dispatch.json
+index c53484a..6ab7907 100644
+--- a/apps/web/src/i18n/pt-BR/mass-dispatch.json
++++ b/apps/web/src/i18n/pt-BR/mass-dispatch.json
+@@ -1,6 +1,6 @@
+ {
+   "title": "Disparos em massa",
+-  "subtitle": "Inicie um fluxo para muitos contatos de uma vez, dentro da cota do ciclo da assinatura.",
++  "subtitle": "Escolha o chip, o fluxo e os contatos antes de criar o disparo.",
+   "new": "Novo disparo em massa",
+   "search": "Buscar por nome, fluxo ou número",
+   "empty": "Nenhum disparo em massa ainda.",
+diff --git a/apps/web/src/i18n/pt-BR/shell.json b/apps/web/src/i18n/pt-BR/shell.json
+index 39886d8..a165c19 100644
+--- a/apps/web/src/i18n/pt-BR/shell.json
++++ b/apps/web/src/i18n/pt-BR/shell.json
+@@ -112,6 +112,9 @@
+     "massDispatch": "Disparos em massa",
+     "facebook": "Facebook",
+     "settings": "Configurações",
++    "waSessions": "Sessões do WhatsApp",
++    "waSessionsDescription": "Gerencie chips, QR Code, proxy e conexões no painel de sessões.",
++    "openWaSessions": "Abrir sessões",
+     "profile": "Meu perfil",
+     "admin": "Administrativo",
+     "supportAccess": "Acessos de suporte",
+diff --git a/tests/acceptance/T59/ai-integrations.e2e.ts b/tests/acceptance/T59/ai-integrations.e2e.ts
+index 9ea6c81..f9aaf98 100644
+--- a/tests/acceptance/T59/ai-integrations.e2e.ts
++++ b/tests/acceptance/T59/ai-integrations.e2e.ts
+@@ -103,105 +103,29 @@ async function mockUsage(page: Page) {
+ }
+ 
+ // =================================================================================================== AC-T59-01
+-test.describe('T59 — chip de créditos de IA na sidebar', () => {
+-  test('AC-T59-01 chip mostra o saldo, destaque low/exhausted e não tem botão de compra; leva à aba de consumo', async ({ page, request }) => {
++test.describe('T59 — navegação sem saldo de IA', () => {
++  test('sessões ficam em Configurações e Agentes de IA sai do menu', async ({ page }) => {
+     await loginAs(page, 'owner')
+-    const cid = await companyId(page)
+-    const plat = await platform(request)
+-
+-    // carteira nova: saldo 0 com overrun 0 → exhausted
+-    await page.goto('/settings?tab=accounts')
+-    await expect(chip(page)).toBeVisible()
+-    await expect(chip(page)).toHaveAttribute('data-status', 'exhausted')
+-    await expect(page.getByTestId('ai-wallet-chip-balance')).toHaveText('0')
+-    await expect(page.getByTestId('ai-wallet-chip-status')).toHaveText('Esgotado')
+-    await expect(chip(page)).toContainText('Créditos de IA')
+-
+-    // sem compra: nenhum botão/link de compra no chip, e o chip é só um link para a aba de consumo
+-    await expect(chip(page).getByRole('button')).toHaveCount(0)
+-    await expect(chip(page)).not.toContainText(BUY)
+-    await expect(page.getByRole('button', { name: BUY })).toHaveCount(0)
+-
+-    await plat.topup(cid, 750)
+-    await page.reload()
+-    await expect(chip(page)).toHaveAttribute('data-status', 'ok')
+-    await expect(page.getByTestId('ai-wallet-chip-balance')).toHaveText('750')
+-    await expect(page.getByTestId('ai-wallet-chip-status')).toHaveCount(0)
+-
+-    await plat.wallet(cid, { low_threshold_credits: 1000 })
+-    await page.reload()
+-    await expect(chip(page)).toHaveAttribute('data-status', 'low')
+-    await expect(page.getByTestId('ai-wallet-chip-status')).toHaveText('Saldo baixo')
+-
+-    await chip(page).click()
+-    await expect(page).toHaveURL(/[?&]tab=ai_usage(&|$)/)
+-    await expect(page.getByTestId('ai-usage')).toBeVisible()
+-    await expect(page.getByRole('button', { name: BUY })).toHaveCount(0)
++    await page.goto('/settings?tab=wa_sessions')
++    await expect(page.getByTestId('settings-wa-sessions')).toBeVisible()
++    await expect(page.getByTestId('open-wa-sessions')).toHaveAttribute('href', '/#/sessions')
++    await expect(page.getByTestId('nav-item-agents')).toHaveCount(0)
+   })
+ 
+-  test('AC-T59-01 atualiza ao vivo com ai_wallet.updated (sem recarregar nem reler a carteira)', async ({ page, request }) => {
++  test('a sidebar não mostra créditos e o consumo continua acessível em Configurações', async ({ page }) => {
+     await loginAs(page, 'owner')
+-    const cid = await companyId(page)
+-    const plat = await platform(request)
+-    await plat.topup(cid, 300)
+-
+     await page.goto('/settings?tab=accounts')
+-    await expect(page.getByTestId('ai-wallet-chip-balance')).toHaveText('300')
+-    await expect(chip(page)).toHaveAttribute('data-status', 'ok')
+-
+-    // daqui em diante a leitura HTTP da carteira devolve o valor velho: só o evento realtime pode mudar o chip
+-    const stale = await (await page.request.get('/api/ai/wallet')).json()
+-    let walletReads = 0
+-    await page.route(/\/api\/ai\/wallet(\?|$)/, (route) => {
+-      walletReads++
+-      return route.fulfill({ json: stale })
+-    })
+-    await page.waitForTimeout(1500) // SSE assentado (o chip já renderizou; a conexão abre junto com o shell)
+-
+-    await plat.topup(cid, 900)
+-    await expect(page.getByTestId('ai-wallet-chip-balance')).toHaveText('1.200')
+-    await expect(chip(page)).toHaveAttribute('data-status', 'ok')
+-
+-    // ajuste negativo até zerar → exhausted ao vivo
+-    await plat.adjust(cid, -1200)
+-    await expect(page.getByTestId('ai-wallet-chip-balance')).toHaveText('0')
+-    await expect(chip(page)).toHaveAttribute('data-status', 'exhausted')
+-    await expect(page.getByTestId('ai-wallet-chip-status')).toHaveText('Esgotado')
+-    expect(walletReads, 'o chip mudou por releitura HTTP, não pelo evento').toBe(0)
+-  })
+-
+-  test('AC-T59-01 atualiza ao focar a janela', async ({ page }) => {
+-    await loginAs(page, 'owner')
+-    await page.goto('/settings?tab=accounts')
+-    await expect(chip(page)).toHaveAttribute('data-status', 'exhausted')
+-    await expect(page.getByTestId('ai-wallet-chip-balance')).toHaveText('0')
+-
+-    // a carteira muda "por fora" sem evento realtime (rota interceptada); só o foco da janela pode trazer o valor novo
+-    const real = await (await page.request.get('/api/ai/wallet')).json()
+-    const changed = { wallet: { ...real.wallet, balance_credits: 4321, status: 'ok' } }
+-    const reads: number[] = []
+-    await page.route(/\/api\/ai\/wallet(\?|$)/, (route) => {
+-      reads.push(Date.now())
+-      return route.fulfill({ json: changed })
+-    })
+-    await page.waitForTimeout(500)
+-    await expect(page.getByTestId('ai-wallet-chip-balance')).toHaveText('0')
+-
+-    await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+-    await expect(page.getByTestId('ai-wallet-chip-balance')).toHaveText('4.321')
+-    await expect(chip(page)).toHaveAttribute('data-status', 'ok')
+-    expect(reads.length).toBeGreaterThan(0)
++    await expect(page.getByTestId('ai-wallet-chip')).toHaveCount(0)
++    await page.goto('/settings?tab=ai_usage')
++    await expect(page.getByTestId('ai-usage')).toBeVisible()
+   })
+ 
+-  test('AC-T59-01 member sem ai_usage.view não vê o chip nem a aba de consumo', async ({ page }) => {
++  test('member sem ai_usage.view não vê a aba de consumo', async ({ page }) => {
+     await loginAs(page, 'member')
+     await page.goto('/settings')
+-    await expect(page.getByTestId('settings-tab-integrations')).toBeVisible()
+-    await expect(chip(page)).toHaveCount(0)
+     await expect(page.getByTestId('settings-tab-ai_usage')).toHaveCount(0)
+   })
+ })
+-
+ // =================================================================================================== AC-T59-02
+ test.describe('T59 — aba de consumo de IA', () => {
+   test('AC-T59-02 sem uso: "Nenhum uso de IA nesta empresa", cards de saldo e sem recarga, cotas vazias', async ({ page }) => {
+diff --git a/tests/acceptance/T69/chat-list.e2e.ts b/tests/acceptance/T69/chat-list.e2e.ts
+index 737646a..a763295 100644
+--- a/tests/acceptance/T69/chat-list.e2e.ts
++++ b/tests/acceptance/T69/chat-list.e2e.ts
+@@ -40,6 +40,26 @@ async function setup(page: Page) {
+ }
+ 
+ test.describe('T69 — abas e filtros', () => {
++  test('escolher chip filtra chats e fecha a conversa do chip anterior', async ({ page }) => {
++    await loginAs(page, 'owner')
++    const first = await createConnection(page)
++    const second = await createConnection(page)
++    const a = await newChat(page, first.session_id)
++    const b = await newChat(page, second.session_id)
++    await page.goto(`/chats/${a.id}`)
++    await expect(page.getByTestId('chat-chip-select')).toBeVisible()
++    await page.getByTestId('chat-chip-select').selectOption(second.id)
++    await expect.poll(() => new URL(page.url()).pathname.replace(/\/$/, '')).toBe('/chats')
++    expect(params(page).get('connection_ids')).toContain(second.id)
++    await expect(page.getByTestId('chat-chip-select')).toHaveValue(second.id)
++    await expect.poll(() => listIds(page)).toEqual([b.id])
++    await expect(page.getByTestId(`chat-list-item-${a.id}`)).toHaveCount(0)
++    await page.reload()
++    await expect(page.getByTestId('chat-chip-select')).toHaveValue(second.id)
++    await page.getByTestId('chat-chip-select').selectOption('')
++    await expect.poll(() => listIds(page)).toEqual(expect.arrayContaining([a.id, b.id]))
++  })
++
+   test('AC-T69-01 abas por status com contadores; trocar de aba reflete na URL', async ({ page }) => {
+     const { userId, sessionId } = await setup(page)
+     const w1 = await newChat(page, sessionId)
+diff --git a/tests/acceptance/T83/mass-dispatch.e2e.ts b/tests/acceptance/T83/mass-dispatch.e2e.ts
+index bb015cd..3446159 100644
+--- a/tests/acceptance/T83/mass-dispatch.e2e.ts
++++ b/tests/acceptance/T83/mass-dispatch.e2e.ts
+@@ -130,11 +130,14 @@ async function openPage(page: Page) {
+   await waitSseOpen(page)
+ }
+ 
+-/** Abre o wizard e espera o 1º alvo vir pré-preenchido. */
++/** Abre o wizard; o operador escolhe explicitamente o chip. */
+ async function openWizard(page: Page) {
+   await tid(page, 'new').click()
+   await expect(tid(page, 'wizard')).toBeVisible()
+-  await expect(tid(page, 'target-connection-0')).not.toHaveValue('')
++  await expect(tid(page, 'target-connection-0')).toHaveValue('')
++  await expect.poll(() => tid(page, 'target-connection-0').locator('option').count()).toBeGreaterThan(1)
++  const chip = await tid(page, 'target-connection-0').locator('option').nth(1).getAttribute('value')
++  await tid(page, 'target-connection-0').selectOption(chip!)
+   await expect(tid(page, 'target-flow-0')).not.toHaveValue('')
+ }
+ 
+@@ -281,6 +284,10 @@ test.describe('T83 — wizard', () => {
+     // Passo 3 — Público (sem rascunho: todos os contatos)
+     await stepIs(page, 'audience')
+     await expect(tid(page, 'audience-draft')).toHaveCount(0)
++    await expect(tid(page, 'audience-all')).toHaveAttribute('aria-checked', 'false')
++    await tid(page, 'wizard-submit').click()
++    await expect(tid(page, 'confirm')).toHaveCount(0)
++    await tid(page, 'audience-all').click()
+     await expect(tid(page, 'audience-all')).toHaveAttribute('aria-checked', 'true')
+     await expect(tid(page, 'audience-count')).toHaveAttribute('data-count', String(people.length))
+     // voltar preserva o que foi escolhido
+@@ -334,6 +341,7 @@ test.describe('T83 — wizard', () => {
+     await expect(tid(page, 'interval-summary')).toHaveAttribute('data-min', '42')
+     await expect(tid(page, 'interval-summary')).toHaveAttribute('data-max', '42')
+     await tid(page, 'wizard-next').click()
++    await tid(page, 'audience-all').click()
+     await tid(page, 'wizard-submit').click()
+     await tid(page, 'confirm-ok').click()
+     await expectPrepared(page, 2)
+@@ -398,6 +406,7 @@ test.describe('T83 — wizard', () => {
+     await api(page, 'post', `/api/flows/${flow.id}/pause`)
+ 
+     const resp = page.waitForResponse((r) => r.url().endsWith('/api/mass-dispatches') && r.request().method() === 'POST')
++    await tid(page, 'audience-all').click()
+     await tid(page, 'wizard-submit').click()
+     await tid(page, 'confirm-ok').click()
+     expect((await resp).status()).toBe(422)
+@@ -418,6 +427,7 @@ test.describe('T83 — wizard', () => {
+     await drive(page, conn.session_id, 'close')
+ 
+     const resp = page.waitForResponse((r) => r.url().endsWith('/api/mass-dispatches') && r.request().method() === 'POST')
++    await tid(page, 'audience-all').click()
+     await tid(page, 'wizard-submit').click()
+     await tid(page, 'confirm-ok').click()
+     expect((await resp).status()).toBe(409)
+@@ -436,6 +446,8 @@ test.describe('T83 — wizard', () => {
+     await expect(page).toHaveURL(/\/mass-dispatches(\/|\?|$)/)
+     await expect(tid(page, 'wizard')).toBeVisible()
+     await expect(tid(page, 'target-flow-0')).not.toHaveValue('')
++    await expect(tid(page, 'target-connection-0')).toHaveValue('')
++    await tid(page, 'target-connection-0').selectOption((await tid(page, 'target-connection-0').locator('option').nth(1).getAttribute('value'))!)
+     await tid(page, 'wizard-next').click()
+     await tid(page, 'wizard-next').click()
+     await stepIs(page, 'audience')
+@@ -478,6 +490,7 @@ test.describe('T83 — ritmo', () => {
+       await expect(notice).toBeVisible()
+     }
+     await tid(page, 'wizard-next').click()
++    await tid(page, 'audience-all').click()
+     await tid(page, 'wizard-submit').click()
+     await expect(tid(page, 'confirm')).toContainText(/ritmo real pode ser mais lento que o configurado/i)
+   })
+@@ -492,6 +505,7 @@ test.describe('T83 — ritmo', () => {
+     await tid(page, 'wizard-next').click()
+     await tid(page, 'daily-limit').fill('50')
+     await tid(page, 'wizard-next').click()
++    await tid(page, 'audience-all').click()
+     await tid(page, 'wizard-submit').click()
+     await tid(page, 'confirm-ok').click()
+     await expect(tid(page, 'preparing')).toBeVisible()
+@@ -513,6 +527,7 @@ test.describe('T83 — preparação e detalhes', () => {
+     await openWizard(page)
+     await tid(page, 'wizard-next').click()
+     await tid(page, 'wizard-next').click()
++    await tid(page, 'audience-all').click()
+     await tid(page, 'wizard-submit').click()
+     await tid(page, 'confirm-ok').click()
+     await expect(tid(page, 'preparing')).toBeVisible()

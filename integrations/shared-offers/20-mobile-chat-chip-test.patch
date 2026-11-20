@@ -1,0 +1,26 @@
+diff --git a/tests/acceptance/T69/chat-list.e2e.ts b/tests/acceptance/T69/chat-list.e2e.ts
+index a763295..e7b2cc0 100644
+--- a/tests/acceptance/T69/chat-list.e2e.ts
++++ b/tests/acceptance/T69/chat-list.e2e.ts
+@@ -46,7 +46,7 @@ test.describe('T69 — abas e filtros', () => {
+     const second = await createConnection(page)
+     const a = await newChat(page, first.session_id)
+     const b = await newChat(page, second.session_id)
+-    await page.goto(`/chats/${a.id}`)
++    await page.goto(isMobile(page) ? '/chats' : `/chats/${a.id}`)
+     await expect(page.getByTestId('chat-chip-select')).toBeVisible()
+     await page.getByTestId('chat-chip-select').selectOption(second.id)
+     await expect.poll(() => new URL(page.url()).pathname.replace(/\/$/, '')).toBe('/chats')
+@@ -54,6 +54,12 @@ test.describe('T69 — abas e filtros', () => {
+     await expect(page.getByTestId('chat-chip-select')).toHaveValue(second.id)
+     await expect.poll(() => listIds(page)).toEqual([b.id])
+     await expect(page.getByTestId(`chat-list-item-${a.id}`)).toHaveCount(0)
++    if (isMobile(page)) {
++      await page.getByTestId(`chat-list-item-${b.id}`).tap()
++      await expect(page.getByTestId('chat-list')).toBeHidden()
++      await page.getByTestId('chat-back').tap()
++      await expect(page.getByTestId('chat-chip-select')).toHaveValue(second.id)
++    }
+     await page.reload()
+     await expect(page.getByTestId('chat-chip-select')).toHaveValue(second.id)
+     await page.getByTestId('chat-chip-select').selectOption('')

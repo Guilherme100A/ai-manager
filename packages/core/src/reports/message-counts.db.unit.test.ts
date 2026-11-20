@@ -21,18 +21,20 @@ describe('mensagens por chip', () => {
     const now = new Date('2026-10-09T12:00:00Z')
     const [a] = await db.insert(sessions).values({ name: 'A', phone: '+5531900000001' }).returning()
     const [b] = await db.insert(sessions).values({ name: 'B', phone: '+5531900000002' }).returning()
-    const msg = (sessionId: string, direction: 'outbound' | 'inbound', status: 'sent' | 'delivered' | 'read' | 'failed' | 'queued', hoursAgo: number) =>
-      db.insert(messages).values({ sessionId, phone: '+5531999999999', content: { text: 'x' }, direction, status, createdAt: new Date(now.getTime() - hoursAgo * 3_600_000) })
+    const msg = (sessionId: string, direction: 'outbound' | 'inbound', status: 'sent' | 'delivered' | 'read' | 'failed' | 'queued', hoursAgo: number, sentHoursAgo = hoursAgo) =>
+      db.insert(messages).values({ sessionId, phone: '+5531999999999', content: { text: 'x' }, direction, status, createdAt: new Date(now.getTime() - hoursAgo * 3_600_000),
+        ...(direction === 'outbound' && ['sent', 'delivered', 'read'].includes(status) ? { sentAt: new Date(now.getTime() - sentHoursAgo * 3_600_000) } : {}) })
     await msg(a!.id, 'outbound', 'delivered', 1)
     await msg(a!.id, 'outbound', 'read', 2)
     await msg(a!.id, 'outbound', 'sent', 30) // fora das 24 h
+    await msg(a!.id, 'outbound', 'delivered', 30, 1) // entrou na fila ontem, saiu hoje
     await msg(a!.id, 'outbound', 'failed', 1) // falha não conta como enviada
     await msg(a!.id, 'outbound', 'queued', 1) // na fila não conta
     await msg(a!.id, 'inbound', 'delivered', 3)
     await msg(a!.id, 'inbound', 'delivered', 48)
 
     const counts = await messageCountsBySession(db, now)
-    expect(counts[a!.id]).toEqual({ sentTotal: 3, receivedTotal: 2, sent24h: 2, received24h: 1 })
+    expect(counts[a!.id]).toEqual({ sentTotal: 4, receivedTotal: 2, sent24h: 3, received24h: 1 })
     expect(counts[b!.id]).toBeUndefined() // sem mensagens: o painel mostra 0
   })
 })

@@ -13,6 +13,8 @@ export function Sessions() {
   const counts = usePoll(() => api.messageCounts(), POLL.page)
   const [removing, setRemoving] = useState<string>()
   const [actionError, setActionError] = useState<unknown>()
+  const operating = data?.filter((s) => s.status === 'WARMING' || s.status === 'STABLE').length ?? 0
+  const needAttention = data?.filter((s) => s.status === 'NEW' || s.status === 'DISCONNECTED' || s.status === 'DEGRADED' || s.status === 'PAUSED').length ?? 0
 
   async function remove(id: string, label: string) {
     if (!window.confirm(`Excluir ${label}? O aparelho será desvinculado e o histórico de mensagens, a fila e as automações desta sessão serão apagados. Não dá para desfazer.`)) return
@@ -29,16 +31,23 @@ export function Sessions() {
   }
 
   return (
-    <div data-testid="page-sessions">
-      <PageHeader title="Sessões" subtitle="Números conectados, estado e proxy de cada sessão.">
+    <div className="chip-workspace" data-testid="page-sessions">
+      <nav className="chip-breadcrumb" aria-label="Caminho"><a href={routeHref({ name: 'home' })}>Painel</a><span aria-hidden="true">/</span><span>Chips</span></nav>
+      <PageHeader title="Chips" subtitle="Acompanhe conexão, mensagens e proxy de cada número.">
         <a className="button" href={routeHref({ name: 'new-session' })} data-testid="add-session">
           + Adicionar número
         </a>
       </PageHeader>
       <ErrorText error={error} />
       <ErrorText error={actionError} testId="action-error" />
+      <div className="chip-overview" aria-label="Resumo dos chips" data-testid="chips-overview">
+        <div className="chip-overview-card"><span>Total de chips</span><strong data-testid="chips-total">{data?.length ?? '…'}</strong></div>
+        <div className="chip-overview-card"><span>Em operação</span><strong data-testid="chips-connected">{data ? operating : '…'}</strong></div>
+        <div className="chip-overview-card"><span>Precisam de atenção</span><strong data-testid="chips-attention">{data ? needAttention : '…'}</strong></div>
+      </div>
       <ProxySharingBar />
-      <div className="table-wrap">
+      <div className="chip-list-head"><h2>Seus chips</h2><p>{data ? `${data.length} número${data.length === 1 ? '' : 's'} cadastrado${data.length === 1 ? '' : 's'}` : 'Carregando chips…'}</p></div>
+      <div className="table-wrap chip-table">
       <table>
         <thead>
           <tr>
@@ -99,7 +108,7 @@ function MessageCountCell({ counts, kind }: { counts: SessionMessageCounts | und
   return (
     <td className="nowrap" data-testid={`session-${kind}`}>
       <span className="cell-strong">{total.toLocaleString('pt-BR')}</span>
-      <div className="muted">{day} em 24 h</div>
+      <div className="muted" title={kind === 'sent' ? 'Janela móvel pelo horário em que a mensagem saiu pelo WhatsApp' : 'Janela móvel pelo horário em que a mensagem chegou'}>{day} nas últimas 24 h</div>
     </td>
   )
 }
