@@ -100,19 +100,22 @@ index bf50cc4..1e01b80 100644
    return hasAny(session, item.permissions)
  }
 diff --git a/apps/web/src/features/business-areas/workspace.tsx b/apps/web/src/features/business-areas/workspace.tsx
-index 12adad3..a18b75c 100644
+index 12adad3..35efc57 100644
 --- a/apps/web/src/features/business-areas/workspace.tsx
 +++ b/apps/web/src/features/business-areas/workspace.tsx
-@@ -66,7 +66,7 @@ export function WorkspaceBoundary({ session, children }: { session: Session; chi
-     const path = stripAppBase(window.location.pathname)
-     const scopedDeepLink = /^\/(offers|flows|connections|settings|facebook)(\/|$)/.test(path)
-     if (!choosing && scopedDeepLink) window.location.reload()
+@@ -63,10 +63,7 @@ export function WorkspaceBoundary({ session, children }: { session: Session; chi
+       return
+     }
+     // A troca precisa descartar cache de consultas e editores do workspace anterior.
+-    const path = stripAppBase(window.location.pathname)
+-    const scopedDeepLink = /^\/(offers|flows|connections|settings|facebook)(\/|$)/.test(path)
+-    if (!choosing && scopedDeepLink) window.location.reload()
 -    else window.location.replace(appPath('/offers'))
-+    else window.location.replace(appPath('/flows'))
++    window.location.replace(appPath('/flows'))
    }
  
    async function initialize() {
-@@ -108,7 +108,7 @@ export function WorkspaceBoundary({ session, children }: { session: Session; chi
+@@ -108,7 +105,7 @@ export function WorkspaceBoundary({ session, children }: { session: Session; chi
              </div>
              {!workspaces.length && canEdit && <button type="button" className="mb-2 rounded-md bg-primary px-4 py-2 text-primary-foreground" disabled={initializing} onClick={() => void initialize()}>Criar Admin 1, Admin 2 e Admin 3</button>}
              <button type="button" data-testid="workspace-enter-general" onClick={() => enter(null)} className="mt-4 flex w-full items-center justify-between gap-4 rounded-lg border px-4 py-3 text-left hover:bg-accent">
@@ -121,7 +124,7 @@ index 12adad3..a18b75c 100644
                <ArrowRight className="size-4 shrink-0" aria-hidden />
              </button>
            </>
-@@ -127,13 +127,12 @@ export function WorkspaceBoundary({ session, children }: { session: Session; chi
+@@ -127,13 +124,12 @@ export function WorkspaceBoundary({ session, children }: { session: Session; chi
            {current?.bm_id && <span className="text-xs text-muted-foreground" data-testid="business-area-bm">BM cadastrada: {current.bm_id}</span>}
            <button type="button" className="rounded-md border px-2 py-1 text-sm hover:bg-accent" onClick={() => { setLegacy(false); setChoosing(true) }}>Trocar workspace</button>
          </div>
@@ -627,7 +630,7 @@ index 371bef9..eb0cba4 100644
        throw new OfferError('O pixel precisa estar vinculado à conta de anúncio escolhida')
      for (const conn of c.connection_ids)
 diff --git a/tests/acceptance/T125/business-areas.test.ts b/tests/acceptance/T125/business-areas.test.ts
-index fd753b7..b9cf319 100644
+index fd753b7..a168719 100644
 --- a/tests/acceptance/T125/business-areas.test.ts
 +++ b/tests/acceptance/T125/business-areas.test.ts
 @@ -376,6 +376,16 @@ it('desktop/mobile navigation selects the actual business area, filters offers a
@@ -686,7 +689,7 @@ index fd753b7..b9cf319 100644
        expect(await page.getByRole('button',{name:/Business offer [01]/}).count()).toBe(0)
        expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true)
        await page.goto(base+'/crm/facebook/profiles?'+new URLSearchParams({ meta_oauth: 'success', meta_workspace: areas[1].id }))
-@@ -441,3 +457,63 @@ it('desktop/mobile navigation selects the actual business area, filters offers a
+@@ -441,3 +457,64 @@ it('desktop/mobile navigation selects the actual business area, filters offers a
      expect((await unauthorized.request.get(base+'/crm/api/business-areas')).status()).toBe(404)
    } finally {await unauthorized.close()}
  },120000)
@@ -699,6 +702,7 @@ index fd753b7..b9cf319 100644
 +  const endpoint = `/api/flows/${flowId}/commercial`
 +  const config = { ...bundles[0] }
 +  delete config.flow_id
++  delete config.offerId
 +  const draft = await call('GET', endpoint, area)
 +  expect(draft).toMatchObject({ status: 200, body: { commercial: null, can_save: true } })
 +  expect((await call('PUT', endpoint, area, { active: false, config: { ...bundles[0], flow_id: flowId } })).status).toBe(422)
