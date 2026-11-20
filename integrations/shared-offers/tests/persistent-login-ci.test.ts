@@ -78,8 +78,8 @@ it('three remembered logins of one account survive reopen, enter real CRM by SSO
     await page.goto(base + '/#/login')
     await page.getByTestId('login-username').fill(username); await page.getByTestId('login-password').fill(password)
     await page.getByTestId('login-remember').check(); await page.getByTestId('login-submit').click()
-    await page.getByTestId('nav-crm').waitFor(); await page.getByTestId('nav-crm').click()
-    const frame = page.frameLocator('[data-testid="crm-frame"]')
+    await page.getByTestId('nav-item-offers').waitFor()
+    const frame = page
     await frame.getByTestId('nav-item-offers').click()
     await frame.getByRole('heading', { name: 'Ofertas compartilhadas' }).waitFor()
     const profile = await context.request.get(base + '/crm/api/auth/profile'); expect(profile.status()).toBe(200)

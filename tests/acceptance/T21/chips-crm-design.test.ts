@@ -25,6 +25,8 @@ describe('T21 — visual de chips alinhado ao CRM', () => {
     await page.locator(tid('session-card')).waitFor({ state: 'visible' })
     expect(await page.locator(tid('session-proxy-panel')).isVisible()).toBe(true)
     expect(await page.locator(tid('btn-logs')).isVisible()).toBe(true)
+    expect(await page.getByLabel('Ativar conversas nesta conta').isDisabled()).toBe(true)
+    expect(await page.getByText('Este chip usa conexão direta.', { exact: false }).isVisible()).toBe(true)
   })
 
   it('usa a paleta do CRM em claro e escuro; cadastro continua acessível no celular', async () => {
