@@ -1,0 +1,1045 @@
+diff --git a/apps/web/src/features/facebook/api.ts b/apps/web/src/features/facebook/api.ts
+index ecca510..352fec7 100644
+--- a/apps/web/src/features/facebook/api.ts
++++ b/apps/web/src/features/facebook/api.ts
+@@ -1,6 +1,6 @@
+ // Cliente das rotas Meta (T99, T101, T103, T104): perfis/contas, OAuth, bundle do Gerenciador, edição de entidades e
+ // pixels. Formas espelham os DTOs do servidor (snake_case no fio, SPEC 3.6).
+-import { api, buildUrl } from '@/lib/http'
++import { activeBusinessArea, api, buildUrl } from '@/lib/http'
+ import type { BundleLevel, EntityPatch } from './rules'
+
+ // ---------------------------------------------------------------- perfis (T99)
+@@ -28,7 +28,7 @@ export interface MetaProfile {
+   ad_accounts_included_count: number
+ }
+
+-export const profilesKey = (companyId: string | null | undefined) => ['facebook', 'profiles', companyId ?? ''] as const
++export const profilesKey = (companyId: string | null | undefined) => ['facebook', 'profiles', companyId ?? '', activeBusinessArea()] as const
+
+ export const fetchProfiles = () => api.get<{ items: MetaProfile[] }>('/api/meta/profiles').then((r) => r.items)
+ export const deleteProfile = (id: string) => api.delete<void>(`/api/meta/profiles/${encodeURIComponent(id)}`)
+@@ -105,7 +105,7 @@ export type BundleMode = 'async' | 'sync' | 'force'
+
+ export const bundleKeyPrefix = ['facebook', 'bundle'] as const
+ export const bundleQueryKey = (companyId: string | null | undefined, q: BundleQuery) =>
+-  [...bundleKeyPrefix, companyId ?? '', [...q.ad_account_ids].sort().join(','), q.date_preset, q.since ?? '', q.until ?? '', q.status_filter, q.display_currency] as const
++  [...bundleKeyPrefix, companyId ?? '', [...q.ad_account_ids].sort().join(','), q.date_preset, q.since ?? '', q.until ?? '', q.status_filter, q.display_currency, activeBusinessArea()] as const
+
+ export function fetchBundle(q: BundleQuery, mode: BundleMode): Promise<BundleEnvelope> {
+   return api.get<BundleEnvelope>('/api/meta/structure-bundle', {
+@@ -250,3 +250,20 @@ export const updatePixel = (id: string, input: PixelInput) => api.put<{ pixel: P
+ export const deletePixel = (id: string) => api.delete<void>(`/api/meta/pixels/${encodeURIComponent(id)}`)
+
+ export type { BundleLevel }
++
++// Discovery is read-only. Linking always requires an explicit selection.
++export type WorkspaceAdAccount = Pick<MetaAdAccount, 'fb_account_id' | 'name' | 'currency' | 'account_status'>
++export const workspaceAccountsKey = (companyId: string | null | undefined, profileId?: string) =>
++  ['facebook', 'workspace-accounts', companyId ?? '', activeBusinessArea(), ...(profileId ? [profileId] : [])] as const
++export const fetchWorkspaceAccounts = (profileId: string) =>
++  api
++    .get<{ items: WorkspaceAdAccount[] }>('/api/meta/workspace/ad-accounts', { query: { profile_id: profileId } })
++    .then((r) => r.items)
++export const linkWorkspaceAccount = (profileId: string, fbAccountId: string) =>
++  api
++    .post<{ ad_account: MetaAdAccount }>('/api/meta/workspace/ad-accounts', {
++      profile_id: profileId,
++      fb_account_id: fbAccountId,
++    })
++    .then((r) => r.ad_account)
++export const maskedAccountId = (id: string) => '***' + id.replace(/^act_/, '').slice(-4)
+diff --git a/apps/web/src/features/facebook/profiles-page.tsx b/apps/web/src/features/facebook/profiles-page.tsx
+index 7875bf4..dee8cf1 100644
+--- a/apps/web/src/features/facebook/profiles-page.tsx
++++ b/apps/web/src/features/facebook/profiles-page.tsx
+@@ -7,10 +7,25 @@ import { useEffect, useRef, useState } from 'react'
+ import { Button } from '@/components/ui/button'
+ import { ConfirmDialog, serverMessage } from '@/features/settings-quick-replies/kit'
+ import { useI18n, useT } from '@/i18n'
++import { activeBusinessArea, activeCompany } from '@/lib/http'
+ import { notify } from '@/lib/toast'
+ import { useIsDesktop } from '@/lib/use-media-query'
+ import { cn } from '@/lib/utils'
+-import { bundleKeyPrefix, deleteProfile, fetchProfiles, profilesKey, refreshAdAccounts, setAccountIncluded, startOAuth, type MetaProfile } from './api'
++import {
++  bundleKeyPrefix,
++  deleteProfile,
++  fetchProfiles,
++  profilesKey,
++  refreshAdAccounts,
++  setAccountIncluded,
++  startOAuth,
++  fetchWorkspaceAccounts,
++  linkWorkspaceAccount,
++  maskedAccountId,
++  workspaceAccountsKey,
++  type WorkspaceAdAccount,
++  type MetaProfile,
++} from './api'
+ import { NS, useFacebookSession } from './layout'
+ import { applyAccountToggle, canManageProfiles, initials, oauthResult } from './rules'
+
+@@ -28,8 +43,26 @@ export function ProfilesPage({ search, onClearSearch }: { search: ProfilesSearch
+   const session = useFacebookSession()
+   const companyId = session?.company?.id
+   const manager = canManageProfiles(session)
++  const area = activeBusinessArea()
+   const key = profilesKey(companyId)
+-  const list = useQuery({ queryKey: key, queryFn: fetchProfiles })
++  const mounted = useRef(true)
++  useEffect(() => {
++    mounted.current = true
++    return () => {
++      mounted.current = false
++    }
++  }, [])
++  const current = () => mounted.current && activeCompany() === companyId && activeBusinessArea() === area
++  const clearBundles = () =>
++    qc.removeQueries({
++      predicate: (q) =>
++        q.queryKey[0] === bundleKeyPrefix[0] &&
++        q.queryKey[1] === bundleKeyPrefix[1] &&
++        q.queryKey[2] === companyId &&
++        q.queryKey.at(-1) === area,
++    })
++  const actionLock = useRef(false)
++  const list = useQuery({ queryKey: key, queryFn: fetchProfiles, enabled: !!companyId })
+   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+   const [removing, setRemoving] = useState<MetaProfile | null>(null)
+   const [busy, setBusy] = useState<string | null>(null)
+@@ -47,8 +80,14 @@ export function ProfilesPage({ search, onClearSearch }: { search: ProfilesSearch
+     if (r.status === 'success') {
+       notify('facebook-oauth-success', t('profiles.oauth.success'), t('profiles.oauth.chooseLater'))
+       void qc.invalidateQueries({ queryKey: key })
+-      void qc.removeQueries({ queryKey: bundleKeyPrefix })
+-      setTimeout(() => void qc.invalidateQueries({ queryKey: key }), OAUTH_RELOAD_MS)
++      clearBundles()
++      void qc.invalidateQueries({ queryKey: workspaceAccountsKey(companyId) })
++      setTimeout(() => {
++        if (current()) {
++          void qc.invalidateQueries({ queryKey: key })
++          void qc.invalidateQueries({ queryKey: workspaceAccountsKey(companyId) })
++        }
++      }, OAUTH_RELOAD_MS)
+     } else notify('facebook-oauth-error', t('profiles.oauth.error'), r.message ?? undefined)
+     onClearSearch()
+   }, [search, qc, key, onClearSearch, t])
+@@ -69,41 +108,58 @@ export function ProfilesPage({ search, onClearSearch }: { search: ProfilesSearch
+       notify('facebook-account-toggle-error', t('profiles.toggleError'), serverMessage(err) ?? undefined)
+     },
+     onSuccess: async (account, { id }) => {
++      if (!current()) return
+       // A inclusão muda o conjunto de contas do Gerenciador: o cache dele é descartado.
+-      qc.removeQueries({ queryKey: bundleKeyPrefix })
+-      qc.setQueryData<MetaProfile[]>(key, (old) => (old ? applyAccountToggle(old, id, account.included_in_dashboard) : old))
++      clearBundles()
++      qc.setQueryData<MetaProfile[]>(key, (old) =>
++        old ? applyAccountToggle(old, id, account.included_in_dashboard) : old,
++      )
+       await qc.invalidateQueries({ queryKey: key })
+       dropOptimistic(id)
+     },
+   })
+
+   const connect = async (profileId?: string) => {
++    if (actionLock.current || !current()) return
++    actionLock.current = true
+     setBusy(profileId ? `reconnect-${profileId}` : 'connect')
+     try {
+       const url = await startOAuth(profileId)
++      if (!current()) return
+       const browser = window.top ?? window
+       browser.location.assign(url)
+     } catch (err) {
++      if (!current()) return
+       notify('facebook-oauth-start-error', t('profiles.oauth.startError'), serverMessage(err) ?? undefined)
+       setBusy(null)
++      actionLock.current = false
+     }
+   }
+
+   const refresh = async (p: MetaProfile) => {
++    if (actionLock.current || !current()) return
++    actionLock.current = true
+     setBusy(`refresh-${p.id}`)
+     try {
+       const profile = await refreshAdAccounts(p.id)
++      if (!current()) return
+       qc.setQueryData<MetaProfile[]>(key, (old) => (old ?? []).map((x) => (x.id === p.id ? profile : x)))
+-      qc.removeQueries({ queryKey: bundleKeyPrefix })
++      clearBundles()
++      await qc.invalidateQueries({ queryKey: workspaceAccountsKey(companyId, p.id) })
+       notify('facebook-profile-refreshed', t('profiles.refreshed'))
+     } catch (err) {
++      if (!current()) return
+       notify('facebook-profile-refresh-error', t('profiles.refreshError'), serverMessage(err) ?? undefined)
+     } finally {
++      actionLock.current = false
+       setBusy(null)
+     }
+   }
+
+-  const profiles = Object.entries(optimistic).reduce((ps, [id, included]) => applyAccountToggle(ps, id, included), list.data ?? [])
++  const profiles = Object.entries(optimistic).reduce(
++    (ps, [id, included]) => applyAccountToggle(ps, id, included),
++    list.data ?? [],
++  )
+   const isOpen = (p: MetaProfile) => expanded[p.id] ?? profiles.length === 1
+
+   return (
+@@ -114,7 +170,7 @@ export function ProfilesPage({ search, onClearSearch }: { search: ProfilesSearch
+           <p className="text-sm text-muted-foreground">{t('profiles.subtitle')}</p>
+         </div>
+         {manager ? (
+-          <Button data-testid="facebook-profiles-connect" disabled={busy === 'connect'} onClick={() => void connect()}>
++          <Button data-testid="facebook-profiles-connect" disabled={busy !== null} onClick={() => void connect()}>
+             <Plus aria-hidden /> {t('profiles.connect')}
+           </Button>
+         ) : null}
+@@ -131,14 +187,20 @@ export function ProfilesPage({ search, onClearSearch }: { search: ProfilesSearch
+           ))}
+         </div>
+       ) : list.status === 'error' ? (
+-        <div data-testid="facebook-profiles-error" className="flex flex-col items-start gap-2 rounded-lg border border-destructive/40 p-4 text-sm">
++        <div
++          data-testid="facebook-profiles-error"
++          className="flex flex-col items-start gap-2 rounded-lg border border-destructive/40 p-4 text-sm"
++        >
+           <p className="text-destructive">{t('common.loadError')}</p>
+           <Button variant="outline" size="sm" onClick={() => void list.refetch()}>
+             {t('common.retry')}
+           </Button>
+         </div>
+       ) : profiles.length === 0 ? (
+-        <div data-testid="facebook-profiles-empty" className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
++        <div
++          data-testid="facebook-profiles-empty"
++          className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground"
++        >
+           <p className="font-medium text-foreground">{t('profiles.empty')}</p>
+           <p>{t('profiles.emptyHint')}</p>
+         </div>
+@@ -146,7 +208,13 @@ export function ProfilesPage({ search, onClearSearch }: { search: ProfilesSearch
+         <ul className="flex flex-col gap-3">
+           {profiles.map((p) => (
+             <ProfileCard
+-              key={p.id}
++              key={`${companyId}:${area}:${p.id}`}
++              companyId={companyId}
++              onLinked={async () => {
++                if (!current()) return
++                clearBundles()
++                await qc.invalidateQueries({ queryKey: key })
++              }}
+               profile={p}
+               open={isOpen(p)}
+               manager={manager}
+@@ -173,9 +241,10 @@ export function ProfilesPage({ search, onClearSearch }: { search: ProfilesSearch
+           if (!removing) return
+           try {
+             await deleteProfile(removing.id)
++            if (!current()) return
+             notify('facebook-profile-removed', t('profiles.removed'))
+             setRemoving(null)
+-            qc.removeQueries({ queryKey: bundleKeyPrefix })
++            clearBundles()
+             await qc.invalidateQueries({ queryKey: key })
+           } catch (err) {
+             notify('facebook-profile-remove-error', t('common.error'), serverMessage(err) ?? undefined)
+@@ -187,6 +256,8 @@ export function ProfilesPage({ search, onClearSearch }: { search: ProfilesSearch
+ }
+
+ function ProfileCard({
++  companyId,
++  onLinked,
+   profile: p,
+   open,
+   manager,
+@@ -197,6 +268,8 @@ function ProfileCard({
+   onRemove,
+   onToggleAccount,
+ }: {
++  companyId: string | undefined
++  onLinked: () => Promise<void>
+   profile: MetaProfile
+   open: boolean
+   manager: boolean
+@@ -214,12 +287,24 @@ function ProfileCard({
+   const name = p.fb_user_name || p.fb_user_id
+   const expires = p.token_expires_at ? new Date(p.token_expires_at) : null
+   return (
+-    <li data-testid={`facebook-profile-${p.id}`} data-expanded={open ? 'true' : 'false'} className="rounded-xl border bg-card">
++    <li
++      data-testid={`facebook-profile-${p.id}`}
++      data-expanded={open ? 'true' : 'false'}
++      className="rounded-xl border bg-card"
++    >
+       <div className="flex flex-wrap items-center gap-3 p-3">
+         {p.picture_url && !imgFailed ? (
+-          <img src={p.picture_url} alt="" className="size-10 shrink-0 rounded-full object-cover" onError={() => setImgFailed(true)} />
++          <img
++            src={p.picture_url}
++            alt=""
++            className="size-10 shrink-0 rounded-full object-cover"
++            onError={() => setImgFailed(true)}
++          />
+         ) : (
+-          <span aria-hidden className="grid size-10 shrink-0 place-items-center rounded-full bg-primary/10 text-sm font-semibold text-primary">
++          <span
++            aria-hidden
++            className="grid size-10 shrink-0 place-items-center rounded-full bg-primary/10 text-sm font-semibold text-primary"
++          >
+             {initials(p.fb_user_name, p.fb_user_id)}
+           </span>
+         )}
+@@ -230,7 +315,12 @@ function ProfileCard({
+             </span>
+             <span
+               data-testid={`facebook-profile-status-${p.id}`}
+-              className={cn('rounded-full px-2 py-0.5 text-xs', p.active ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400' : 'bg-muted text-muted-foreground')}
++              className={cn(
++                'rounded-full px-2 py-0.5 text-xs',
++                p.active
++                  ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400'
++                  : 'bg-muted text-muted-foreground',
++              )}
+             >
+               {t(p.active ? 'profiles.active' : 'profiles.inactive')}
+             </span>
+@@ -240,24 +330,53 @@ function ProfileCard({
+               {t('profiles.count', { included: p.ad_accounts_included_count, total: p.ad_accounts_count })}
+             </span>
+             {desktop && expires && !Number.isNaN(expires.getTime()) ? (
+-              <span data-testid={`facebook-profile-expires-${p.id}`}> · {t('profiles.expires', { date: expires.toLocaleDateString(locale) })}</span>
++              <span data-testid={`facebook-profile-expires-${p.id}`}>
++                {' '}
++                · {t('profiles.expires', { date: expires.toLocaleDateString(locale) })}
++              </span>
+             ) : null}
+           </p>
+         </div>
+         <div className="flex flex-wrap items-center gap-1">
+-          <Button variant="ghost" size="sm" data-testid={`facebook-profile-toggle-${p.id}`} aria-expanded={open} onClick={onToggleOpen}>
++          <Button
++            variant="ghost"
++            size="sm"
++            data-testid={`facebook-profile-toggle-${p.id}`}
++            aria-expanded={open}
++            onClick={onToggleOpen}
++          >
+             {t('profiles.accounts')}
+             <ChevronDown className={cn('transition-transform', open && 'rotate-180')} aria-hidden />
+           </Button>
+           {manager ? (
+             <>
+-              <Button variant="ghost" size="sm" data-testid={`facebook-profile-refresh-${p.id}`} disabled={busy !== null} onClick={onRefresh}>
+-                <RefreshCw className={cn(busy === `refresh-${p.id}` && 'animate-spin')} aria-hidden /> {t('profiles.refresh')}
++              <Button
++                variant="ghost"
++                size="sm"
++                data-testid={`facebook-profile-refresh-${p.id}`}
++                disabled={busy !== null}
++                onClick={onRefresh}
++              >
++                <RefreshCw className={cn(busy === `refresh-${p.id}` && 'animate-spin')} aria-hidden />{' '}
++                {t('profiles.refresh')}
+               </Button>
+-              <Button variant="ghost" size="sm" data-testid={`facebook-profile-reconnect-${p.id}`} disabled={busy !== null} onClick={onReconnect}>
++              <Button
++                variant="ghost"
++                size="sm"
++                data-testid={`facebook-profile-reconnect-${p.id}`}
++                disabled={busy !== null}
++                onClick={onReconnect}
++              >
+                 <Link2 aria-hidden /> {t('profiles.reconnect')}
+               </Button>
+-              <Button variant="ghost" size="sm" className="text-destructive" data-testid={`facebook-profile-remove-${p.id}`} disabled={busy !== null} onClick={onRemove}>
++              <Button
++                variant="ghost"
++                size="sm"
++                className="text-destructive"
++                data-testid={`facebook-profile-remove-${p.id}`}
++                disabled={busy !== null}
++                onClick={onRemove}
++              >
+                 <Trash2 aria-hidden /> {t('profiles.remove')}
+               </Button>
+             </>
+@@ -266,28 +385,49 @@ function ProfileCard({
+       </div>
+       {open ? (
+         <div data-testid={`facebook-profile-accounts-${p.id}`} className="border-t p-3">
++          {activeBusinessArea() ? (
++            <WorkspaceAccounts
++              profile={p}
++              companyId={companyId}
++              manager={manager}
++              busy={busy !== null}
++              onLinked={onLinked}
++            />
++          ) : null}
++          <p className="mb-2 text-sm font-medium">{t('profiles.discovery.linked')}</p>
+           {p.ad_accounts.length === 0 ? (
+             <p className="text-sm text-muted-foreground">{t('profiles.noAccounts')}</p>
+           ) : (
+             <ul className="flex flex-col gap-1">
+               {p.ad_accounts.map((a) => (
+-                <li key={a.id} data-testid={`facebook-account-${a.id}`} className="flex items-center gap-3 rounded-md px-2 py-1.5 hover:bg-muted/40">
++                <li
++                  key={a.id}
++                  data-testid={`facebook-account-${a.id}`}
++                  className="flex items-center gap-3 rounded-md px-2 py-1.5 hover:bg-muted/40"
++                >
+                   <input
+                     type="checkbox"
+                     id={`facebook-account-toggle-${a.id}`}
+                     data-testid={`facebook-account-toggle-${a.id}`}
+                     checked={a.included_in_dashboard}
+-                    disabled={!manager}
+-                    aria-label={t('profiles.includeAccount', { name: a.name || a.fb_account_id })}
++                    disabled={!manager || busy !== null}
++                    aria-label={t('profiles.includeAccount', { name: a.name || maskedAccountId(a.fb_account_id) })}
+                     onChange={(e) => onToggleAccount(a.id, e.target.checked)}
+                     className="size-4"
+                   />
+                   <label htmlFor={`facebook-account-toggle-${a.id}`} className="min-w-0 flex-1 text-sm">
+-                    <span className="block truncate font-medium">{a.name || a.fb_account_id}</span>
+-                    <span className="block truncate text-xs text-muted-foreground">{a.fb_account_id}</span>
++                    <span className="block truncate font-medium">{a.name || maskedAccountId(a.fb_account_id)}</span>
++                    <span className="block truncate text-xs text-muted-foreground">
++                      {maskedAccountId(a.fb_account_id)} · {a.currency ?? '—'} ·{' '}
++                      {t('profiles.discovery.status', { status: a.account_status ?? '—' })}
++                    </span>
+                   </label>
+                   {a.included_in_dashboard ? (
+-                    <Check data-testid={`facebook-account-included-${a.id}`} className="size-4 text-emerald-600" aria-label={t('profiles.included')} />
++                    <Check
++                      data-testid={`facebook-account-included-${a.id}`}
++                      className="size-4 text-emerald-600"
++                      aria-label={t('profiles.included')}
++                    />
+                   ) : null}
+                 </li>
+               ))}
+@@ -298,3 +438,128 @@ function ProfileCard({
+     </li>
+   )
+ }
++
++function WorkspaceAccounts({
++  profile,
++  companyId,
++  manager,
++  busy,
++  onLinked,
++}: {
++  profile: MetaProfile
++  companyId: string | undefined
++  manager: boolean
++  busy: boolean
++  onLinked: () => Promise<void>
++}) {
++  const t = useT(NS)
++  const qc = useQueryClient()
++  const area = activeBusinessArea()
++  const key = workspaceAccountsKey(companyId, profile.id)
++  const list = useQuery({ queryKey: key, queryFn: () => fetchWorkspaceAccounts(profile.id), retry: false })
++  const [selected, setSelected] = useState<WorkspaceAdAccount | null>(null)
++  const [pending, setPending] = useState(false)
++  const [error, setError] = useState(false)
++  const lock = useRef(false)
++  const mounted = useRef(true)
++  useEffect(() => {
++    mounted.current = true
++    return () => {
++      mounted.current = false
++    }
++  }, [])
++  const current = () => mounted.current && activeCompany() === companyId && activeBusinessArea() === area
++  const confirm = async () => {
++    if (!selected || lock.current || !current()) return
++    lock.current = true
++    setPending(true)
++    setError(false)
++    try {
++      await linkWorkspaceAccount(profile.id, selected.fb_account_id)
++      if (!current()) return
++      await onLinked()
++      if (!current()) return
++      await qc.invalidateQueries({ queryKey: key })
++      setSelected(null)
++    } catch {
++      if (current()) setError(true)
++    } finally {
++      lock.current = false
++      if (current()) setPending(false)
++    }
++  }
++  return (
++    <section
++      className="mb-4 flex flex-col gap-2"
++      data-testid={`facebook-candidates-${profile.id}`}
++      aria-busy={list.isFetching || pending}
++    >
++      <p className="text-sm font-medium">{t('profiles.discovery.available')}</p>
++      <p className="text-sm text-muted-foreground">{t('profiles.discovery.hint')}</p>
++      {list.isError ? (
++        <div role="alert">
++          <p>{t('profiles.discovery.loadError')}</p>
++          <Button variant="outline" disabled={list.isFetching || pending || busy} onClick={() => void list.refetch()}>
++            {t('common.retry')}
++          </Button>
++        </div>
++      ) : list.isPending ? (
++        <p>{t('profiles.discovery.loading')}</p>
++      ) : list.data.length === 0 ? (
++        <p data-testid="facebook-candidates-empty">{t('profiles.discovery.empty')}</p>
++      ) : (
++        <ul className="flex flex-col gap-2">
++          {list.data.map((a) => {
++            const linked = profile.ad_accounts.some((account) => account.fb_account_id === a.fb_account_id)
++            return (
++              <li
++                key={a.fb_account_id}
++                className="flex flex-wrap items-center gap-3 rounded-md border p-2"
++                data-testid="facebook-candidate"
++              >
++                <span className="min-w-0 flex-1 text-sm">
++                  <span className="block font-medium">{a.name || maskedAccountId(a.fb_account_id)}</span>
++                  <span>
++                    {maskedAccountId(a.fb_account_id)} · {a.currency ?? '—'} ·{' '}
++                    {t('profiles.discovery.status', { status: a.account_status ?? '—' })}
++                  </span>
++                </span>
++                {linked ? (
++                  <span>{t('profiles.discovery.linked')}</span>
++                ) : manager ? (
++                  <Button
++                    variant="outline"
++                    disabled={pending || busy || list.isFetching}
++                    onClick={() => {
++                      setError(false)
++                      setSelected(a)
++                    }}
++                  >
++                    {t('profiles.discovery.link')}
++                  </Button>
++                ) : null}
++              </li>
++            )
++          })}
++        </ul>
++      )}
++      {selected ? (
++        <div className="rounded-md border p-3" role="group" aria-label={t('profiles.discovery.confirmTitle')}>
++          <p>
++            {t('profiles.discovery.confirm', {
++              name: selected.name || maskedAccountId(selected.fb_account_id),
++              id: maskedAccountId(selected.fb_account_id),
++            })}
++          </p>
++          {error ? <p role="alert">{t('profiles.discovery.linkError')}</p> : null}
++          <Button disabled={pending || busy} onClick={() => void confirm()}>
++            {t(error ? 'common.retry' : 'profiles.discovery.link')}
++          </Button>
++          <Button variant="ghost" disabled={pending} onClick={() => setSelected(null)}>
++            {t('common.cancel')}
++          </Button>
++        </div>
++      ) : null}
++    </section>
++  )
++}
+diff --git a/apps/web/src/i18n/en/facebook.json b/apps/web/src/i18n/en/facebook.json
+index 28c4748..200cdac 100644
+--- a/apps/web/src/i18n/en/facebook.json
++++ b/apps/web/src/i18n/en/facebook.json
+@@ -258,6 +258,19 @@
+       "chooseLater": "No account is enabled automatically: choose the accounts shown on the dashboard.",
+       "error": "Could not connect the Meta profile.",
+       "startError": "Could not start the Meta connection."
++    },
++    "discovery": {
++      "available": "Accounts authorized by Meta",
++      "linked": "Linked to this profile",
++      "hint": "Select an account to link it to this workspace. Discovery does not create links.",
++      "loading": "Loading authorized accounts…",
++      "empty": "Meta returned no available accounts for this profile.",
++      "loadError": "Could not query Meta. Check your connection and permissions or reconnect the profile and retry.",
++      "link": "Link account",
++      "confirmTitle": "Confirm link",
++      "confirm": "Link {name} ({id}) to this workspace?",
++      "linkError": "Could not link the account. Check permissions, access and possible conflicts and retry.",
++      "status": "Status: {status}"
+     }
+   },
+   "events": {
+diff --git a/apps/web/src/i18n/es/facebook.json b/apps/web/src/i18n/es/facebook.json
+index 2671257..41a450e 100644
+--- a/apps/web/src/i18n/es/facebook.json
++++ b/apps/web/src/i18n/es/facebook.json
+@@ -258,6 +258,19 @@
+       "chooseLater": "Ninguna cuenta se activa automáticamente: elige las cuentas que entran en el panel.",
+       "error": "No se pudo conectar el perfil de Meta.",
+       "startError": "No se pudo iniciar la conexión con Meta."
++    },
++    "discovery": {
++      "available": "Cuentas autorizadas en Meta",
++      "linked": "Vinculadas a este perfil",
++      "hint": "Seleccione una cuenta para vincularla a este workspace. La consulta no crea vínculos.",
++      "loading": "Cargando cuentas autorizadas…",
++      "empty": "Meta no devolvió cuentas disponibles para este perfil.",
++      "loadError": "No se pudo consultar Meta. Revise la conexión y los permisos o reconecte el perfil e intente nuevamente.",
++      "link": "Vincular",
++      "confirmTitle": "Confirmar vínculo",
++      "confirm": "¿Vincular {name} ({id}) a este workspace?",
++      "linkError": "No se pudo vincular. Revise permisos, acceso y posibles conflictos e intente nuevamente.",
++      "status": "Estado: {status}"
+     }
+   },
+   "events": {
+diff --git a/apps/web/src/i18n/pt-BR/facebook.json b/apps/web/src/i18n/pt-BR/facebook.json
+index e379f80..3a156ec 100644
+--- a/apps/web/src/i18n/pt-BR/facebook.json
++++ b/apps/web/src/i18n/pt-BR/facebook.json
+@@ -258,6 +258,19 @@
+       "chooseLater": "Nenhuma conta é ativada automaticamente: escolha as contas que entram no painel.",
+       "error": "Não foi possível conectar o perfil Meta.",
+       "startError": "Não foi possível iniciar a conexão com a Meta."
++    },
++    "discovery": {
++      "available": "Contas autorizadas na Meta",
++      "linked": "Vinculadas neste perfil",
++      "hint": "Selecione uma conta para vinculá-la a este workspace. A descoberta não cria vínculos.",
++      "loading": "Carregando contas autorizadas…",
++      "empty": "A Meta não retornou contas disponíveis para este perfil.",
++      "loadError": "Não foi possível consultar a Meta. Verifique a conexão, as permissões ou reconecte o perfil e tente novamente.",
++      "link": "Vincular",
++      "confirmTitle": "Confirmar vínculo",
++      "confirm": "Vincular {name} ({id}) a este workspace?",
++      "linkError": "Não foi possível vincular. Verifique permissões, acesso e possíveis conflitos e tente novamente.",
++      "status": "Status: {status}"
+     }
+   },
+   "events": {
+diff --git a/tests/acceptance/T005-R4/browser-discovery.mjs b/tests/acceptance/T005-R4/browser-discovery.mjs
+new file mode 100644
+index 0000000..d912fe5
+--- /dev/null
++++ b/tests/acceptance/T005-R4/browser-discovery.mjs
+@@ -0,0 +1,321 @@
++/* global document, location */
++import assert from 'node:assert/strict'
++import { createServer } from 'node:http'
++import { mkdir, writeFile } from 'node:fs/promises'
++import { resolve } from 'node:path'
++import { pathToFileURL } from 'node:url'
++const root = resolve(import.meta.dirname, '../../..'),
++  web = resolve(root, 'apps/web')
++const { build } = await import(pathToFileURL(resolve(web, 'node_modules/vite/dist/node/index.js')))
++const { chromium } = await import(pathToFileURL(resolve(root, 'node_modules/@playwright/test/index.mjs')))
++process.env.VITE_BASE_PATH = '/crm/'
++process.env.VITE_API_BASE = '/crm/api'
++const evidence = resolve(root, 'test-results/T005-R4')
++await mkdir(evidence, { recursive: true })
++const result = await build({
++  root: web,
++  configLoader: 'native',
++  cacheDir: resolve(evidence, 'vite-cache'),
++  build: { write: false, sourcemap: false },
++  logLevel: 'warn',
++})
++const assets = new Map(
++  (Array.isArray(result) ? result : [result])
++    .flatMap((r) => r.output)
++    .map((o) => ['/crm/' + o.fileName, o.type === 'chunk' ? o.code : o.source]),
++)
++const server = createServer((req, res) => {
++  const path = new URL(req.url, 'http://localhost').pathname
++  res.writeHead(200, {
++    'Content-Type': path.endsWith('.js') ? 'text/javascript' : path.endsWith('.css') ? 'text/css' : 'text/html',
++  })
++  res.end(assets.get(path) ?? assets.get('/crm/index.html'))
++})
++await new Promise((r) => server.listen(0, '127.0.0.1', r))
++const origin = `http://127.0.0.1:${server.address().port}`
++const browser = await chromium.launch({ headless: true })
++const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } })
++const company = {
++  id: '11111111-1111-4111-8111-111111111111',
++  name: 'R4 fixture',
++  slug: 'r4',
++  role: 'owner',
++  effective_permissions: ['facebook.profiles', 'profile.view', 'flows.view'],
++}
++const areaA = '22222222-2222-4222-8222-222222222222',
++  areaB = '33333333-3333-4333-8333-333333333333'
++const pid = '44444444-4444-4444-8444-444444444444'
++const auth = {
++  user: {
++    id: '55555555-5555-4555-8555-555555555555',
++    name: 'R4',
++    email: 'r4@example.invalid',
++    locale: 'pt-BR',
++    system_role: 'user',
++    last_company_id: company.id,
++  },
++  companies: [company],
++}
++const profile = {
++  id: pid,
++  fb_user_id: '100',
++  fb_user_name: 'Synthetic profile',
++  active: true,
++  picture_url: null,
++  token_expires_at: null,
++  ad_accounts: [],
++  ad_accounts_count: 0,
++  ad_accounts_included_count: 0,
++}
++const accounts = Array.from({ length: 101 }, (_, i) => ({
++  fb_account_id: 'act_' + (9000000000303n + BigInt(i)).toString(),
++  name: `Authorized ${i + 1}`,
++  currency: 'BRL',
++  account_status: 1,
++}))
++let mode = 'success',
++  links = 0,
++  refreshes = 0,
++  gets = 0,
++  delayResolve,
++  postResolve,
++  postFail = false
++const requests = [],
++  errors = []
++page.on('pageerror', (e) => errors.push(e.message))
++await page.addInitScript(
++  ({ company, areaA }) => {
++    if (!sessionStorage.getItem('crm.business-area.' + company))
++      sessionStorage.setItem('crm.business-area.' + company, areaA)
++  },
++  { company: company.id, areaA },
++)
++await page.route('**/crm/api/**', async (route) => {
++  const request = route.request(),
++    url = new URL(request.url()),
++    path = url.pathname.replace('/crm/api', '')
++  const area = request.headers()['x-business-area-id']
++  requests.push({ path, method: request.method(), area })
++  let body
++  if (path === '/auth/profile') body = auth
++  else if (path === '/business-areas')
++    body = {
++      items: [
++        { id: areaA, slot: 1, name: 'Admin 1', bm_id: null },
++        { id: areaB, slot: 2, name: 'Admin 2', bm_id: null },
++      ],
++    }
++  else if (path === '/meta/profiles')
++    body = {
++      items: [
++        area === areaB
++          ? {
++              ...profile,
++              id: '66666666-6666-4666-8666-666666666666',
++              fb_user_name: 'Other workspace',
++              ad_accounts: [],
++              ad_accounts_count: 0,
++              ad_accounts_included_count: 0,
++            }
++          : profile,
++      ],
++    }
++  else if (path.endsWith('/refresh-ad-accounts')) {
++    refreshes++
++    body = { profile }
++  } else if (path === '/meta/workspace/ad-accounts' && request.method() === 'GET') {
++    gets++
++    assert.equal(url.searchParams.has('profile_id'), true)
++    if (mode === 'late' && area === areaA)
++      await new Promise((r) => {
++        delayResolve = r
++      })
++    if (mode === 'network') return route.abort('failed')
++    if (['token', 'scope', 'failure'].includes(mode))
++      return route.fulfill({
++        status: mode === 'token' ? 409 : 502,
++        json: {
++          error: {
++            code: mode === 'token' ? 'CONFLICT' : 'UPSTREAM_ERROR',
++            message: 'Synthetic provider error',
++            details: { error_code: mode === 'token' ? 'meta_token_invalid' : 'meta_upstream' },
++          },
++        },
++      })
++    body = { items: mode === 'empty' || area === areaB ? [] : accounts, provider_access_verified: true }
++  } else if (path === '/meta/workspace/ad-accounts' && request.method() === 'POST') {
++    links++
++    const input = request.postDataJSON()
++    assert.equal(input.profile_id, pid)
++    assert.equal(input.fb_account_id, accounts.at(-1).fb_account_id)
++    assert.equal(area, areaA)
++    if (postResolve === 'hold')
++      await new Promise((r) => {
++        postResolve = r
++      })
++    if (postFail)
++      return route.fulfill({ status: 409, json: { error: { code: 'CONFLICT', message: 'Synthetic conflict' } } })
++    const account = {
++      ...accounts.at(-1),
++      id: '77777777-7777-4777-8777-777777777777',
++      account_id: accounts.at(-1).fb_account_id.slice(4),
++      included_in_dashboard: true,
++    }
++    profile.ad_accounts = [account]
++    profile.ad_accounts_count = 1
++    profile.ad_accounts_included_count = 1
++    body = { ad_account: account }
++  } else if (path === '/app-config') body = { support_widget: { provider: 'none' } }
++  else if (path.includes('/events'))
++    return route.fulfill({ status: 200, contentType: 'text/event-stream', body: ': fixture\n\n' })
++  else body = { items: [], page: { page: 1, limit: 20, has_more: false }, announcements: [] }
++  await route.fulfill({ json: body })
++})
++page.setDefaultTimeout(15000)
++console.log('Built packaged SPA; starting browser checks')
++const candidates = page.getByTestId('facebook-candidate')
++const refresh = async (wait = true) => {
++  await page.getByTestId(`facebook-profile-refresh-${pid}`).click()
++  if (wait)
++    await page.waitForFunction(
++      (pid) =>
++        !document.querySelector(`[data-testid="facebook-profile-refresh-${pid}"]`)?.disabled &&
++        document.querySelector(`[data-testid="facebook-candidates-${pid}"]`)?.getAttribute('aria-busy') === 'false',
++      pid,
++    )
++}
++try {
++  await page.goto(origin + '/crm/facebook/profiles?meta_oauth=success')
++  await candidates.nth(100).waitFor()
++  await page.waitForTimeout(2700) // settle the existing delayed OAuth reload before failure injection
++  await candidates.nth(100).waitFor()
++  assert.equal(await candidates.count(), 101)
++  assert.equal(links, 0)
++  assert.match(await page.getByTestId(`facebook-profile-count-${pid}`).innerText(), /0/)
++  assert.match(await candidates.nth(100).innerText(), /\*\*\*0403/)
++  assert.match(await candidates.nth(100).innerText(), /BRL/)
++  assert.equal((await page.locator('body').innerText()).includes(accounts.at(-1).fb_account_id), false)
++  await candidates.nth(100).getByRole('button').click()
++  assert.equal(links, 0)
++  postFail = true
++  await page
++    .getByRole('group', { name: 'Confirmar vínculo' })
++    .getByRole('button', { name: 'Vincular', exact: true })
++    .click()
++  await page.getByRole('group').getByRole('alert').waitFor()
++  postFail = false
++  postResolve = 'hold'
++  await page
++    .getByRole('group')
++    .getByRole('button', { name: 'Tentar novamente' })
++    .evaluate((button) => {
++      button.click()
++      button.click()
++    })
++  await page.waitForFunction(() => document.querySelector('[role=group] button')?.disabled)
++  assert.equal(links, 2)
++  while (typeof postResolve !== 'function') await new Promise((r) => setTimeout(r, 10))
++  postResolve()
++  await page.getByTestId('facebook-account-77777777-7777-4777-8777-777777777777').waitFor()
++  assert.equal(await page.getByTestId('facebook-account-toggle-77777777-7777-4777-8777-777777777777').isChecked(), true)
++  await page.reload()
++  await page.getByTestId('facebook-account-77777777-7777-4777-8777-777777777777').waitFor()
++  assert.equal(links, 2)
++  // Successful refresh may still report zero links; candidates must remain visible.
++  profile.ad_accounts = []
++  profile.ad_accounts_count = 0
++  profile.ad_accounts_included_count = 0
++  await refresh()
++  await candidates.nth(100).waitFor()
++  for (const failure of ['token', 'scope', 'failure', 'network']) {
++    mode = failure
++    await refresh()
++    await page.getByTestId(`facebook-candidates-${pid}`).getByRole('alert').waitFor()
++    assert.equal(await page.getByTestId('facebook-candidates-empty').count(), 0)
++    mode = 'success'
++    await page.getByTestId(`facebook-candidates-${pid}`).getByRole('button', { name: 'Tentar novamente' }).click()
++    await candidates.nth(100).waitFor()
++    await page.waitForFunction(
++      (pid) =>
++        document.querySelector(`[data-testid="facebook-candidates-${pid}"]`)?.getAttribute('aria-busy') === 'false',
++      pid,
++    )
++  }
++  mode = 'empty'
++  await refresh()
++  await page.getByTestId('facebook-candidates-empty').waitFor()
++  assert.equal(await page.getByTestId(`facebook-candidates-${pid}`).getByRole('alert').count(), 0)
++  mode = 'success'
++  await refresh()
++  await candidates.nth(100).waitFor()
++  await page.screenshot({ path: resolve(evidence, 'candidates.png') })
++  const paint = await candidates.first().evaluate((el) => {
++    const r = el.getBoundingClientRect()
++    return el.contains(document.elementFromPoint(r.x + 10, r.y + 10))
++  })
++  assert.equal(paint, true)
++  mode = 'late'
++  await refresh(false)
++  while (!delayResolve) await new Promise((r) => setTimeout(r, 10))
++  await page.evaluate(
++    ({ company, areaB }) => {
++      sessionStorage.setItem('crm.business-area.' + company, areaB)
++      location.assign('/crm/facebook/profiles')
++    },
++    { company: company.id, areaB },
++  )
++  // Resolve A only after navigation has selected B; old candidates must never paint in B.
++  delayResolve()
++  await page.waitForLoadState('domcontentloaded')
++  await page.getByText('Other workspace', { exact: true }).waitFor()
++  await page.getByTestId('facebook-candidates-empty').waitFor()
++  assert.equal(await candidates.count(), 0)
++  assert.equal(links, 2)
++  assert.equal(
++    requests.some((r) => /campaign|adset|structure|oauth\/start/.test(r.path)),
++    false,
++  )
++  // Permission checks are still enforced by the server; readers get no linking action.
++  company.role = 'member'
++  mode = 'success'
++  await page.evaluate(
++    ({ company, areaA }) => {
++      sessionStorage.setItem('crm.business-area.' + company, areaA)
++      location.assign('/crm/facebook/profiles')
++    },
++    { company: company.id, areaA },
++  )
++  await candidates.nth(100).waitFor()
++  assert.equal(await candidates.getByRole('button').count(), 0)
++  assert.equal(links, 2)
++  company.role = 'owner'
++  await page.reload()
++  await candidates.nth(100).waitFor()
++  await candidates.nth(100).getByRole('button').click()
++  postResolve = 'hold'
++  await page.getByRole('group').getByRole('button', { name: 'Vincular', exact: true }).click()
++  while (typeof postResolve !== 'function') await new Promise((r) => setTimeout(r, 10))
++  await page.evaluate(
++    ({ company, areaB }) => {
++      sessionStorage.setItem('crm.business-area.' + company, areaB)
++      location.assign('/crm/facebook/profiles')
++    },
++    { company: company.id, areaB },
++  )
++  await page.getByText('Other workspace', { exact: true }).waitFor()
++  postResolve()
++  await page.getByTestId('facebook-candidates-empty').waitFor()
++  assert.equal(await candidates.count(), 0)
++  assert.equal(await page.getByTestId('facebook-account-77777777-7777-4777-8777-777777777777').count(), 0)
++  assert.equal(links, 3)
++  assert.deepEqual(errors, [])
++  await writeFile(
++    resolve(evidence, 'checks.json'),
++    JSON.stringify({ links, refreshes, gets, candidates: 101, requests, errors }, null, 2),
++  )
++  console.log('T005-R4 browser acceptance passed')
++} finally {
++  await browser.close()
++  server.closeAllConnections()
++  await new Promise((r) => server.close(r))
++}
+diff --git a/tests/acceptance/T005-R4/candidates.e2e.ts b/tests/acceptance/T005-R4/candidates.e2e.ts
+new file mode 100644
+index 0000000..834126c
+--- /dev/null
++++ b/tests/acceptance/T005-R4/candidates.e2e.ts
+@@ -0,0 +1,12 @@
++﻿import { expect, test } from '@playwright/test'
++import { exec, tail } from '../helpers/exec'
++// Controlled packaged SPA and fake HTTP only; use this folder's config, with no DB/server harness.
++test('T005-R4 candidates, explicit linking, failures, permissions and late responses', () => {
++  test.setTimeout(300_000)
++  const result = exec('node tests/acceptance/T005-R4/browser-discovery.mjs', {
++    timeoutMs: 240_000,
++    env: { NODE_ENV: 'production' },
++  })
++  expect(result.code, tail(result)).toBe(0)
++  expect(result.stdout).toContain('T005-R4 browser acceptance passed')
++})
+diff --git a/tests/acceptance/T005-R4/discovery.test.ts b/tests/acceptance/T005-R4/discovery.test.ts
+new file mode 100644
+index 0000000..20f904f
+--- /dev/null
++++ b/tests/acceptance/T005-R4/discovery.test.ts
+@@ -0,0 +1,10 @@
++﻿import { expect, it } from 'vitest'
++import { exec, tail } from '../helpers/exec'
++it('T005-R4 discovers and explicitly links accounts with isolated fake HTTP in the packaged UI', () => {
++  const result = exec('node tests/acceptance/T005-R4/browser-discovery.mjs', {
++    timeoutMs: 240_000,
++    env: { NODE_ENV: 'production' },
++  })
++  expect(result.code, tail(result)).toBe(0)
++  expect(result.stdout).toContain('T005-R4 browser acceptance passed')
++}, 300_000)
+diff --git a/tests/acceptance/T005-R4/graph.test.ts b/tests/acceptance/T005-R4/graph.test.ts
+new file mode 100644
+index 0000000..50cd850
+--- /dev/null
++++ b/tests/acceptance/T005-R4/graph.test.ts
+@@ -0,0 +1,37 @@
++﻿import { afterAll, beforeAll, expect, it } from 'vitest'
++import { GraphClient } from '../../../packages/core/src/meta-ads/client/graph'
++import { FakeMetaGraph } from '../../../packages/core/src/meta-ads/client/testing/fake-graph'
++const fake = new FakeMetaGraph({ appSecret: 'r4-synthetic-secret', pageSize: 50 })
++let graph: GraphClient
++beforeAll(async () => {
++  const { url } = await fake.start()
++  fake.addUser({
++    id: 'r4',
++    name: 'Synthetic R4',
++    adAccounts: Array.from({ length: 101 }, (_, i) => ({ id: `act_${3000 + i}`, currency: 'BRL', account_status: 1 })),
++  })
++  graph = new GraphClient({ graphUrl: url, appSecret: 'r4-synthetic-secret', accessToken: fake.issueToken('r4') })
++})
++afterAll(async () => {
++  await fake.close()
++})
++it('the existing Graph client follows page 2 with limit100 and more than100 authorized accounts', async () => {
++  fake.requests.length = 0
++  const items = await graph.getAll<{ id: string }>('me/adaccounts', {
++    fields: 'id,account_id,name,currency,account_status',
++    limit: 100,
++  })
++  expect(items).toHaveLength(101)
++  expect(items.at(-1)?.id).toBe('act_3100')
++  expect(fake.requests).toHaveLength(2)
++  expect(fake.requests[1]?.query.after).toBeTruthy()
++  expect(fake.requests.every((r) => r.method === 'GET' && r.endpoint === '/me/adaccounts')).toBe(true)
++})
++it('a legitimate empty response is successful, while token/scope/provider errors reject', async () => {
++  fake.addUser({ id: 'empty', name: 'Empty', adAccounts: [] })
++  expect(await graph.getAll('me/adaccounts', {}, { accessToken: fake.issueToken('empty') })).toEqual([])
++  for (const code of [190, 200, 2]) {
++    fake.failNext(400, { code, type: 'OAuthException', message: 'Synthetic provider failure' })
++    await expect(graph.getAll('me/adaccounts')).rejects.toMatchObject({ code })
++  }
++})
+diff --git a/tests/acceptance/T005-R4/playwright.config.ts b/tests/acceptance/T005-R4/playwright.config.ts
+new file mode 100644
+index 0000000..a89bae3
+--- /dev/null
++++ b/tests/acceptance/T005-R4/playwright.config.ts
+@@ -0,0 +1,9 @@
++﻿import { defineConfig } from '@playwright/test'
++// This suite deliberately does not inherit the shared DB-backed webServer harness.
++export default defineConfig({
++  testDir: '.',
++  testMatch: 'candidates.e2e.ts',
++  workers: 1,
++  retries: 0,
++  projects: [{ name: 'desktop' }],
++})
