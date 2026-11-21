@@ -9,8 +9,38 @@ import { deploy } from './deploy.mjs'
 import { invoke } from './compose.mjs'
 import { TREE, sha, hashFile, read, override, specFor, composeArgs, secrets, validateManifest, availableMemoryBytes } from './lib.mjs'
 import { pgClientPlan, pg16Versions } from './pg-client-ci.mjs'
+import { waitForVisibleWithEvidence } from './nginx-browser-evidence.mjs'
 const here = path.dirname(fileURLToPath(import.meta.url))
 const revision = 'a'.repeat(40), image = 'sha256:' + 'b'.repeat(64)
+
+test('missing packaged welcome preserves the visibility timeout and saves browser evidence before teardown', async t => {
+  const report = fs.mkdtempSync(path.join(os.tmpdir(), 'crm-paint-evidence-'))
+  t.after(() => fs.rmSync(report, { recursive: true, force: true }))
+  const primary = new Error('locator.waitFor: Timeout 30000ms exceeded')
+  const events = { pageErrors: ['synthetic module failure'] }
+  const page = {
+    locator: selector => { assert.equal(selector, '[data-testid="page-welcome"]'); return { waitFor: async (...args) => { assert.deepEqual(args, []); throw primary } } },
+    evaluate: async () => ({ url: 'http://127.0.0.1/crm/welcome', readyState: 'complete', body: '', root: '' }),
+    screenshot: async ({ path: file }) => fs.writeFileSync(file, 'synthetic screenshot fixture'),
+  }
+  await assert.rejects(waitForVisibleWithEvidence(page, '[data-testid="page-welcome"]', report, 'packaged-welcome', events), error => error === primary)
+  const evidence = read(path.join(report, 'packaged-welcome-failure.json'))
+  assert.deepEqual(evidence.events, events)
+  assert.equal(evidence.page.root, '')
+  assert.equal(evidence.error.message, primary.message)
+  assert.ok(fs.existsSync(path.join(report, 'packaged-welcome-failure.png')))
+})
+
+test('browser diagnostic failure cannot mask the primary visibility failure', async t => {
+  const report = fs.mkdtempSync(path.join(os.tmpdir(), 'crm-paint-evidence-'))
+  t.after(() => fs.rmSync(report, { recursive: true, force: true }))
+  const primary = new Error('visibility timeout'), failed = async () => { throw new Error('closed browser') }
+  const page = { locator: () => ({ waitFor: async () => { throw primary } }), evaluate: failed, screenshot: failed }
+  await assert.rejects(waitForVisibleWithEvidence(page, 'fixture', report, 'packaged-welcome', {}), error => error === primary)
+  const evidence = read(path.join(report, 'packaged-welcome-failure.json'))
+  assert.equal(evidence.page_unavailable, true)
+  assert.equal(evidence.screenshot_unavailable, true)
+})
 
 test('the committed release contract matches the reconstructable source and CI image label', () => {
   const manifest = read(path.resolve(here, '../../integrations/shared-offers/manifest.json'))
