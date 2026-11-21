@@ -1,6 +1,34 @@
 import { describe, expect, it } from 'vitest'
 import { createSession, go, MOBILE, openPage, seedSession, tid, useDashboard } from './shared'
 
+function normalizeHexColor(raw: string): string {
+  const value = raw.trim().toLowerCase()
+  if (/^#[0-9a-f]{3}$/.test(value)) return '#' + [...value.slice(1)].map((digit) => digit + digit).join('')
+  if (/^#[0-9a-f]{6}$/.test(value)) return value
+  throw new Error(`Invalid CSS hex color: ${JSON.stringify(raw)}`)
+}
+
+describe('T21 — normalizacao estrita de cores hex', () => {
+  it.each([
+    ['#fff', '#ffffff'],
+    [' #FFF ', '#ffffff'],
+    ['#AbC', '#aabbcc'],
+    ['\t#AaBbCc\n', '#aabbcc'],
+    ['#09090b', '#09090b'],
+  ])('normaliza %j como %j', (raw, expected) => {
+    expect(normalizeHexColor(raw)).toBe(expected)
+    expect(normalizeHexColor(raw)).toBe(normalizeHexColor(expected))
+  })
+
+  it('preserva diferencas reais sem tolerancia de canal', () => {
+    expect(normalizeHexColor('#fefefe')).not.toBe(normalizeHexColor('#ffffff'))
+  })
+
+  it.each(['', ' \t\n', '#ff', '#ffff', '#fffff', '#ffffffff', '#ggg', '#fffffg', 'ffffff', 'red', 'rgb(255, 255, 255)', '#ff f'])('rejeita %j sem default', (raw) => {
+    expect(() => normalizeHexColor(raw)).toThrow(`Invalid CSS hex color: ${JSON.stringify(raw)}`)
+  })
+})
+
 describe('T21 — visual neutro de chips integrado ao T002', () => {
   const ctx = useDashboard()
 
@@ -48,8 +76,11 @@ describe('T21 — visual neutro de chips integrado ao T002', () => {
       const expected = colorScheme === 'dark'
         ? { bg: '#09090b', surface: '#111114', accent: '#8b8dff' }
         : { bg: '#fafafa', surface: '#ffffff', accent: '#4f46e5' }
-      expect(skin, `scheme=${colorScheme}, theme=${await page.evaluate(() => document.documentElement.dataset.theme)}, actual=${JSON.stringify(skin)}`).toEqual(expected)
-      expect(await page.evaluate(() => (window as any).__wsmColor.lowContrast(document.querySelector('.layout')))).toEqual([])
+      const diagnostic = `scheme=${colorScheme}, theme=${await page.evaluate(() => document.documentElement.dataset.theme)}, actual=${JSON.stringify(skin)}, expected=${JSON.stringify(expected)}`
+      for (const token of ['bg', 'surface', 'accent'] as const) {
+        expect(normalizeHexColor(skin[token]), `${diagnostic}, token=${token}`).toBe(normalizeHexColor(expected[token]))
+      }
+      expect(await page.evaluate(() => (window as Window & { __wsmColor: { lowContrast(root: Element | null): unknown[] } }).__wsmColor.lowContrast(document.querySelector('.layout')))).toEqual([])
       await page.locator(tid('add-session')).click()
       await page.locator(tid('page-new-session')).waitFor({ state: 'visible' })
       expect(await page.locator(tid('new-name')).isVisible()).toBe(true)
@@ -57,7 +88,7 @@ describe('T21 — visual neutro de chips integrado ao T002', () => {
       expect(await page.locator(tid('gen-pairing')).isVisible()).toBe(true)
       const width = await page.evaluate(() => ({ viewport: innerWidth, document: document.documentElement.scrollWidth }))
       expect(width.document).toBeLessThanOrEqual(width.viewport + 1)
-      expect(await page.evaluate(() => (window as any).__wsmColor.lowContrast(document.querySelector('.layout')))).toEqual([])
+      expect(await page.evaluate(() => (window as Window & { __wsmColor: { lowContrast(root: Element | null): unknown[] } }).__wsmColor.lowContrast(document.querySelector('.layout')))).toEqual([])
     }
   })
 })
