@@ -28,7 +28,7 @@ export function ThemeToggle() {
   )
 }
 
-export function Layout({ route, children }: { route: Route; children: ReactNode }) {
+export function Layout({ route, children, crmPending = false, onLogout }: { route: Route; children: ReactNode; crmPending?: boolean; onLogout?: () => void }) {
   const active = route.name === 'session' || route.name === 'new-session' ? 'sessions' : route.name
   const [open, setOpen] = useState(false)
   const menuButton = useRef<HTMLButtonElement>(null)
@@ -43,7 +43,7 @@ export function Layout({ route, children }: { route: Route; children: ReactNode 
   function onNavigate(event: MouseEvent<HTMLAnchorElement>) {
     const wasPrevented = event.defaultPrevented
     navigateLink(event, parseHash(event.currentTarget.hash))
-    if (!wasPrevented && event.defaultPrevented) closeMenu()
+    if (!wasPrevented && event.defaultPrevented && parseHash(event.currentTarget.hash).name !== 'crm') closeMenu()
   }
 
   // Menu recolhível (< 768px): fecha ao trocar de página.
@@ -82,10 +82,12 @@ export function Layout({ route, children }: { route: Route; children: ReactNode 
               onClick={onNavigate}
               data-testid={l.testId}
               className={active === l.route ? 'active' : undefined}
+              aria-busy={l.route === 'crm' && crmPending ? true : undefined}
               aria-current={active === l.route ? 'page' : undefined}
             >
               <l.icon />
               <span>{l.label}</span>
+              {l.route === 'crm' && crmPending && <span className="crm-pending" role="status">Carregando</span>}
             </a>
           ))}
           <div className="nav-foot">
@@ -94,6 +96,7 @@ export function Layout({ route, children }: { route: Route; children: ReactNode 
               className="nav-link"
               data-testid="nav-logout"
               onClick={() => {
+                onLogout?.()
                 void signOut().then(() => navigate({ name: 'login' }))
               }}
             >
