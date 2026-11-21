@@ -23,11 +23,17 @@ test('the committed release contract matches the reconstructable source and CI i
     assert.equal(bytes.length, item.bytes, item.file + ' bytes')
     assert.equal(sha(bytes), item.sha256, item.file + ' sha256')
   }
-  const recovery = manifest.patches.at(-1)
-  assert.equal(recovery.file, '23-crm-route-recovery.patch')
-  const delta = fs.readFileSync(path.resolve(here, '../../integrations/shared-offers', recovery.file), 'utf8')
-  assert.deepEqual([...delta.matchAll(/^diff --git a\/.* b\/(.*)$/gm)].map(m => m[1]), recovery.files)
+  const recovery = manifest.patches.find(item => item.file === '23-crm-route-recovery.patch')
+  const discovery = manifest.patches.find(item => item.file === '24-meta-account-discovery.patch')
+  assert.ok(recovery)
+  assert.ok(discovery)
+  assert.equal(manifest.patches.at(-1), discovery)
+  for (const item of [recovery, discovery]) {
+    const delta = fs.readFileSync(path.resolve(here, '../../integrations/shared-offers', item.file), 'utf8')
+    assert.deepEqual([...delta.matchAll(/^diff --git a\/.* b\/(.*)$/gm)].map(m => m[1]), item.files)
+  }
   assert.equal(recovery.files.length, 10)
+  assert.equal(discovery.files.length, 10)
 })
 test('Linux memory budget distinguishes reclaimable cache from a real shortage and falls back conservatively', () => {
   assert.equal(availableMemoryBytes('MemFree: 100000 kB\nMemAvailable: 1400000 kB\n', 100000 * 1024), 1400000 * 1024)
