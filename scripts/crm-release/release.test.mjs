@@ -18,6 +18,16 @@ test('the committed release contract matches the reconstructable source and CI i
   assert.equal(TREE, manifest.expected_tree)
   assert.equal(TREE, manifest.sanitization.final_tree)
   assert.ok(workflow.includes('SOURCE_TREE=' + TREE))
+  for (const item of manifest.patches) {
+    const bytes = fs.readFileSync(path.resolve(here, '../../integrations/shared-offers', item.file))
+    assert.equal(bytes.length, item.bytes, item.file + ' bytes')
+    assert.equal(sha(bytes), item.sha256, item.file + ' sha256')
+  }
+  const recovery = manifest.patches.at(-1)
+  assert.equal(recovery.file, '23-crm-route-recovery.patch')
+  const delta = fs.readFileSync(path.resolve(here, '../../integrations/shared-offers', recovery.file), 'utf8')
+  assert.deepEqual([...delta.matchAll(/^diff --git a\/.* b\/(.*)$/gm)].map(m => m[1]), recovery.files)
+  assert.equal(recovery.files.length, 10)
 })
 test('Linux memory budget distinguishes reclaimable cache from a real shortage and falls back conservatively', () => {
   assert.equal(availableMemoryBytes('MemFree: 100000 kB\nMemAvailable: 1400000 kB\n', 100000 * 1024), 1400000 * 1024)
@@ -342,6 +352,8 @@ for (const [sourceTree, journalCount] of [
   ['b0768b479dcddf637bfc5832753be02b972cfc4b', 48],
   ['6e93ea0546991123f8436bc75c68027ba30d63eb', 49],
   ['5d4d9a5897bf1ae6a4014a6ab892ff35709bf7b9', 49],
+  ['8d43f8aa65e4907c3af76975360199b64c38f5d8', 49],
+  ['f9b91ba97ba578ec44b6c0f5bc33404f4004f795', 49],
   [TREE, 49],
 ]) test('release accepts the exact installed migration prefix: '+sourceTree, t => {
   const f=installedFixture(t); f.old.source_tree=sourceTree;
