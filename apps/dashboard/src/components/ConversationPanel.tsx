@@ -22,6 +22,7 @@ export function ConversationPanel({ sessionId }: { sessionId: string }) {
   const sourceHasProxy = sourceSession?.proxyId != null && !sourceSession.requiresRestart
   const [error, setError] = useState<unknown>()
   const [busy, setBusy] = useState(false)
+  const [notice, setNotice] = useState('')
   const [ai, setAi] = useState<{ enabled: boolean; hasApiKey: boolean }>()
   const endpoint = `/api/sessions/${encodeURIComponent(sessionId)}/conversation`
   useEffect(() => {
@@ -30,8 +31,10 @@ export function ConversationPanel({ sessionId }: { sessionId: string }) {
     return () => { active = false }
   }, [])
   async function toggleAi(enabled: boolean) {
+    if (busy) return
+    setNotice('')
     setBusy(true); setError(undefined)
-    try { setAi(await request<{ enabled: boolean; hasApiKey: boolean }>('/api/ai/settings', { method: 'PUT', body: { enabled } })) }
+    try { setAi(await request<{ enabled: boolean; hasApiKey: boolean }>('/api/ai/settings', { method: 'PUT', body: { enabled } })); setNotice('Preferência de IA salva.') }
     catch (err) { setError(err) } finally { setBusy(false) }
   }
   useEffect(() => {
@@ -49,20 +52,25 @@ export function ConversationPanel({ sessionId }: { sessionId: string }) {
     return () => { active = false; clearInterval(timer) }
   }, [endpoint])
   async function save() {
-    if (!config) return
+    if (!config || busy) return
+    setNotice('')
     setBusy(true); setError(undefined)
-    try { setView(await request<View>(endpoint, { method: 'PUT', body: config })) }
+    try { setView(await request<View>(endpoint, { method: 'PUT', body: config })); setNotice('Configuração de conversas salva.') }
     catch (err) { setError(err) } finally { setBusy(false) }
   }
   async function run() {
+    if (busy) return
+    setNotice('')
     setBusy(true); setError(undefined)
-    try { await request(`${endpoint}/run`, { method: 'POST' }); setView(await request<View>(endpoint)) }
+    try { await request(`${endpoint}/run`, { method: 'POST' }); setView(await request<View>(endpoint)); setNotice('Ciclo verificado.') }
     catch (err) { setError(err) } finally { setBusy(false) }
   }
   return <section className="panel" aria-label="Conversas entre contas">
     <h2>Conversas entre contas</h2>
     <p className="hint">Ative o rodízio nas contas que podem conversar. O sistema distribui os pares, prioriza quem ficou esperando e troca parceiros entre rodadas. Cada conta participa de uma conversa por vez, usando seus limites de envio.</p>
     <ErrorText error={error} />
+    {!config && !error ? <p role="status">Carregando configuração…</p> : null}
+    {busy || notice ? <p role="status">{busy ? 'Processando ação…' : notice}</p> : null}
     {config ? <>
       <label><input type="checkbox" checked={config.enabled} disabled={busy || (!config.enabled && !sourceHasProxy)} onChange={(e) => setConfig({ ...config, enabled: e.target.checked })} /> Ativar conversas nesta conta</label>
       {sourceSession && !sourceHasProxy && <p className="hint" role="status">{sourceSession.requiresRestart ? 'Reinicie o chip para aplicar o proxy antes de ativar conversas automáticas.' : 'Este chip usa conexão direta. Configure um proxy para poder ativar conversas automáticas.'}</p>}

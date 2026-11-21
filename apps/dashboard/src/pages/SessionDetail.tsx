@@ -37,6 +37,7 @@ export function SessionDetail({ id }: { id: string }) {
   const [samples, setSamples] = useState<Sample[]>([])
   const [showLogs, setShowLogs] = useState(false)
   const [actionError, setActionError] = useState<unknown>()
+  const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
   const c = useChartColors()
   const animate = !useReducedMotion()
@@ -61,11 +62,14 @@ export function SessionDetail({ id }: { id: string }) {
   const latencyData = latency.length > 0 ? latency : metricLatency ? [{ label: 'média', ms: Math.round(metricLatency.avgMs) }] : []
 
   async function act(action: 'pause' | 'resume' | 'restart' | 'logout') {
+    if (busy) return
     if (action === 'logout' && !window.confirm('Deslogar este número? Será preciso autenticar de novo.')) return
     setBusy(true)
+    setNotice('')
     setActionError(undefined)
     try {
       await api.action(id, action)
+      setNotice('Ação solicitada. Aguardando atualização do estado.')
       session.reload()
       health.reload()
       if (action === 'logout') navigate({ name: 'sessions' })
@@ -77,6 +81,7 @@ export function SessionDetail({ id }: { id: string }) {
   }
 
   async function remove() {
+    if (busy) return
     const label = session.data ? `${session.data.name} (${session.data.phone ?? 'sem número'})` : 'este número'
     if (!window.confirm(`Excluir ${label}? O aparelho será desvinculado e o histórico de mensagens, a fila e as automações desta sessão serão apagados. Não dá para desfazer.`)) return
     setBusy(true)
@@ -106,6 +111,8 @@ export function SessionDetail({ id }: { id: string }) {
         {...(s?.note ? { subtitle: s.note } : {})}
       />
 
+      {session.loading ? <p role="status">Carregando sessão…</p> : null}
+      <ErrorText error={session.error ?? health.error ?? messages.error ?? metrics.error} />
       <section className="panel session-card" data-testid="session-card">
         <div className="chip-section-head"><h2>Estado e operação</h2><p>Dados atualizados automaticamente.</p></div>
         <dl>
@@ -171,6 +178,7 @@ export function SessionDetail({ id }: { id: string }) {
             Excluir
           </button>
         </div>
+        {busy || notice ? <p role="status" className="operation-status">{busy ? 'Processando ação…' : notice}</p> : null}
         <ErrorText error={actionError} testId="action-error" />
         <p className="muted">
           Último evento: {formatDateTime(h?.lastEventAt ?? null)} · 403: {h?.forbidden403 ?? 0}. O Health Score é apenas um indicador operacional.

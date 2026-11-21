@@ -78,6 +78,7 @@ export function NewSession() {
 
   async function start(e: FormEvent | undefined, m: Mode) {
     e?.preventDefault()
+    if (busy || connected) return
     // Validação do proxy no cliente, antes de qualquer chamada à API (sessão já criada: o bloco fica travado).
     const parsed = session ? ({ ok: true, proxy: null } as const) : parseNewSessionProxy(direct, proxy)
     setProxyError(parsed.ok ? undefined : parsed.error)
@@ -120,7 +121,7 @@ export function NewSession() {
       <form className="panel form chip-onboarding" onSubmit={(e) => start(e, 'qr')}>
         <h2>Dados do chip</h2>
         <label htmlFor="new-name">Nome</label>
-        <input id="new-name" data-testid="new-name" value={name} onChange={(e) => setName(e.target.value)} disabled={!!session} required />
+        <input id="new-name" data-testid="new-name" value={name} onChange={(e) => setName(e.target.value)} disabled={!!session || busy} required />
         <label htmlFor="new-phone">Número</label>
         <input
           id="new-phone"
@@ -128,7 +129,7 @@ export function NewSession() {
           placeholder="+5511999999999"
           value={phone}
           onChange={(e) => setPhone(e.target.value)}
-          disabled={!!session}
+          disabled={!!session || busy}
           aria-describedby="new-phone-hint"
         />
         <p className="hint" id="new-phone-hint">
@@ -141,7 +142,7 @@ export function NewSession() {
             data-testid="new-direct-connection"
             type="checkbox"
             checked={direct}
-            disabled={!!session}
+            disabled={!!session || busy}
             aria-controls="new-proxy-fields"
             onChange={(e) => {
               setDirect(e.target.checked)
@@ -151,14 +152,14 @@ export function NewSession() {
           <span>Chip pessoal / conexão direta (sem proxy)</span>
         </label>
         {direct ? <p className="hint direct-hint">O número conecta pelo IP desta máquina. Desmarque para usar um proxy.</p> : null}
-        <ProxyFields prefix="new-proxy" value={proxy} onChange={(v) => setProxy(v)} disabled={!!session} hidden={direct} />
+        <ProxyFields prefix="new-proxy" value={proxy} onChange={(v) => setProxy(v)} disabled={!!session || busy} hidden={direct} />
         {proxyError ? (
           <p className="error" role="alert" data-testid="new-proxy-error">
             {proxyError}
           </p>
         ) : null}
         <label htmlFor="new-note">Observação</label>
-        <textarea id="new-note" data-testid="new-note" value={note} onChange={(e) => setNote(e.target.value)} disabled={!!session} />
+        <textarea id="new-note" data-testid="new-note" value={note} onChange={(e) => setNote(e.target.value)} disabled={!!session || busy} />
         <div className="actions chip-onboarding-actions">
           <button type="submit" data-testid="gen-qr" disabled={busy || connected}>
             Gerar QR Code
@@ -169,6 +170,7 @@ export function NewSession() {
         </div>
       </form>
 
+      {busy ? <p role="status">Preparando conexão…</p> : null}
       <ErrorText error={error} testId="auth-error" />
 
       {waiting && mode === 'qr' ? (

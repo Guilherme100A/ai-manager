@@ -9,19 +9,23 @@ import { routeHref } from '../lib/router'
 import type { SessionMessageCounts } from '../lib/types'
 
 export function Sessions() {
-  const { data, error, reload } = usePoll(() => api.sessions(), POLL.list)
+  const { data, error, reload, loading } = usePoll(() => api.sessions(), POLL.list)
   const counts = usePoll(() => api.messageCounts(), POLL.page)
   const [removing, setRemoving] = useState<string>()
   const [actionError, setActionError] = useState<unknown>()
+  const [notice, setNotice] = useState('')
   const operating = data?.filter((s) => s.status === 'WARMING' || s.status === 'STABLE').length ?? 0
   const needAttention = data?.filter((s) => s.status === 'NEW' || s.status === 'DISCONNECTED' || s.status === 'DEGRADED' || s.status === 'PAUSED').length ?? 0
 
   async function remove(id: string, label: string) {
+    if (removing) return
     if (!window.confirm(`Excluir ${label}? O aparelho será desvinculado e o histórico de mensagens, a fila e as automações desta sessão serão apagados. Não dá para desfazer.`)) return
     setRemoving(id)
+    setNotice('')
     setActionError(undefined)
     try {
       await api.deleteSession(id)
+      setNotice('Chip excluído.')
       reload()
     } catch (err) {
       setActionError(err)
@@ -38,7 +42,9 @@ export function Sessions() {
           + Adicionar número
         </a>
       </PageHeader>
-      <ErrorText error={error} />
+      <ErrorText error={error ?? counts.error} />
+      {loading ? <p role="status">Carregando chips…</p> : null}
+      {notice ? <p className="success" role="status">{notice}</p> : null}
       <ErrorText error={actionError} testId="action-error" />
       <div className="chip-overview" aria-label="Resumo dos chips" data-testid="chips-overview">
         <div className="chip-overview-card"><span>Total de chips</span><strong data-testid="chips-total">{data?.length ?? '…'}</strong></div>
@@ -77,7 +83,7 @@ export function Sessions() {
 
 /** Total desde o início e, embaixo, as últimas 24 horas. */
 function MessageCountValue({ counts, kind }: { counts: SessionMessageCounts | undefined; kind: 'sent' | 'received' }) {
-  if (!counts) return <span className="muted" data-testid={`session-${kind}`}>0</span>
+  if (!counts) return <span className="muted" data-testid={`session-${kind}`}>Aguardando dados</span>
   const total = kind === 'sent' ? counts.sentTotal : counts.receivedTotal
   const day = kind === 'sent' ? counts.sent24h : counts.received24h
   return (
