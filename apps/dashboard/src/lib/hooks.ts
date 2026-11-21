@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { getToken, onTokenChange } from './auth'
-import { parseHash, type Route } from './router'
+import { parseHash, subscribeRoute, type Route } from './router'
 
 /** Intervalos de polling (ms). */
 export const POLL = { fast: 1000, list: 3000, page: 5000 } as const
@@ -51,13 +51,8 @@ export function usePoll<T>(fn: () => Promise<T>, intervalMs: number, deps: unkno
   return { data, error, loading, reload }
 }
 
-function subscribeHash(cb: () => void) {
-  window.addEventListener('hashchange', cb)
-  return () => window.removeEventListener('hashchange', cb)
-}
-
 export function useRoute(): Route {
-  const hash = useSyncExternalStore(subscribeHash, () => window.location.hash, () => '')
+  const hash = useSyncExternalStore(subscribeRoute, () => window.location.hash, () => '')
   return parseHash(hash)
 }
 

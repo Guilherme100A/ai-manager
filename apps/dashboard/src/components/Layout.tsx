@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore, type MouseEvent, type ReactNode } from 'react'
 import { signOut } from '../lib/signout'
-import { navigate, type Route } from '../lib/router'
+import { navigate, navigateLink, parseHash, type Route } from '../lib/router'
 import { getTheme, subscribeTheme, toggleTheme } from '../lib/theme'
 import { IconBell, IconBriefcase, IconClose, IconGroups, IconHome, IconLogout, IconMenu, IconMoon, IconPhone, IconSearch, IconSpark, IconSun, IconUsers, Logo } from './icons'
 
@@ -40,6 +40,12 @@ export function Layout({ route, children }: { route: Route; children: ReactNode 
     }
   }
 
+  function onNavigate(event: MouseEvent<HTMLAnchorElement>) {
+    const wasPrevented = event.defaultPrevented
+    navigateLink(event, parseHash(event.currentTarget.hash))
+    if (!wasPrevented && event.defaultPrevented) closeMenu()
+  }
+
   // Menu recolhível (< 768px): fecha ao trocar de página.
   useEffect(() => setOpen(false), [route])
 
@@ -50,7 +56,7 @@ export function Layout({ route, children }: { route: Route; children: ReactNode 
         if (event.key === 'Escape' && open) { setOpen(false); menuButton.current?.focus() }
       }}>
         <div className="sidebar-head">
-          <a className="brand" href="#/" onClick={closeMenu}>
+          <a className="brand" href="#/" onClick={onNavigate}>
             <Logo />
             <span>WA Session Manager</span>
           </a>
@@ -73,7 +79,7 @@ export function Layout({ route, children }: { route: Route; children: ReactNode 
             <a
               key={l.route}
               href={l.href}
-              onClick={closeMenu}
+              onClick={onNavigate}
               data-testid={l.testId}
               className={active === l.route ? 'active' : undefined}
               aria-current={active === l.route ? 'page' : undefined}

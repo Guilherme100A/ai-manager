@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createSession, go, MOBILE, openPage, seedSession, tid, useDashboard } from './shared'
 
-describe('T21 — visual de chips alinhado ao CRM', () => {
+describe('T21 — visual neutro de chips integrado ao T002', () => {
   const ctx = useDashboard()
 
   it('resume os estados sem alterar os controles de cada chip', async () => {
@@ -33,7 +33,7 @@ describe('T21 — visual de chips alinhado ao CRM', () => {
     expect(await page.getByText('Este chip usa conexão direta.', { exact: false }).isVisible()).toBe(true)
   })
 
-  it('usa a paleta do CRM em claro e escuro; cadastro continua acessível no celular', async () => {
+  it('usa a paleta neutra do painel em claro e escuro; cadastro continua acessível no celular', async () => {
     for (const colorScheme of ['light', 'dark'] as const) {
       const page = await openPage(ctx, { ...MOBILE, colorScheme })
       await go(ctx, page, '/sessions')
@@ -46,9 +46,10 @@ describe('T21 — visual de chips alinhado ao CRM', () => {
         return { bg: style.getPropertyValue('--bg').trim(), surface: style.getPropertyValue('--surface').trim(), accent: style.getPropertyValue('--accent').trim() }
       })
       const expected = colorScheme === 'dark'
-        ? { bg: '#171326', surface: '#1d1831', accent: '#a78bfa' }
-        : { bg: '#f5f3fa', surface: '#fff', accent: '#6d28d9' }
+        ? { bg: '#09090b', surface: '#111114', accent: '#8b8dff' }
+        : { bg: '#fafafa', surface: '#ffffff', accent: '#4f46e5' }
       expect(skin, `scheme=${colorScheme}, theme=${await page.evaluate(() => document.documentElement.dataset.theme)}, actual=${JSON.stringify(skin)}`).toEqual(expected)
+      expect(await page.evaluate(() => (window as any).__wsmColor.lowContrast(document.querySelector('.layout')))).toEqual([])
       await page.locator(tid('add-session')).click()
       await page.locator(tid('page-new-session')).waitFor({ state: 'visible' })
       expect(await page.locator(tid('new-name')).isVisible()).toBe(true)
@@ -56,6 +57,7 @@ describe('T21 — visual de chips alinhado ao CRM', () => {
       expect(await page.locator(tid('gen-pairing')).isVisible()).toBe(true)
       const width = await page.evaluate(() => ({ viewport: innerWidth, document: document.documentElement.scrollWidth }))
       expect(width.document).toBeLessThanOrEqual(width.viewport + 1)
+      expect(await page.evaluate(() => (window as any).__wsmColor.lowContrast(document.querySelector('.layout')))).toEqual([])
     }
   })
 })
