@@ -1458,58 +1458,9 @@ legend {
   font-weight: 600;
 }
 
-/* Chips use the same purple surfaces and hierarchy as the CRM. The scope keeps
-   the rest of the operational dashboard and its theme unchanged. */
-.layout-chips {
-  --bg: #f5f3fa;
-  --surface: #ffffff;
-  --surface-2: #f0edf7;
-  --surface-3: #e9e3f6;
-  --text: #211b36;
-  --text-muted: #69617b;
-  --border: #e0d9ed;
-  --border-strong: #c9bfdc;
-  --accent: #6d28d9;
-  --accent-fg: #ffffff;
-  --accent-soft: rgb(124 58 237 / 0.09);
-  --ring: 0 0 0 3px rgb(124 58 237 / 0.25);
-  --shadow: 0 2px 3px rgb(51 32 82 / 0.02), 0 6px 20px rgb(51 32 82 / 0.04);
-  --shadow-lg: 0 20px 70px -20px rgb(51 32 82 / 0.25);
-  --radius: 14px;
-  color: var(--text);
-  background: var(--bg);
-}
-
-:root[data-theme='dark'] .layout-chips {
-  --bg: #171326;
-  --surface: #1d1831;
-  --surface-2: #241e3a;
-  --surface-3: #30264b;
-  --text: #f2effb;
-  --text-muted: #b5abc9;
-  --border: #38304f;
-  --border-strong: #514269;
-  --accent: #a78bfa;
-  --accent-fg: #201438;
-  --accent-soft: rgb(167 139 250 / 0.11);
-  --ring: 0 0 0 3px rgb(167 139 250 / 0.28);
-  --shadow: 0 1px 0 rgb(255 255 255 / 0.02) inset, 0 6px 24px rgb(8 4 17 / 0.15);
-  --shadow-lg: 0 24px 70px -16px rgb(8 4 17 / 0.65);
-}
-
-.layout-chips .sidebar {
-  background: var(--surface);
-  border-color: var(--border);
-}
-
-.layout-chips .nav a.active {
-  color: var(--text);
-  background: var(--accent-soft);
-  box-shadow: inset 3px 0 var(--accent);
-}
-
+/* WhatsApp: os mesmos tokens neutros nos temas claro e escuro. */
 .layout-chips .main {
-  background: radial-gradient(ellipse at 92% 0%, var(--accent-soft), transparent 55%), var(--bg);
+  background: var(--bg);
 }
 
 .layout-chips .main-inner {
@@ -1517,8 +1468,8 @@ legend {
 }
 
 .chip-workspace .page-head h1 {
-  font-size: clamp(1.55rem, 2vw, 1.9rem);
-  font-weight: 700;
+  font-size: clamp(1.5rem, 2vw, 1.75rem);
+  font-weight: 600;
   letter-spacing: -0.035em;
 }
 
@@ -1980,6 +1931,64 @@ legend {
   .crm-back-short {
     display: inline;
   }
+}
+
+/* T002: shell acessível e superfícies compactas do núcleo WhatsApp. */
+.sidebar { height: 100dvh; }
+.sidebar-head { flex-shrink: 0; }
+.sidebar .brand, .sidebar .icon-button, .nav a, .nav .nav-link { min-height: 44px; }
+.sidebar .icon-button { width: 44px; }
+.sidebar .brand { white-space: normal; font-size: 0.8125rem; line-height: 1.25; }
+.nav { overflow-y: auto; padding: 3px; margin: -3px; }
+.nav a.active { background: var(--surface-3); box-shadow: var(--shadow); }
+.skip-link { position: fixed; top: -80px; left: 1rem; z-index: 100; padding: 0.75rem 1rem; background: var(--surface); border: 2px solid var(--accent); border-radius: var(--radius-sm); }
+.skip-link:focus { top: 0.5rem; }
+.main:focus { outline: none; }
+.chip-workspace { min-width: 0; overflow-wrap: anywhere; }
+.chip-workspace .panel { padding: 1.25rem; }
+.chip-workspace button, .chip-workspace .button, .chip-workspace select,
+.chip-workspace input:not([type='checkbox']):not([type='radio']),
+.chip-workspace .check, .chip-workspace label:has(input[type='checkbox']),
+.chip-breadcrumb a, .chip-card-identity a { min-height: 44px; }
+.chip-workspace button, .chip-workspace .button { height: auto; padding-block: 0.65rem; white-space: normal; line-height: 1.35; }
+.chip-workspace .button { text-align: center; }
+.chip-workspace .btn-sm { min-width: 44px; }
+.chip-workspace label:has(input[type='checkbox']) { display: inline-flex; align-items: center; gap: 0.5rem; }
+.chip-breadcrumb { margin-bottom: 0.5rem; flex-wrap: wrap; }
+.chip-breadcrumb a, .chip-card-identity a { display: inline-flex; align-items: center; min-width: 44px; }
+.chip-workspace input::placeholder, .chip-workspace textarea::placeholder { opacity: 1; }
+.chip-workspace .direct-connection { background: var(--surface-2); border-color: var(--border-strong); }
+.chip-workspace .auth img { display: block; max-width: 100%; height: auto; margin: 1rem auto; }
+.chip-workspace .pairing { font-size: clamp(1.25rem, 5vw, 2rem); padding: 0.75rem; }
+.chip-workspace .empty { padding: 1.25rem; background: var(--surface); border: 1px dashed var(--border-strong); border-radius: var(--radius-sm); }
+.chip-workspace .dialog-field { display: grid; gap: 0.35rem; margin-block: 0.75rem; max-width: 640px; }
+.chip-workspace .success { color: var(--success); }
+.chip-workspace .operation-status { margin: 0.75rem 0; }
+.links-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+.links-form > h2, .links-form .links-wide, .links-form > .hint, .links-form > .actions { grid-column: 1 / -1; }
+.links-form label { display: grid; align-content: start; gap: 0.4rem; min-width: 0; }
+.links-form select, .links-form input { width: 100%; }
+.links-form .actions { margin-top: 0; padding-top: 1rem; border-top: 1px solid var(--border); }
+.links-table { table-layout: fixed; }
+.links-table td { overflow-wrap: anywhere; }
+.links-table .actions { margin: 0; }
+.links-runs { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.5rem; }
+.links-runs li { padding: 0.75rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }
+@media (max-width: 767px) {
+  .sidebar { height: auto; }
+  .sidebar[data-open='true'] .nav { max-height: calc(100dvh - 64px); overflow-y: auto; }
+  .sidebar .brand { white-space: nowrap; }
+  .chip-workspace .panel { padding: 1rem; }
+  .chip-workspace .page-actions { width: 100%; }
+  .chip-workspace .page-actions .button { flex: 1; }
+  .chip-workspace .auth { padding-inline: 1rem; }
+  .links-form { grid-template-columns: minmax(0, 1fr); }
+  .links-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .links-table, .links-table tbody, .links-table tr, .links-table td { display: block; width: 100%; }
+  .links-table tr { padding: 0.75rem; border-bottom: 1px solid var(--border-strong); }
+  .links-table tr:last-child { border-bottom: 0; }
+  .links-table td { padding: 0.4rem; border: 0; }
+  .links-table td[data-label]::before { content: attr(data-label); display: block; color: var(--text-muted); font-size: 0.75rem; margin-bottom: 0.25rem; }
 }
 
 /* ---- Espião ----------------------------------------------------------- */

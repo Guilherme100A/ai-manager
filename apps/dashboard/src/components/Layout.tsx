@@ -1,4 +1,4 @@
-import { useEffect, useState, useSyncExternalStore, type ReactNode } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { signOut } from '../lib/signout'
 import { navigate, type Route } from '../lib/router'
 import { getTheme, subscribeTheme, toggleTheme } from '../lib/theme'
@@ -31,15 +31,26 @@ export function ThemeToggle() {
 export function Layout({ route, children }: { route: Route; children: ReactNode }) {
   const active = route.name === 'session' || route.name === 'new-session' ? 'sessions' : route.name
   const [open, setOpen] = useState(false)
+  const menuButton = useRef<HTMLButtonElement>(null)
+  const main = useRef<HTMLElement>(null)
+  function closeMenu() {
+    if (open) {
+      setOpen(false)
+      main.current?.focus()
+    }
+  }
 
   // Menu recolhível (< 768px): fecha ao trocar de página.
   useEffect(() => setOpen(false), [route])
 
   return (
-    <div className={active === 'sessions' ? 'layout layout-chips' : 'layout'}>
-      <aside className="sidebar" data-open={open ? 'true' : 'false'}>
+    <div className={active === 'sessions' || active === 'session-links' ? 'layout layout-chips' : 'layout'}>
+      <a className="skip-link" href="#main-content" onClick={(event) => { event.preventDefault(); main.current?.focus() }}>Pular para o conteúdo</a>
+      <aside className="sidebar" data-open={open ? 'true' : 'false'} onKeyDown={(event) => {
+        if (event.key === 'Escape' && open) { setOpen(false); menuButton.current?.focus() }
+      }}>
         <div className="sidebar-head">
-          <a className="brand" href="#/">
+          <a className="brand" href="#/" onClick={closeMenu}>
             <Logo />
             <span>WA Session Manager</span>
           </a>
@@ -48,6 +59,7 @@ export function Layout({ route, children }: { route: Route; children: ReactNode 
             type="button"
             className="icon-button nav-toggle"
             data-testid="nav-toggle"
+            ref={menuButton}
             aria-controls="app-nav"
             aria-expanded={open}
             aria-label={open ? 'Fechar menu' : 'Abrir menu'}
@@ -61,6 +73,7 @@ export function Layout({ route, children }: { route: Route; children: ReactNode 
             <a
               key={l.route}
               href={l.href}
+              onClick={closeMenu}
               data-testid={l.testId}
               className={active === l.route ? 'active' : undefined}
               aria-current={active === l.route ? 'page' : undefined}
@@ -84,7 +97,7 @@ export function Layout({ route, children }: { route: Route; children: ReactNode 
           </div>
         </nav>
       </aside>
-      <main className="main">
+      <main className="main" id="main-content" tabIndex={-1} ref={main}>
         <div className="main-inner">{children}</div>
       </main>
     </div>
