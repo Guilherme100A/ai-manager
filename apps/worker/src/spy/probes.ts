@@ -134,7 +134,7 @@ export class SpyProbeRunner {
     }
   }
 
-  /** "Digitando…" proporcional ao texto, envia (origin spy: passa pelo antiban e conta nos limites) e espera sair. */
+  /** Envia com os limites configurados do chip, o antiban e a validação da sonda ativa, e espera sair. */
   private async send(probe: SpyProbeRow, text: string): Promise<Date | undefined> {
     await this.opts.manager.getTransport(probe.sessionId)?.sendTyping?.(phoneToUserJid(probe.phone), true).catch(() => undefined)
     await this.sleep(Math.min(9 * SECOND, Math.max(2 * SECOND, 1_500 + text.length * 60)) + Math.floor(this.random() * 1_500))
