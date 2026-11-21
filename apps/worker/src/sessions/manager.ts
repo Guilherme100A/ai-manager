@@ -7,6 +7,8 @@ import {
   connectSession,
   logger as coreLogger,
   ProxyError,
+  ProxyUrlError,
+  normalizeInlineProxy,
   SessionError,
   SessionStore,
   toSessionView,
@@ -22,6 +24,32 @@ import {
 import { messages, type Database } from '@wsm/db'
 import { and, eq, inArray } from 'drizzle-orm'
 import { toQrDataUrl } from './qr'
+
+/** Shared validation for the internal RPC and direct manager calls. */
+export function validatePairingInput(raw: unknown = {}): { proxy?: CreateSessionInput['proxy'] } {
+  const fail = (field: string): never => {
+    throw new SessionError('VALIDATION_ERROR', 'Opções de pareamento inválidas.', field)
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return fail('input')
+  if (Object.keys(raw).some(key => key !== 'proxy')) return fail('input')
+  const input = raw as { proxy?: CreateSessionInput['proxy'] }
+  const proxy = input.proxy
+  if (proxy !== undefined && proxy !== null) {
+    if (typeof proxy !== 'object' || Array.isArray(proxy)) return fail('proxy')
+    if (Object.keys(proxy).some(key => !['protocol', 'host', 'port', 'username', 'password'].includes(key))) return fail('proxy')
+    for (const key of ['username', 'password'] as const) {
+      if (proxy[key] !== undefined && proxy[key] !== null && typeof proxy[key] !== 'string') return fail(`proxy.${key}`)
+    }
+    try {
+      normalizeInlineProxy(proxy)
+    } catch (err) {
+      if (err instanceof ProxyUrlError) return fail((err as ProxyUrlError & { field?: string }).field ?? 'proxy')
+      throw err
+    }
+  }
+  // Keep password omission: updateDetails preserves the current password in that case.
+  return input
+}
 
 export interface SessionManagerLogger {
   debug(obj: object, msg?: string): void
@@ -232,6 +260,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
 
   /** Prepare an unpaired session without starting a socket or removing credentials. */
   async preparePairing(id: string, input: { proxy?: CreateSessionInput['proxy'] } = {}): Promise<SessionView> {
+    input = validatePairingInput(input)
     const row = await this.store.get(id)
     assertAction('connect', row.status)
     const [pending] = await this.opts.db.select({ id: messages.id }).from(messages).where(and(

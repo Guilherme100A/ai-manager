@@ -10,6 +10,7 @@ import { SessionError, TransportNotConnectedError, type CreateSessionInput, type
 import type { CrmBridgeTargets } from '../crm/bridge'
 import { requireObject, requireString } from '../crm/bridge'
 import type { FakeControl } from './fake-control'
+import { validatePairingInput } from '../sessions/manager'
 
 /** Operações do worker expostas à API. */
 export interface BridgeTargets {
@@ -141,18 +142,22 @@ export function bridgeHandlers(t: BridgeTargets): Record<string, Record<string, 
       create: ([input]) => s.create(input as never),
       list: () => s.list(),
       get: ([id]) => s.get(str(id)),
-      preparePairing: async ([id, raw]) => {
-        if (!s.preparePairing || !s.getConversation || !s.configureConversation || !s.getGroupAutomation || !s.configureGroupAutomation) {
+      preparePairing: async (args) => {
+        if (typeof s.preparePairing !== 'function' || typeof s.getConversation !== 'function' || typeof s.configureConversation !== 'function' || typeof s.getGroupAutomation !== 'function' || typeof s.configureGroupAutomation !== 'function') {
           throw new SessionError('VALIDATION_ERROR', 'Preparação segura de pareamento indisponível neste worker.')
         }
-        const input = requireObject(raw ?? {}, 'input')
-        if (Object.keys(input).some(k => k !== 'proxy')) throw new SessionError('VALIDATION_ERROR', 'Opções de pareamento inválidas.')
-        const sessionId = str(id)
-        const result = await s.preparePairing(sessionId, input as { proxy?: CreateSessionInput['proxy'] })
-        const conversation = await s.getConversation(sessionId) as { config: ConversationConfig }
-        const groups = await s.getGroupAutomation(sessionId) as { config: GroupAutomationConfig }
-        await s.configureConversation(sessionId, { ...conversation.config, enabled: false })
-        await s.configureGroupAutomation(sessionId, { ...groups.config, enabled: false })
+        if (args.length < 1 || args.length > 2) throw new SessionError('VALIDATION_ERROR', 'Argumentos de pareamento inválidos.')
+        const [id, raw] = args
+        const sessionId = requireString(id, 'sessionId')
+        const input = validatePairingInput(raw)
+        // Read both configurations before any mutation, so an unavailable store fails closed.
+        const conversation = requireObject(await s.getConversation(sessionId), 'conversation')
+        const groups = requireObject(await s.getGroupAutomation(sessionId), 'groups')
+        const conversationConfig = requireObject(conversation.config, 'conversation.config') as unknown as ConversationConfig
+        const groupConfig = requireObject(groups.config, 'groups.config') as unknown as GroupAutomationConfig
+        const result = await s.preparePairing(sessionId, input)
+        await s.configureConversation(sessionId, { ...conversationConfig, enabled: false })
+        await s.configureGroupAutomation(sessionId, { ...groupConfig, enabled: false })
         return result
       },
       startQr: ([id]) => s.startQr(str(id)),

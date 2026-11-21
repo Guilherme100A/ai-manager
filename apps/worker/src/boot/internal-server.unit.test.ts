@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { InvalidTransitionError, SessionError, TransportNotConnectedError, type FakeTransport, type WaTransport } from '@wsm/core'
+import { DEFAULT_CONVERSATION_CONFIG, DEFAULT_GROUP_AUTOMATION, InvalidTransitionError, SessionError, TransportNotConnectedError, type ConversationConfig, type GroupAutomationConfig, type FakeTransport, type WaTransport } from '@wsm/core'
 import { FakeControl } from './fake-control'
 import { createInternalApp, serializeError, tokenOk, type BridgeTargets } from './internal-server'
 
@@ -74,6 +74,131 @@ describe('MCP pairing bridge', () => {
     t.sessions.configureGroupAutomation = undefined
     expect(await (await rpc(app, 'sessions', 'preparePairing', ['chip-a', {}])).json()).toMatchObject({ error: { code: 'VALIDATION_ERROR' } })
     expect(t.sessions.preparePairing).not.toHaveBeenCalled()
+  })
+  it.each([
+    { args: [] }, { args: [null] }, { args: [123] }, { args: [{}] }, { args: [' '] },
+    { args: ['chip-a', null] }, { args: ['chip-a', []] }, { args: ['chip-a', {}, 'extra'] },
+    { args: ['chip-a', { proxy: false }] }, { args: ['chip-a', { proxy: 'http://user:secret@host' }] },
+    { args: ['chip-a', { proxy: { protocol: 'http', host: 'host', port: '8080' } }] },
+    { args: ['chip-a', { proxy: { protocol: 'http', host: 'host', port: 0 } }] },
+    { args: ['chip-a', { proxy: { protocol: 'http', host: 'host', port: 8080, password: 123 } }] },
+    { args: ['chip-a', { proxy: { protocol: 'http', host: 'host', port: 8080, extra: true } }] },
+  ])('rejects malformed pairing arguments without side effects: $args', async ({ args }) => {
+    const t = safeTargets(), app = createInternalApp({ token: TOKEN, targets: t })
+    expect(await (await rpc(app, 'sessions', 'preparePairing', args)).json()).toMatchObject({ error: { code: 'VALIDATION_ERROR' } })
+    expect(t.sessions.preparePairing).not.toHaveBeenCalled()
+    expect(t.sessions.getConversation).not.toHaveBeenCalled()
+    expect(t.sessions.configureConversation).not.toHaveBeenCalled()
+    expect(t.sessions.configureGroupAutomation).not.toHaveBeenCalled()
+  })
+  it.each(['preparePairing', 'getConversation', 'configureConversation', 'getGroupAutomation', 'configureGroupAutomation'] as const)('requires capability %s before side effects', async capability => {
+    const t = safeTargets()
+    const prepare = t.sessions.preparePairing
+    t.sessions[capability] = undefined
+    const app = createInternalApp({ token: TOKEN, targets: t })
+    expect(await (await rpc(app, 'sessions', 'preparePairing', ['chip-a'])).json()).toMatchObject({ error: { code: 'VALIDATION_ERROR' } })
+    expect(prepare).not.toHaveBeenCalled()
+  })
+  it.each([undefined, null])('preserves proxy omission/null across RPC: %j', async proxy => {
+    const t = safeTargets(), app = createInternalApp({ token: TOKEN, targets: t })
+    const input = proxy === undefined ? {} : { proxy }
+    await rpc(app, 'sessions', 'preparePairing', proxy === undefined ? ['chip-a'] : ['chip-a', input])
+    expect(t.sessions.preparePairing).toHaveBeenCalledExactlyOnceWith('chip-a', input)
+  })
+  const preparationSteps = ['getConversation', 'getGroupAutomation', 'preparePairing', 'configureConversation', 'configureGroupAutomation'] as const
+  it.each(preparationSteps)('propagates a failure in %s without success or subsequent operations', async step => {
+    const t = safeTargets()
+    const failure = new Error(`${step} unavailable`)
+    vi.spyOn(t.sessions, step).mockRejectedValueOnce(failure)
+    const app = createInternalApp({ token: TOKEN, targets: t })
+    expect(await (await rpc(app, 'sessions', 'preparePairing', ['chip-a'])).json()).toEqual({ error: serializeError(failure) })
+    expect(t.sessions[step]).toHaveBeenCalledOnce()
+    for (const next of preparationSteps.slice(preparationSteps.indexOf(step) + 1)) {
+      expect(t.sessions[next]).not.toHaveBeenCalled()
+    }
+  })
+  it.each(preparationSteps)('waits for %s to resolve before returning success', async step => {
+    const t = safeTargets()
+    let entered!: () => void
+    let release!: () => void
+    const started = new Promise<void>(resolve => { entered = resolve })
+    const gate = new Promise<void>(resolve => { release = resolve })
+    vi.spyOn(t.sessions, step).mockImplementationOnce(async () => {
+      entered()
+      await gate
+      return step === 'getConversation' || step === 'getGroupAutomation'
+        ? { config: { enabled: true } }
+        : { id: 'chip-a', status: 'NEW' }
+    })
+    const app = createInternalApp({ token: TOKEN, targets: t })
+    let settled = false
+    const response = Promise.resolve(rpc(app, 'sessions', 'preparePairing', ['chip-a'])).then(async res => {
+      const body = await res.json()
+      settled = true
+      return body
+    })
+    try {
+      await started
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(settled).toBe(false)
+      for (const next of preparationSteps.slice(preparationSteps.indexOf(step) + 1)) {
+        expect(t.sessions[next]).not.toHaveBeenCalled()
+      }
+    } finally { release() }
+    expect(await response).toEqual({ result: { id: 'chip-a', status: 'NEW' } })
+    for (const operation of preparationSteps) expect(t.sessions[operation]).toHaveBeenCalledOnce()
+  })
+  it('preserves partial state on the second write failure and safely completes a later retry', async () => {
+    const initial = {
+      conversation: { ...DEFAULT_CONVERSATION_CONFIG, enabled: true, topic: 'saved topic' },
+      groups: { ...DEFAULT_GROUP_AUTOMATION, enabled: true, query: 'saved query' },
+    }
+    const chips = new Map([
+      ['chip-a', structuredClone(initial)],
+      ['chip-b', structuredClone(initial)],
+    ])
+    const t = safeTargets()
+    t.sessions.getConversation = vi.fn(async id => ({ config: { ...chips.get(id)!.conversation } }))
+    t.sessions.getGroupAutomation = vi.fn(async id => ({ config: { ...chips.get(id)!.groups } }))
+    t.sessions.configureConversation = vi.fn(async (id: string, config: ConversationConfig) => {
+      chips.get(id)!.conversation = { ...config }
+    })
+    const failure = new Error('group configuration write failed')
+    t.sessions.configureGroupAutomation = vi.fn(async (id: string, config: GroupAutomationConfig) => {
+      chips.get(id)!.groups = { ...config }
+    }).mockRejectedValueOnce(failure)
+    const app = createInternalApp({ token: TOKEN, targets: t })
+    const prepare = () => rpc(app, 'sessions', 'preparePairing', ['chip-a', {}])
+
+    expect(await (await prepare()).json()).toEqual({ error: serializeError(failure) })
+    expect(chips.get('chip-a')).toEqual({
+      conversation: { ...initial.conversation, enabled: false }, groups: initial.groups,
+    })
+    expect(chips.get('chip-b')).toEqual(initial)
+    expect(t.sessions.configureConversation).toHaveBeenCalledOnce()
+    expect(t.sessions.configureGroupAutomation).toHaveBeenCalledOnce()
+
+    expect(await (await prepare()).json()).toEqual({ result: { id: 'chip-a', status: 'NEW' } })
+    expect(chips.get('chip-a')).toEqual({
+      conversation: { ...initial.conversation, enabled: false },
+      groups: { ...initial.groups, enabled: false },
+    })
+    expect(chips.get('chip-b')).toEqual(initial)
+    for (const operation of preparationSteps) {
+      const mock = vi.mocked(t.sessions[operation]!)
+      expect(mock).toHaveBeenCalledTimes(2)
+      expect(mock.mock.calls.map(args => args[0])).toEqual(['chip-a', 'chip-a'])
+    }
+    expect(t.sessions.preparePairing).toHaveBeenNthCalledWith(1, 'chip-a', {})
+    expect(t.sessions.preparePairing).toHaveBeenNthCalledWith(2, 'chip-a', {})
+    expect(t.sessions.startQr).not.toHaveBeenCalled()
+    expect(t.sessions.getQr).not.toHaveBeenCalled()
+    expect(t.sessions.requestPairingCode).not.toHaveBeenCalled()
+    expect(t.sessions.restart).not.toHaveBeenCalled()
+    expect(t.sessions.getTransport).not.toHaveBeenCalled()
+    expect(t.sessions.tickConversation).toBeUndefined()
+    expect(t.sessions.tickGroupAutomation).toBeUndefined()
+    expect(t.messages.enqueue).not.toHaveBeenCalled()
   })
   it('propagates a pending queue failure without changing automation settings', async () => {
     const t = safeTargets()

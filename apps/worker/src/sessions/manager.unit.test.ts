@@ -97,13 +97,20 @@ describe('safe MCP pairing preparation', () => {
     const previous = fakes.last(s.id)!
     previous.emitQr('old-code')
     const [before] = await db.select().from(sessions).where(eq(sessions.id, s.id))
+    const auth = await usePostgresAuthState(db, s.id)
+    await auth.saveCreds()
+    const credentials = await db.select().from(sessionCredentials).where(eq(sessionCredentials.sessionId, s.id))
+    expect(credentials.length).toBeGreaterThan(0)
     expect((await manager.getQr(s.id)).qr).toBeTruthy()
     await manager.preparePairing(s.id, { proxy: { protocol: 'http', host: '127.0.0.1', port: 10001, username: 'operator', password: 'private-proxy-password' } })
     expect(previous.closed).toBe(true)
     expect(await manager.getQr(s.id)).toEqual({ qr: null, generatedAt: null })
     expect(fakes.created.get(s.id)).toHaveLength(1)
     const [after] = await db.select().from(sessions).where(eq(sessions.id, s.id))
-    expect(after!.browser).toEqual(before!.browser)
+    expect(after).toEqual({ ...before, proxyId: after!.proxyId, requiresRestart: true, updatedAt: after!.updatedAt })
+    expect(await db.select().from(sessionCredentials).where(eq(sessionCredentials.sessionId, s.id))).toEqual(credentials)
+    previous.emitQr('late-old-code')
+    expect(await manager.getQr(s.id)).toEqual({ qr: null, generatedAt: null })
     expect(after!.proxyId).toBeTruthy()
     expect(JSON.stringify(await db.select().from(proxies))).not.toContain('private-proxy-password')
     await manager.startQr(s.id)
@@ -120,6 +127,33 @@ describe('safe MCP pairing preparation', () => {
     expect(previous.closed).toBe(false)
     expect((await manager.get(s.id)).proxyId).toBeNull()
     expect(await db.select().from(messages)).toHaveLength(1)
+  })
+
+  it('rejects an invalid proxy before disposing runtime or invalidating QR', async () => {
+    const s = await manager.create({ name: 'invalid-proxy', phone: null })
+    await manager.startQr(s.id)
+    const previous = fakes.last(s.id)!
+    previous.emitQr('keep-code')
+    const qr = await manager.getQr(s.id)
+    const before = await manager.get(s.id)
+    await expect(manager.preparePairing(s.id, { proxy: { protocol: 'http', host: 'host', port: 0 } })).rejects.toMatchObject({ code: 'VALIDATION_ERROR', field: 'proxy.port' })
+    expect(previous.closed).toBe(false)
+    expect(await manager.getQr(s.id)).toEqual(qr)
+    expect(await manager.get(s.id)).toEqual(before)
+  })
+
+  it('ignores other chips queues, inbound messages and completed outbound messages', async () => {
+    const s = await manager.create({ name: 'ready', phone: null })
+    const other = await manager.create({ name: 'busy', phone: null })
+    await db.insert(messages).values([
+      { sessionId: other.id, phone: '+5511999990002', content: { text: 'fixture' }, status: 'queued' },
+      { sessionId: s.id, phone: '+5511999990002', content: { text: 'fixture' }, direction: 'inbound', status: 'queued' },
+      { sessionId: s.id, phone: '+5511999990002', content: { text: 'fixture' }, status: 'sent' },
+    ])
+    const before = await db.select().from(messages)
+    await expect(manager.preparePairing(s.id)).resolves.toMatchObject({ id: s.id })
+    expect(await db.select().from(messages)).toEqual(before)
+    expect(fakes.created.size).toBe(0)
   })
 
   it('never interrupts an already connected session', async () => {
