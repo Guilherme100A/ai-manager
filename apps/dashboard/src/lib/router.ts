@@ -1,3 +1,5 @@
+import type { MouseEvent } from 'react'
+
 // Roteamento por hash (#/...): funciona em qualquer servidor estático sem fallback.
 export type Route =
   | { name: 'login' }
@@ -66,7 +68,32 @@ export function routeHref(route: Route): string {
   }
 }
 
+const listeners = new Set<() => void>()
+
+export function subscribeRoute(cb: () => void): () => void {
+  listeners.add(cb)
+  window.addEventListener('hashchange', cb)
+  window.addEventListener('popstate', cb)
+  return () => {
+    listeners.delete(cb)
+    window.removeEventListener('hashchange', cb)
+    window.removeEventListener('popstate', cb)
+  }
+}
+
 export function navigate(route: Route): void {
   const href = routeHref(route)
-  if (window.location.hash !== href) window.location.hash = href
+  if (window.location.hash === href) return
+  window.history.pushState(null, '', href)
+  // pushState não emite eventos: a store muda no mesmo gesto, antes do próximo frame.
+  for (const listener of listeners) listener()
+}
+
+/** Só intercepta navegação interna na mesma aba; mantém as demais ações nativas do link. */
+export function navigateLink(event: MouseEvent<HTMLAnchorElement>, route: Route): void {
+  if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+  const link = event.currentTarget
+  if ((link.target && link.target !== '_self') || link.hasAttribute('download')) return
+  event.preventDefault()
+  navigate(route)
 }

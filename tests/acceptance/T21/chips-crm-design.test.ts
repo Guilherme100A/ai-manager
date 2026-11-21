@@ -1,7 +1,35 @@
 import { describe, expect, it } from 'vitest'
 import { createSession, go, MOBILE, openPage, seedSession, tid, useDashboard } from './shared'
 
-describe('T21 — visual de chips alinhado ao CRM', () => {
+function normalizeHexColor(raw: string): string {
+  const value = raw.trim().toLowerCase()
+  if (/^#[0-9a-f]{3}$/.test(value)) return '#' + [...value.slice(1)].map((digit) => digit + digit).join('')
+  if (/^#[0-9a-f]{6}$/.test(value)) return value
+  throw new Error(`Invalid CSS hex color: ${JSON.stringify(raw)}`)
+}
+
+describe('T21 — normalizacao estrita de cores hex', () => {
+  it.each([
+    ['#fff', '#ffffff'],
+    [' #FFF ', '#ffffff'],
+    ['#AbC', '#aabbcc'],
+    ['\t#AaBbCc\n', '#aabbcc'],
+    ['#09090b', '#09090b'],
+  ])('normaliza %j como %j', (raw, expected) => {
+    expect(normalizeHexColor(raw)).toBe(expected)
+    expect(normalizeHexColor(raw)).toBe(normalizeHexColor(expected))
+  })
+
+  it('preserva diferencas reais sem tolerancia de canal', () => {
+    expect(normalizeHexColor('#fefefe')).not.toBe(normalizeHexColor('#ffffff'))
+  })
+
+  it.each(['', ' \t\n', '#ff', '#ffff', '#fffff', '#ffffffff', '#ggg', '#fffffg', 'ffffff', 'red', 'rgb(255, 255, 255)', '#ff f'])('rejeita %j sem default', (raw) => {
+    expect(() => normalizeHexColor(raw)).toThrow(`Invalid CSS hex color: ${JSON.stringify(raw)}`)
+  })
+})
+
+describe('T21 — visual neutro de chips integrado ao T002', () => {
   const ctx = useDashboard()
 
   it('resume os estados sem alterar os controles de cada chip', async () => {
@@ -33,7 +61,7 @@ describe('T21 — visual de chips alinhado ao CRM', () => {
     expect(await page.getByText('Este chip usa conexão direta.', { exact: false }).isVisible()).toBe(true)
   })
 
-  it('usa a paleta do CRM em claro e escuro; cadastro continua acessível no celular', async () => {
+  it('usa a paleta neutra do painel em claro e escuro; cadastro continua acessível no celular', async () => {
     for (const colorScheme of ['light', 'dark'] as const) {
       const page = await openPage(ctx, { ...MOBILE, colorScheme })
       await go(ctx, page, '/sessions')
@@ -46,9 +74,13 @@ describe('T21 — visual de chips alinhado ao CRM', () => {
         return { bg: style.getPropertyValue('--bg').trim(), surface: style.getPropertyValue('--surface').trim(), accent: style.getPropertyValue('--accent').trim() }
       })
       const expected = colorScheme === 'dark'
-        ? { bg: '#171326', surface: '#1d1831', accent: '#a78bfa' }
-        : { bg: '#f5f3fa', surface: '#fff', accent: '#6d28d9' }
-      expect(skin, `scheme=${colorScheme}, theme=${await page.evaluate(() => document.documentElement.dataset.theme)}, actual=${JSON.stringify(skin)}`).toEqual(expected)
+        ? { bg: '#09090b', surface: '#111114', accent: '#8b8dff' }
+        : { bg: '#fafafa', surface: '#ffffff', accent: '#4f46e5' }
+      const diagnostic = `scheme=${colorScheme}, theme=${await page.evaluate(() => document.documentElement.dataset.theme)}, actual=${JSON.stringify(skin)}, expected=${JSON.stringify(expected)}`
+      for (const token of ['bg', 'surface', 'accent'] as const) {
+        expect(normalizeHexColor(skin[token]), `${diagnostic}, token=${token}`).toBe(normalizeHexColor(expected[token]))
+      }
+      expect(await page.evaluate(() => (window as Window & { __wsmColor: { lowContrast(root: Element | null): unknown[] } }).__wsmColor.lowContrast(document.querySelector('.layout')))).toEqual([])
       await page.locator(tid('add-session')).click()
       await page.locator(tid('page-new-session')).waitFor({ state: 'visible' })
       expect(await page.locator(tid('new-name')).isVisible()).toBe(true)
@@ -56,6 +88,7 @@ describe('T21 — visual de chips alinhado ao CRM', () => {
       expect(await page.locator(tid('gen-pairing')).isVisible()).toBe(true)
       const width = await page.evaluate(() => ({ viewport: innerWidth, document: document.documentElement.scrollWidth }))
       expect(width.document).toBeLessThanOrEqual(width.viewport + 1)
+      expect(await page.evaluate(() => (window as Window & { __wsmColor: { lowContrast(root: Element | null): unknown[] } }).__wsmColor.lowContrast(document.querySelector('.layout')))).toEqual([])
     }
   })
 })

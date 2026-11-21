@@ -18,6 +18,7 @@ export function SessionProxyPanel({ session: polled, onChanged }: { session: Ses
   const [formError, setFormError] = useState<string>()
   const [apiError, setApiError] = useState<unknown>()
   const [busy, setBusy] = useState(false)
+  const [notice, setNotice] = useState('')
 
   function open() {
     setForm(proxyFormFrom(proxy))
@@ -27,11 +28,14 @@ export function SessionProxyPanel({ session: polled, onChanged }: { session: Ses
   }
 
   async function patch(next: Parameters<typeof api.updateSession>[1]) {
+    if (busy) return
+    setNotice('')
     setBusy(true)
     setApiError(undefined)
     try {
       const updated = await api.updateSession(session.id, next)
       setLocal(updated)
+      setNotice('Proxy atualizado.')
       onChanged?.(updated)
       setEditing(false)
     } catch (err) {
@@ -102,6 +106,7 @@ export function SessionProxyPanel({ session: polled, onChanged }: { session: Ses
           </div>
         </form>
       ) : null}
+      {busy || notice ? <p role="status">{busy ? 'Salvando proxy…' : notice}</p> : null}
       <ErrorText error={apiError} testId="proxy-api-error" />
     </section>
   )

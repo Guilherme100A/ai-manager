@@ -58,10 +58,11 @@ export function ChatsPanel({ sessionId }: { sessionId: string }) {
     </div>
     <p className="hint">Histórico salvo no painel. Não atualiza sozinho e não usa o WhatsApp: abrir as conversas não gasta envios nem mexe nos limites do chip.</p>
     <ErrorText error={error} />
+    {open && busy ? <p role="status">Carregando conversas…</p> : null}
     {open && chats ? <div className="chats">
       <ul className="chats-list" aria-label="Contatos">
         {chats.length ? chats.map((c) => <li key={c.phone}>
-          <button type="button" className={c.phone === phone ? 'active' : ''} aria-current={c.phone === phone || undefined} onClick={() => select(c.phone)}>
+          <button type="button" className={c.phone === phone ? 'active' : ''} aria-pressed={c.phone === phone} disabled={busy} onClick={() => select(c.phone)}>
             <span className="chats-name">{c.name ?? c.phone}{c.isSession ? <span className="tag">chip</span> : null}</span>
             <span className="chats-meta">{c.name ? `${c.phone} · ` : ''}{c.sent} enviadas · {c.received} recebidas</span>
             <span className="chats-last">{c.lastDirection === 'outbound' ? 'Você: ' : ''}{c.lastText ?? '[mídia]'}</span>
