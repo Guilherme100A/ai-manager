@@ -9,8 +9,38 @@ import { deploy } from './deploy.mjs'
 import { invoke } from './compose.mjs'
 import { TREE, sha, hashFile, read, override, specFor, composeArgs, secrets, validateManifest, availableMemoryBytes } from './lib.mjs'
 import { pgClientPlan, pg16Versions } from './pg-client-ci.mjs'
+import { waitForVisibleWithEvidence } from './nginx-browser-evidence.mjs'
 const here = path.dirname(fileURLToPath(import.meta.url))
 const revision = 'a'.repeat(40), image = 'sha256:' + 'b'.repeat(64)
+
+test('missing packaged welcome preserves the visibility timeout and saves browser evidence before teardown', async t => {
+  const report = fs.mkdtempSync(path.join(os.tmpdir(), 'crm-paint-evidence-'))
+  t.after(() => fs.rmSync(report, { recursive: true, force: true }))
+  const primary = new Error('locator.waitFor: Timeout 30000ms exceeded')
+  const events = { pageErrors: ['synthetic module failure'] }
+  const page = {
+    locator: selector => { assert.equal(selector, '[data-testid="page-welcome"]'); return { waitFor: async (...args) => { assert.deepEqual(args, []); throw primary } } },
+    evaluate: async () => ({ url: 'http://127.0.0.1/crm/welcome', readyState: 'complete', body: '', root: '' }),
+    screenshot: async ({ path: file }) => fs.writeFileSync(file, 'synthetic screenshot fixture'),
+  }
+  await assert.rejects(waitForVisibleWithEvidence(page, '[data-testid="page-welcome"]', report, 'packaged-welcome', events), error => error === primary)
+  const evidence = read(path.join(report, 'packaged-welcome-failure.json'))
+  assert.deepEqual(evidence.events, events)
+  assert.equal(evidence.page.root, '')
+  assert.equal(evidence.error.message, primary.message)
+  assert.ok(fs.existsSync(path.join(report, 'packaged-welcome-failure.png')))
+})
+
+test('browser diagnostic failure cannot mask the primary visibility failure', async t => {
+  const report = fs.mkdtempSync(path.join(os.tmpdir(), 'crm-paint-evidence-'))
+  t.after(() => fs.rmSync(report, { recursive: true, force: true }))
+  const primary = new Error('visibility timeout'), failed = async () => { throw new Error('closed browser') }
+  const page = { locator: () => ({ waitFor: async () => { throw primary } }), evaluate: failed, screenshot: failed }
+  await assert.rejects(waitForVisibleWithEvidence(page, 'fixture', report, 'packaged-welcome', {}), error => error === primary)
+  const evidence = read(path.join(report, 'packaged-welcome-failure.json'))
+  assert.equal(evidence.page_unavailable, true)
+  assert.equal(evidence.screenshot_unavailable, true)
+})
 
 test('the committed release contract matches the reconstructable source and CI image label', () => {
   const manifest = read(path.resolve(here, '../../integrations/shared-offers/manifest.json'))
@@ -18,6 +48,22 @@ test('the committed release contract matches the reconstructable source and CI i
   assert.equal(TREE, manifest.expected_tree)
   assert.equal(TREE, manifest.sanitization.final_tree)
   assert.ok(workflow.includes('SOURCE_TREE=' + TREE))
+  for (const item of manifest.patches) {
+    const bytes = fs.readFileSync(path.resolve(here, '../../integrations/shared-offers', item.file))
+    assert.equal(bytes.length, item.bytes, item.file + ' bytes')
+    assert.equal(sha(bytes), item.sha256, item.file + ' sha256')
+  }
+  const recovery = manifest.patches.find(item => item.file === '23-crm-route-recovery.patch')
+  const discovery = manifest.patches.find(item => item.file === '24-meta-account-discovery.patch')
+  assert.ok(recovery)
+  assert.ok(discovery)
+  assert.equal(manifest.patches.at(-1), discovery)
+  for (const item of [recovery, discovery]) {
+    const delta = fs.readFileSync(path.resolve(here, '../../integrations/shared-offers', item.file), 'utf8')
+    assert.deepEqual([...delta.matchAll(/^diff --git a\/.* b\/(.*)$/gm)].map(m => m[1]), item.files)
+  }
+  assert.equal(recovery.files.length, 10)
+  assert.equal(discovery.files.length, 10)
 })
 test('Linux memory budget distinguishes reclaimable cache from a real shortage and falls back conservatively', () => {
   assert.equal(availableMemoryBytes('MemFree: 100000 kB\nMemAvailable: 1400000 kB\n', 100000 * 1024), 1400000 * 1024)
@@ -342,6 +388,8 @@ for (const [sourceTree, journalCount] of [
   ['b0768b479dcddf637bfc5832753be02b972cfc4b', 48],
   ['6e93ea0546991123f8436bc75c68027ba30d63eb', 49],
   ['5d4d9a5897bf1ae6a4014a6ab892ff35709bf7b9', 49],
+  ['8d43f8aa65e4907c3af76975360199b64c38f5d8', 49],
+  ['f9b91ba97ba578ec44b6c0f5bc33404f4004f795', 49],
   [TREE, 49],
 ]) test('release accepts the exact installed migration prefix: '+sourceTree, t => {
   const f=installedFixture(t); f.old.source_tree=sourceTree;
