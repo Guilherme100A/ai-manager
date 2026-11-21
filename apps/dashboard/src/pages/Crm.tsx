@@ -1,51 +1,40 @@
-// O CRM é a entrada principal. O SSO navega para /crm/ na mesma aba; o painel de sessões
-// permanece disponível pelo item próprio no menu do CRM.
-import { useCallback, useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api'
-import { crmEntryUrl, crmErrorState, type CrmState } from './Crm.logic'
+import { getToken, onTokenChange } from '../lib/auth'
+import { subscribeRoute } from '../lib/router'
+import { createCrmAttempt, type CrmState } from './Crm.logic'
 
-export function Crm({ flowId, metaDestination }: { flowId?: string; metaDestination?: string }) {
+/** Inline controller: the actual dashboard page and Layout stay mounted. */
+export function Crm({ flowId, metaDestination, onPending }: { flowId?: string; metaDestination?: string; onPending: (pending: boolean) => void }) {
   const [state, setState] = useState<CrmState>({ kind: 'loading' })
-
-  const load = useCallback(() => {
-    setState({ kind: 'loading' })
-    api
-      .crmSso()
-      .then(({ url }) => {
-        const target = flowId ? `/flows/${encodeURIComponent(flowId)}/edit` : metaDestination
-        const destination = crmEntryUrl(url, target)
-        if (!destination) {
-          setState({ kind: 'error', message: 'O servidor devolveu uma URL do CRM inválida.' })
-          return
-        }
-        window.location.replace(destination)
-      })
-      .catch((err: unknown) => setState(crmErrorState(err)))
-  }, [flowId, metaDestination])
-
-  useEffect(load, [load])
-
+  const attempt = useRef<ReturnType<typeof createCrmAttempt> | null>(null)
+  useEffect(() => {
+    let alive = true
+    const hash = window.location.hash
+    const token = getToken()
+    const controller = createCrmAttempt(api.crmSso, (url) => { if (window.location.hash === hash && getToken() === token) window.location.replace(url) }, (next) => {
+      setState(next)
+      onPending(next.kind === 'loading')
+    }, flowId ? `/flows/${encodeURIComponent(flowId)}/edit` : metaDestination)
+    attempt.current = controller
+    // Fence at the event, before effect cleanup, including A -> B -> A.
+    const stopRoute = subscribeRoute(() => { if (window.location.hash !== hash) controller.invalidate() })
+    const stopToken = onTokenChange(() => controller.invalidate())
+    // StrictMode's discarded setup never starts a request.
+    void Promise.resolve().then(() => { if (alive) void controller.start() })
+    return () => {
+      alive = false
+      controller.invalidate()
+      stopRoute()
+      stopToken()
+      attempt.current = null
+    }
+  }, [flowId, metaDestination, onPending])
+  if (state.kind === 'loading') return null
   return (
-    <div className="crm-shell" data-testid="page-crm">
-      <div className="crm-body">
-        {state.kind === 'loading' ? (
-          <p className="crm-status empty" data-testid="crm-loading">
-            Abrindo o CRM…
-          </p>
-        ) : state.kind === 'disabled' ? (
-          <div className="crm-status crm-notice" role="status" data-testid="crm-disabled">
-            <strong>Integração CRM desligada.</strong>
-            <p>
-              Defina <code>CRM_SSO_SECRET</code> na API (o mesmo segredo configurado no CRM) e sirva o CRM em <code>/crm/</code> para usar o CRM
-              aqui no painel.
-            </p>
-          </div>
-        ) : state.kind === 'error' ? (
-          <p className="crm-status error" role="alert" data-testid="crm-error">
-            {state.message}
-          </p>
-        ) : <p className="crm-status empty">Abrindo o CRM…</p>}
-      </div>
+    <div className="crm-inline-notice" data-testid={state.kind === 'disabled' ? 'crm-disabled' : 'crm-error'} role="alert">
+      <p>{state.kind === 'disabled' ? 'Integração CRM desligada.' : state.kind === 'error' ? state.message : ''}</p>
+      <button type="button" onClick={() => void attempt.current?.start()}>Tentar novamente</button>
     </div>
   )
 }

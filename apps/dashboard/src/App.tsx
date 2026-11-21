@@ -1,8 +1,8 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { api } from './lib/api'
 import { Layout } from './components/Layout'
 import { useRoute, useToken } from './lib/hooks'
-import { navigate, type Route } from './lib/router'
+import { navigate, routeHref, type Route } from './lib/router'
 import { Alerts } from './pages/Alerts'
 import { Report } from './pages/Report'
 import { AutoReply } from './pages/AutoReply'
@@ -49,7 +49,7 @@ function Page({ route }: { route: Route }) {
     case 'ai':
       return <AiSettingsPage />
     case 'crm':
-      // Renderizado fora do Layout (tela cheia), em App.
+      // Controlador inline renderizado por App.
       return null
     case 'login':
       return null
@@ -66,6 +66,16 @@ function Page({ route }: { route: Route }) {
 export function App() {
   const route = useRoute()
   const token = useToken()
+  const [signingOut, setSigningOut] = useState(false)
+  useEffect(() => { if (!token) setSigningOut(false) }, [token])
+  const [crmPending, setCrmPending] = useState(true)
+  useEffect(() => { if (route.name !== 'crm') setCrmPending(true) }, [route.name])
+  const implicitCrm = route.name === 'home' && !window.location.hash
+  const [displayed, setDisplayed] = useState<Route>(() => route.name === 'crm' || route.name === 'login' || implicitCrm ? { name: 'sessions' } : route)
+  // Requested CRM routes never replace the mounted dashboard page.
+  if (!token || route.name === 'login') {
+    if (displayed.name !== 'sessions') setDisplayed({ name: 'sessions' })
+  } else if (route.name !== 'crm' && !implicitCrm && routeHref(displayed) !== routeHref(route)) setDisplayed(route)
   const metaDestination = metaProfilesDestination(window.location.search)
   // A raiz autenticada abre o CRM; as rotas explícitas do gerenciador continuam acessíveis.
   useEffect(() => {
@@ -94,11 +104,10 @@ export function App() {
   }, [token, route.name, metaDestination])
 
   if (!token || route.name === 'login') return <Login returnToSessions={new URLSearchParams(window.location.search).get('return') === 'sessions' && !metaDestination} />
-  // CRM = outra parte do site: tela cheia, sem o menu lateral do painel (a barra do topo leva de volta).
-  if (route.name === 'crm') return <Crm flowId={route.flowId} metaDestination={metaDestination} />
   return (
-    <Layout route={route}>
-      <Page route={route} />
+    <Layout route={displayed} crmPending={route.name === 'crm' && crmPending && !signingOut} onLogout={() => setSigningOut(true)}>
+      <Page route={displayed} />
+      {route.name === 'crm' && !signingOut && <Crm onPending={setCrmPending} key={routeHref(route) + (metaDestination ?? '')} flowId={route.flowId} metaDestination={metaDestination} />}
     </Layout>
   )
 }

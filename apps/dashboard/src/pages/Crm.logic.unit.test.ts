@@ -1,7 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { ApiRequestError } from '../lib/api'
 import { parseHash, routeHref } from '../lib/router'
-import { backRoute, crmEntryUrl, crmErrorState, freshCrmUrl, metaProfilesDestination, safeCrmUrl } from './Crm.logic'
+import { createCrmAttempt, backRoute, crmEntryUrl, crmErrorState, freshCrmUrl, metaProfilesDestination, safeCrmUrl } from './Crm.logic'
 
 describe('página CRM', () => {
   it('keeps only the validated OAuth result and workspace on the fixed CRM destination', () => {
@@ -51,5 +51,61 @@ describe('página CRM', () => {
     expect(backRoute({ name: 'login' })).toEqual({ name: 'home' })
     expect(backRoute({ name: 'not-found', path: '/x' })).toEqual({ name: 'home' })
     expect(routeHref(backRoute({ name: 'groups' }))).toBe('#/groups')
+  })
+})
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason: unknown) => void
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
+  return { promise, resolve, reject }
+}
+
+describe('CRM attempts with deferred responses', () => {
+  it('shares repeated clicks, invalidates old responses and allows a fresh attempt', async () => {
+    const old = deferred<{ url: string }>(), next = deferred<{ url: string }>()
+    const request = vi.fn().mockReturnValueOnce(old.promise).mockReturnValueOnce(next.promise)
+    const replace = vi.fn(), report = vi.fn()
+    const controller = createCrmAttempt(request, replace, report)
+    const first = controller.start()
+    expect(controller.start()).toBe(first)
+    await Promise.resolve()
+    expect(request).toHaveBeenCalledTimes(1)
+    controller.invalidate()
+    const second = controller.start()
+    next.resolve({ url: '/crm/auth/sso#token=new' })
+    await second
+    old.resolve({ url: '/crm/auth/sso#token=old' })
+    await first
+    expect(replace).toHaveBeenCalledTimes(1)
+    expect(replace.mock.calls[0]?.[0]).toContain('#token=new')
+    expect(request).toHaveBeenCalledTimes(2)
+  })
+  it('ignores rejected responses after unmount and retries invalid URLs', async () => {
+    const old = deferred<{ url: string }>()
+    const report = vi.fn(), replace = vi.fn()
+    const controller = createCrmAttempt(() => old.promise, replace, report)
+    const pending = controller.start()
+    controller.invalidate()
+    old.reject(new Error('late'))
+    await pending
+    expect(report).toHaveBeenCalledTimes(1)
+    expect(replace).not.toHaveBeenCalled()
+    const request = vi.fn().mockResolvedValueOnce({ url: '//other.example' }).mockResolvedValueOnce({ url: '/crm/auth/sso#token=ok' })
+    const retry = createCrmAttempt(request, replace, report, '/flows/one/edit')
+    await retry.start()
+    expect(report).toHaveBeenLastCalledWith({ kind: 'error', message: expect.stringContaining('inválida') })
+    await retry.start()
+    expect(replace).toHaveBeenCalledWith(expect.stringContaining('&redirect=%2Fflows%2Fone%2Fedit'))
+  })
+  it.each([501, 403, 500])('reports %s and makes exactly one new request on retry', async (status) => {
+    const request = vi.fn().mockRejectedValueOnce(new ApiRequestError(status, 'SSO_ERROR', 'off')).mockResolvedValueOnce({ url: '/crm/auth/sso#token=ok' })
+    const report = vi.fn(), replace = vi.fn()
+    const controller = createCrmAttempt(request, replace, report)
+    await controller.start()
+    expect(report).toHaveBeenLastCalledWith(crmErrorState(new ApiRequestError(status, 'SSO_ERROR', 'off')))
+    await controller.start()
+    expect(request).toHaveBeenCalledTimes(2)
+    expect(replace).toHaveBeenCalledTimes(1)
   })
 })
