@@ -6,6 +6,15 @@ import { pathToFileURL } from 'node:url'
 import { randomBytes } from 'node:crypto'
 import { TREE, command, composeArgs, read, validateManifest } from './lib.mjs'
 
+function assertMissingAssetCache(policy) {
+  assert.equal(policy, 'no-store', 'missing assets require exactly Cache-Control: no-store')
+}
+// Exercise the same assertion used by the real backend and proxy HTTP checks.
+assert.doesNotThrow(() => assertMissingAssetCache('no-store'))
+for (const policy of [null, undefined, '', 'immutable', 'max-age=31536000', 'public, max-age=31536000, immutable', 'no-store, no-store']) {
+  assert.throws(() => assertMissingAssetCache(policy), { code: 'ERR_ASSERTION' })
+}
+
 if (process.env.GITHUB_ACTIONS !== 'true') throw Error('Nginx rehearsal is CI-only')
 const [repo, artifact, spa, source] = process.argv.slice(2).map(p => path.resolve(p))
 const report = process.env.CRM_REPORT_DIR
@@ -46,13 +55,13 @@ try {
     assert.equal(response.status, status, url)
     assert.match(type, mime, url)
     assert.match(policy, cache, url)
-    if (status === 404) { assert.notEqual(body, html); assert.doesNotMatch(type, /html/); assert.doesNotMatch(policy, /immutable|max-age/); }
+    if (status === 404) { assertMissingAssetCache(policy); assert.notEqual(body, html); assert.doesNotMatch(type, /html/); assert.doesNotMatch(policy, /immutable|max-age/); }
     return body
   }
   for (const [host, prefix] of [[backend, ''], [dashboard, '/crm']]) {
-    await check(host + prefix + '/assets/missing-t004-d02.js', 404, /text\/plain/, /^(?:no-store)?$/)
-    await check(host + prefix + '/assets/' + js, 200, /javascript/, /immutable/)
-    await check(host + prefix + '/assets/' + css, 200, /text\/css/, /immutable/)
+    await check(host + prefix + '/assets/missing-t004-d02.js', 404, /text\/plain/, /^no-store$/)
+    await check(host + prefix + '/assets/' + js, 200, /javascript/, /^public, max-age=31536000, immutable$/)
+    await check(host + prefix + '/assets/' + css, 200, /text\/css/, /^public, max-age=31536000, immutable$/)
     assert.equal(await check(host + prefix + '/flows', 200, /text\/html/, /no-store/), html)
   }
   const api = await fetch(dashboard + '/crm/api/auth/profile')
