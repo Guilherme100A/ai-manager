@@ -65,3 +65,31 @@ export function backRoute(last: Route | null | undefined): Route {
   if (!last || last.name === 'crm' || last.name === 'login' || last.name === 'not-found') return { name: 'home' }
   return last
 }
+
+/** One in-flight request per attempt; invalidate fences late errors and redirects. */
+export function createCrmAttempt(
+  request: () => Promise<{ url: string }>,
+  replace: (url: string) => void,
+  report: (state: CrmState) => void,
+  target?: string,
+) {
+  let generation = 0
+  let pending: Promise<void> | undefined
+  return {
+    invalidate() { generation++; pending = undefined },
+    start(): Promise<void> {
+      if (pending) return pending
+      const current = ++generation
+      report({ kind: 'loading' })
+      pending = Promise.resolve().then(request).then(({ url }) => {
+        if (current !== generation) return
+        const destination = crmEntryUrl(url, target)
+        if (!destination) report({ kind: 'error', message: 'O servidor devolveu uma URL do CRM inválida.' })
+        else replace(destination)
+      }).catch((error: unknown) => {
+        if (current === generation) report(crmErrorState(error))
+      }).finally(() => { if (current === generation) pending = undefined })
+      return pending
+    },
+  }
+}

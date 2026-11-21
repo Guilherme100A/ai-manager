@@ -11,8 +11,9 @@ describe('T003 — navegação limpa composta com T002', () => {
   let browser: any, context: any, page: any, server: any
   let base: string
   let ssoCalls: number
-  let pending: Array<() => Promise<void>> = []
+  let pending: Array<(status?: number, url?: string) => Promise<void>> = []
   let errors: string[] = []
+  let expectedErrors: string[] = []
   let unexpected: string[] = []
 
   beforeAll(async () => {
@@ -29,6 +30,7 @@ describe('T003 — navegação limpa composta com T002', () => {
     ssoCalls = 0
     pending = []
     errors = []
+    expectedErrors = []
     unexpected = []
     context = await browser.newContext({ viewport: { width: 1440, height: 900 } })
     await context.addInitScript(() => sessionStorage.setItem('wsm.token', 't003-fixture'))
@@ -57,8 +59,8 @@ describe('T003 — navegação limpa composta com T002', () => {
     await context.route('**/metrics', (route: any) => route.fulfill({ body: '', contentType: 'text/plain' }))
     await context.route('**/api/crm/sso', async (route: any) => {
       ssoCalls++
-      await new Promise<void>((resolve) => pending.push(async () => {
-        await route.fulfill({ json: { token: 't003', url: '/crm/auth/sso?token=t003' } })
+      await new Promise<void>((resolve) => pending.push(async (status = 200, url = '/crm/auth/sso?token=t003') => {
+        await route.fulfill({ status, json: status === 200 ? { token: 't003', url } : { error: { message: 'SSO unavailable' } } })
         resolve()
       }))
     })
@@ -69,7 +71,7 @@ describe('T003 — navegação limpa composta com T002', () => {
   afterEach(async () => {
     await Promise.all(pending.splice(0).map((release) => release()))
     await context?.close()
-    expect(errors).toEqual([])
+    expect(errors).toEqual(expectedErrors)
     expect(unexpected).toEqual([])
   })
   afterAll(async () => {
@@ -226,7 +228,8 @@ describe('T003 — navegação limpa composta com T002', () => {
 
   it('CRM primário substitui a página na mesma aba com destino controlado', async () => {
     await page.getByTestId('nav-crm').click()
-    await page.getByTestId('crm-loading').waitFor()
+    await page.getByRole('status', { name: '', exact: true }).filter({ hasText: 'Carregando' }).waitFor()
+    expect(await page.getByTestId('page-home').count()).toBe(1)
     await expect.poll(() => ssoCalls).toBe(1)
     await Promise.all(pending.splice(0).map((release) => release()))
     await page.waitForURL((url: URL) => url.origin === base && url.pathname === '/crm/auth/sso' && url.searchParams.get('token') === 't003' && url.searchParams.has('crm_entry'))
@@ -237,4 +240,195 @@ describe('T003 — navegação limpa composta com T002', () => {
     await page.getByTestId('page-home').waitFor()
     expect(ssoCalls).toBe(1)
   })
+
+  async function waitCalls(count: number) { await expect.poll(() => ssoCalls).toBe(count) }
+  async function release(index = 0, status = 200, url?: string) {
+    const fn = pending.splice(index, 1)[0]
+    expect(fn).toBeTruthy()
+    if (status >= 400) expectedErrors.push('Failed to load resource: the server responded with a status of ' + status + ' (' + ({ 501: 'Not Implemented', 403: 'Forbidden', 500: 'Internal Server Error' } as Record<number, string>)[status] + ')')
+    await fn(status, url)
+  }
+
+  it('SSO de 3s preserva pixels, scroll, estado e subtree reais sem intermediate screen', async () => {
+    await page.getByTestId('nav-sessions').click()
+    await page.getByTestId('page-sessions').waitFor()
+    await page.getByTestId('proxy-sharing-max').fill('7')
+    await page.evaluate(() => {
+      const root = document.querySelector('[data-testid="page-sessions"]') as HTMLElement
+      root.style.minHeight = '2200px'
+      ;(window as any).__root = root
+      ;(window as any).__main = document.querySelector('main')
+      window.scrollTo(0, 350)
+      ;(window as any).__frameFailures = []
+      ;(window as any).__watchFrames = true
+      const sample = () => {
+        if (!(window as any).__watchFrames) return
+        const current = document.querySelector('[data-testid="page-sessions"]') as HTMLElement
+        if (current !== root || current.getBoundingClientRect().height === 0 || getComputedStyle(current).visibility === 'hidden') (window as any).__frameFailures.push('missing or hidden page')
+        requestAnimationFrame(sample)
+      }
+      requestAnimationFrame(sample)
+    })
+    const before = await page.getByTestId('page-sessions').screenshot({ path: '.maestri/t003-before.png', animations: 'disabled' })
+    const scroll = await page.evaluate(() => window.scrollY)
+    await page.evaluate(() => (document.querySelector('[data-testid="nav-crm"]') as HTMLElement).click())
+    await waitCalls(1)
+    for (let i = 0; i < 6; i++) {
+      await page.waitForTimeout(500)
+      expect(await page.evaluate(() => ({
+        same: (window as any).__root === document.querySelector('[data-testid="page-sessions"]'),
+        main: (window as any).__main === document.querySelector('main'),
+        value: (document.querySelector('[data-testid="proxy-sharing-max"]') as HTMLInputElement)?.value,
+        scroll: window.scrollY,
+        roots: document.querySelectorAll('[data-testid^="page-"]').length,
+      }))).toEqual({ same: true, main: true, value: '7', scroll, roots: 1 })
+      expect(await page.locator('[data-testid="crm-loading"]').count()).toBe(0)
+      expect(await page.locator('body').innerText()).not.toContain('Abrindo o CRM')
+    }
+    expect(await page.evaluate(() => { (window as any).__watchFrames = false; return (window as any).__frameFailures })).toEqual([])
+    const after = await page.getByTestId('page-sessions').screenshot({ path: '.maestri/t003-after.png', animations: 'disabled' })
+    expect(after.equals(before), 'pixels of the preserved Sessions page').toBe(true)
+    expect(await page.getByTestId('nav-sessions').getAttribute('aria-current')).toBe('page')
+    expect(await page.getByTestId('nav-crm').getAttribute('aria-current')).toBeNull()
+    expect(await page.getByTestId('nav-crm').getAttribute('aria-busy')).toBe('true')
+    await page.getByTestId('nav-home').evaluate((el: HTMLElement) => el.click())
+    await release()
+    await page.getByTestId('page-home').waitFor()
+    expect(new URL(page.url()).pathname).toBe('/')
+  })
+
+  it.each([501, 403, 500, 200])('erro %s ou URL invalida permanece inline e retry renova o SSO', async (status) => {
+    await page.getByTestId('nav-crm').click()
+    await waitCalls(1)
+    await release(0, status, '//invalid.example')
+    await page.getByTestId(status === 501 ? 'crm-disabled' : 'crm-error').waitFor()
+    expect(await page.getByTestId('page-home').isVisible()).toBe(true)
+    expect(await page.getByTestId('nav-crm').getAttribute('aria-busy')).toBeNull()
+    await page.getByRole('button', { name: 'Tentar novamente' }).dblclick()
+    await waitCalls(2)
+    expect(await page.getByTestId('page-home').isVisible()).toBe(true)
+    await release()
+    await page.waitForURL('**/crm/auth/sso?*')
+  })
+
+  it('duplo clique compartilha POST; sair invalida e reentrar cria tentativa nova', async () => {
+    await page.getByTestId('nav-crm').dblclick()
+    await waitCalls(1)
+    await page.getByTestId('nav-sessions').click()
+    await page.getByTestId('page-sessions').waitFor()
+    await page.getByTestId('nav-crm').click()
+    await waitCalls(2)
+    await release(0)
+    expect(new URL(page.url()).hash).toBe('#/crm')
+    expect(await page.getByTestId('page-sessions').isVisible()).toBe(true)
+    await release(0)
+    await page.waitForURL('**/crm/auth/sso?*')
+  })
+
+  it('destinos distintos ignoram erro fora de ordem e usam somente o destino atual', async () => {
+    await page.evaluate(() => { location.hash = '#/crm/old' })
+    await waitCalls(1)
+    await page.evaluate(() => { location.hash = '#/crm/new' })
+    await waitCalls(2)
+    await release(0, 500)
+    expect(await page.getByTestId('crm-error').count()).toBe(0)
+    await release(0, 200, '/crm/auth/sso#token=new')
+    await page.waitForURL((url: URL) => url.pathname === '/crm/auth/sso')
+    expect(new URL(page.url()).hash).toContain('redirect=%2Fflows%2Fnew%2Fedit')
+  })
+
+  it('logout invalida SSO antes da resposta da revogacao', async () => {
+    let finish!: () => Promise<void>
+    await context.route('**/api/auth/logout', (route: any) => new Promise<void>((resolve) => {
+      finish = async () => { await route.fulfill({ status: 204 }); resolve() }
+    }))
+    await page.getByTestId('nav-crm').click()
+    await waitCalls(1)
+    await page.getByTestId('nav-logout').click()
+    await page.getByTestId('page-home').waitFor()
+    await release()
+    expect(new URL(page.url()).pathname).toBe('/')
+    expect(await page.getByTestId('page-home').isVisible()).toBe(true)
+    await expect.poll(() => Boolean(finish)).toBe(true)
+    await finish()
+    await page.getByTestId('login-username').waitFor()
+    expect(new URL(page.url()).hash).toBe('#/login')
+  })
+
+  it.each(['?entry=direct#/crm', '?entry=direct'])('entrada direta %s usa Sessions; retorno explicito monta Sessions no primeiro frame sem POST', async (entry) => {
+    await page.goto(base + '/' + entry)
+    await page.getByTestId('page-sessions').waitFor()
+    await waitCalls(1)
+    expect(await page.getByTestId('nav-sessions').getAttribute('aria-current')).toBe('page')
+    await release(0, 501)
+    await page.getByTestId('crm-disabled').waitFor()
+    ssoCalls = 0
+    await context.addInitScript(() => {
+      ;(window as any).__frames = []
+      function sample() {
+        const roots = Array.from(document.querySelectorAll('[data-testid^="page-"]'), e => e.getAttribute('data-testid'))
+        if (roots.length) (window as any).__frames.push(roots)
+        if ((window as any).__frames.length < 6) requestAnimationFrame(sample)
+      }
+      requestAnimationFrame(sample)
+    })
+    await page.goto(base + '/?return=sessions#/sessions')
+    await page.getByTestId('page-sessions').waitFor()
+    await expect.poll(() => page.evaluate(() => (window as any).__frames.length)).toBe(6)
+    expect(await page.evaluate(() => (window as any).__frames)).toEqual(Array.from({ length: 6 }, () => ['page-sessions']))
+    expect(ssoCalls).toBe(0)
+  })
+
+  it('CRM por Enter no mobile nao toma foco nem fecha o menu; navegacao permanece livre', async () => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.getByTestId('nav-toggle').click()
+    const link = page.getByTestId('nav-crm')
+    await link.focus()
+    await page.keyboard.press('Enter')
+    await waitCalls(1)
+    expect(await link.evaluate((el: Element) => document.activeElement === el)).toBe(true)
+    expect(await page.getByTestId('nav-toggle').getAttribute('aria-expanded')).toBe('true')
+    await page.getByTestId('nav-sessions').click()
+    await page.getByTestId('page-sessions').waitFor()
+    await release()
+    expect(new URL(page.url()).hash).toBe('#/sessions')
+  })
+
+
+  it('CRM respeita modificadores, middle, target, download e evento prevenido sem SSO', async () => {
+    const link = page.getByTestId('nav-crm')
+    expect(await link.getAttribute('href')).toBe('#/crm')
+    for (const key of ['ctrlKey', 'metaKey', 'shiftKey', 'altKey', 'middle', 'target', 'download', 'prevented']) {
+      const prevented = await link.evaluate((el: HTMLAnchorElement, key: string) => {
+        if (key === 'target') el.target = '_blank'
+        if (key === 'download') el.download = 'crm'
+        const event = new MouseEvent('click', { bubbles: true, cancelable: true, button: key === 'middle' ? 1 : 0, [key]: true })
+        if (key === 'prevented') event.preventDefault()
+        let result = false
+        document.addEventListener('click', (e) => { result = e.defaultPrevented; e.preventDefault() }, { once: true })
+        el.dispatchEvent(event)
+        el.removeAttribute('target'); el.removeAttribute('download')
+        return result
+      }, key)
+      expect(prevented, key).toBe(key === 'prevented')
+      expect(new URL(page.url()).hash).toBe('#/')
+    }
+    expect(ssoCalls).toBe(0)
+  })
+
+  it('back-forward invalida a tentativa antiga e reabre CRM com novo SSO', async () => {
+    await page.getByTestId('nav-crm').click()
+    await waitCalls(1)
+    await page.goBack()
+    await page.getByTestId('nav-home').waitFor()
+    expect(new URL(page.url()).hash).toBe('#/')
+    await page.goForward()
+    await waitCalls(2)
+    await release(0)
+    expect(new URL(page.url()).hash).toBe('#/crm')
+    expect(await page.getByTestId('page-home').isVisible()).toBe(true)
+    await release(0)
+    await page.waitForURL('**/crm/auth/sso?*')
+  })
+
 })
