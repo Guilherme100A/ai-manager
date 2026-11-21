@@ -5,6 +5,7 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { randomBytes } from 'node:crypto'
 import { TREE, command, composeArgs, read, validateManifest } from './lib.mjs'
+import { waitForVisibleWithEvidence } from './nginx-browser-evidence.mjs'
 
 function assertMissingAssetCache(policy) {
   assert.equal(policy, 'no-store', 'missing assets require exactly Cache-Control: no-store')
@@ -78,7 +79,12 @@ try {
   browser = await chromium.launch({ headless: true })
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } })
   const pageErrors = []
+  const browserEvents = { pageErrors, consoleErrors: [], failedRequests: [], failedResponses: [] }
   page.on('pageerror', error => pageErrors.push(error.message))
+  const pathname = url => { const u = new URL(url); return u.origin + u.pathname }
+  page.on('console', message => { if (message.type() === 'error') browserEvents.consoleErrors.push(message.text()) })
+  page.on('requestfailed', request => browserEvents.failedRequests.push({ url: pathname(request.url()), error: request.failure()?.errorText }))
+  page.on('response', response => { if (response.status() >= 400) browserEvents.failedResponses.push({ url: pathname(response.url()), status: response.status() }) })
   let documents = 0
   page.on('request', r => { if (r.isNavigationRequest() && r.frame() === page.mainFrame()) documents++ })
   const company = { id: '11111111-1111-4111-8111-111111111111', name: 'Fixture D02', slug: 'fixture-d02', role: 'member', effective_permissions: ['flows.view', 'dashboard.sales', 'profile.view'] }
@@ -95,7 +101,7 @@ try {
   })
   async function capture(name, testid) {
     const selector = `[data-testid="${testid}"]`
-    await page.locator(selector).waitFor()
+    await waitForVisibleWithEvidence(page, selector, report, name, browserEvents)
     await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))))
     await page.screenshot({ path: path.join(report, name + '.png') })
     const paint = await page.locator(selector).evaluate(el => {
