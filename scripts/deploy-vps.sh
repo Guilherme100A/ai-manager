@@ -36,7 +36,13 @@ else
   compose=(docker compose -f docker-compose.yml)
   [[ ! -f docker-compose.crm.yml ]] || compose+=(-f docker-compose.crm.yml)
 fi
-"${compose[@]}" build worker api dashboard
+# The existing lock covers identity/policy/probes, the optional restricted prune,
+# and the same persistent Compose wrapper. Never recreate services on gate failure.
+node "$repo_dir/scripts/deploy-disk.mjs" "$repo_dir"
+# Pin this invocation (including the CRM wrapper) without changing global Docker
+# configuration. User-supplied destination/Bake overrides were rejected above.
+export DOCKER_CONTEXT=default COMPOSE_BAKE=false DOCKER_BUILDKIT=1
+"${compose[@]}" build worker api dashboard --builder default
 "${compose[@]}" up -d --no-deps --wait worker api dashboard
 printf '%s\n' "$revision" > "$state_file"
 printf 'deploy ok: %s\n' "$revision"
