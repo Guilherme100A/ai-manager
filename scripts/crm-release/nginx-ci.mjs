@@ -5,7 +5,8 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { randomBytes } from 'node:crypto'
 import { TREE, command, composeArgs, read, validateManifest } from './lib.mjs'
-import { waitForVisibleWithEvidence } from './nginx-browser-evidence.mjs'
+import { waitForVisibleWithEvidence, captureBrowserFailure, hasFailureEvidence } from './nginx-browser-evidence.mjs'
+import { createDiagnostic, mimeEvidence, composeLogEvidence, privateComposeConfig, finishBeforeTeardown } from './nginx-network-diagnostic.mjs'
 
 function assertMissingAssetCache(policy) {
   assert.equal(policy, 'no-store', 'missing assets require exactly Cache-Control: no-store')
@@ -25,34 +26,43 @@ const proof = JSON.parse(command('image-proof', 'docker', ['image', 'inspect', r
 assert.equal(proof.Config.Labels['crm.source-tree'], TREE)
 assert.equal(release.source_tree, TREE)
 const base = JSON.parse(command('real-compose-model', 'docker', [...composeArgs(repo, path.join(report, 'unused-state')), 'config', '--format', 'json']))
-const file = path.join(report, 'nginx-compose.json')
 const project = `t004d02_${process.env.GITHUB_RUN_ID}_${process.pid}`
+// Operational config contains synthetic credentials: never upload the raw model.
+// The private config is outside both upload trees and removed after down.
 const mount = (source, target) => ({ type: 'bind', source, target, read_only: true })
 // No shared containers/volumes: the API uses this project's disposable DB and Redis.
-fs.writeFileSync(file, JSON.stringify({ services: {
+const privateCompose = privateComposeConfig(source, JSON.stringify({ services: {
   postgres: { image: 'postgres:16-alpine', environment: { POSTGRES_USER: 'wsm', POSTGRES_PASSWORD: 'wsm', POSTGRES_DB: 'wsm' }, tmpfs: ['/var/lib/postgresql/data'], healthcheck: { test: ['CMD-SHELL', 'pg_isready -U wsm'], interval: '2s', retries: 30 } },
   redis: { image: 'redis:7-alpine' },
   'crm-api': { image: release.image_id, environment: { ...base.services['crm-api'].environment, WA_GATEWAY: 'fake', AI_MODE: 'fake', CRM_QUEUE_PREFIX: project, CREDENTIALS_KEY: randomBytes(32).toString('base64') }, depends_on: { postgres: { condition: 'service_healthy' }, redis: { condition: 'service_started' } }, healthcheck: base.services['crm-api'].healthcheck },
   'crm-web': { image: base.services['crm-web'].image, command: base.services['crm-web'].command, volumes: [mount(spa, '/usr/share/nginx/html')], ports: ['127.0.0.1::80'] },
   dashboard: { image: 'nginx:1.27-alpine', volumes: [mount(path.join(repo, 'apps/dashboard/nginx.conf'), '/etc/nginx/conf.d/default.conf')], ports: ['127.0.0.1::80'], depends_on: { 'crm-api': { condition: 'service_healthy' }, 'crm-web': { condition: 'service_started' } } },
 } }, null, 2))
+const file = privateCompose.file
 // Compose config preserves $$ in command strings for round-tripping; keep it intact.
 const compose = (...args) => command('disposable-nginx-' + args[0], 'docker', ['compose', '-p', project, '-f', file, ...args])
 const observations = []
-let browser
+const diagnostic = createDiagnostic({ report, project, composeFile: file })
+let browser, page, browserEvents
+let primaryError
 try {
-  compose('up', '-d', '--wait', '--wait-timeout', '180')
-  for (const service of ['crm-web', 'dashboard']) compose('exec', '-T', service, 'nginx', '-t')
+  diagnostic.start()
+  diagnostic.operation('compose_up', () => compose('up', '-d', '--wait', '--wait-timeout', '180'))
+  for (const service of ['crm-web', 'dashboard']) diagnostic.operation('nginx_t_' + service, () => compose('exec', '-T', service, 'nginx', '-t'))
   const origin = service => 'http://' + compose('port', service, '80').trim()
   const backend = origin('crm-web'), dashboard = origin('dashboard')
+  diagnostic.targets([backend, dashboard])
+  diagnostic.snapshot('compose_ready')
   const assets = fs.readdirSync(path.join(spa, 'assets'))
+  diagnostic.allowAssets(assets)
   const js = assets.find(n => n.endsWith('.js')), css = assets.find(n => n.endsWith('.css'))
   assert.ok(js && css, 'packaged SPA must have JS and CSS')
   const html = fs.readFileSync(path.join(spa, 'index.html'), 'utf8')
   async function check(url, status, mime, cache) {
-    const response = await fetch(url)
+    const response = await diagnostic.operation('http_probe', () => fetch(url))
     const body = await response.text(), type = response.headers.get('content-type') ?? '', policy = response.headers.get('cache-control') ?? ''
-    observations.push({ url, status: response.status, type, cache: policy })
+    observations.push({ url: diagnostic.url(url), status: response.status, type: mimeEvidence(type), cache: ['no-store', 'public, max-age=31536000, immutable'].includes(policy) ? policy : 'other', ...diagnostic.stamp() })
+    diagnostic.emit('http', 'response', { url: diagnostic.url(url), status: response.status, mime: mimeEvidence(type) })
     assert.equal(response.status, status, url)
     assert.match(type, mime, url)
     assert.match(policy, cache, url)
@@ -65,26 +75,22 @@ try {
     await check(host + prefix + '/assets/' + css, 200, /text\/css/, /^public, max-age=31536000, immutable$/)
     assert.equal(await check(host + prefix + '/flows', 200, /text\/html/, /no-store/), html)
   }
-  const api = await fetch(dashboard + '/crm/api/auth/profile')
+  const api = await diagnostic.operation('api_probe', () => fetch(dashboard + '/crm/api/auth/profile'))
   assert.equal(api.status, 401)
   assert.match(api.headers.get('content-type'), /application\/json/)
-  const discovery = await fetch(dashboard + '/crm/.well-known/oauth-authorization-server')
+  const discovery = await diagnostic.operation('discovery_probe', () => fetch(dashboard + '/crm/.well-known/oauth-authorization-server'))
   assert.equal(discovery.status, 200)
   assert.match(discovery.headers.get('content-type'), /application\/json/)
   assert.ok((await discovery.json()).authorization_endpoint)
-  observations.push({ real_api: api.status, real_discovery: discovery.status })
+  observations.push({ real_api: api.status, real_discovery: discovery.status, ...diagnostic.stamp() })
 
   // Paint and recover the image-exported SPA through both real Nginx servers.
   const { chromium } = await import(pathToFileURL(path.join(source, 'node_modules/@playwright/test/index.mjs')))
-  browser = await chromium.launch({ headless: true })
-  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } })
+  browser = await diagnostic.operation('chromium_launch', () => chromium.launch({ headless: true }))
+  try { diagnostic.browserMetadata(browser, read(path.join(source, 'node_modules/@playwright/test/package.json')).version) } catch { diagnostic.emit('collector', 'unavailable', { reason: 'browser_metadata_unavailable' }) }
+  page = await browser.newPage({ viewport: { width: 1440, height: 1000 } })
   const pageErrors = []
-  const browserEvents = { pageErrors, consoleErrors: [], failedRequests: [], failedResponses: [] }
-  page.on('pageerror', error => pageErrors.push(error.message))
-  const pathname = url => { const u = new URL(url); return u.origin + u.pathname }
-  page.on('console', message => { if (message.type() === 'error') browserEvents.consoleErrors.push(message.text()) })
-  page.on('requestfailed', request => browserEvents.failedRequests.push({ url: pathname(request.url()), error: request.failure()?.errorText }))
-  page.on('response', response => { if (response.status() >= 400) browserEvents.failedResponses.push({ url: pathname(response.url()), status: response.status() }) })
+  browserEvents = diagnostic.attach(page, browser, pageErrors)
   let documents = 0
   page.on('request', r => { if (r.isNavigationRequest() && r.frame() === page.mainFrame()) documents++ })
   const company = { id: '11111111-1111-4111-8111-111111111111', name: 'Fixture D02', slug: 'fixture-d02', role: 'member', effective_permissions: ['flows.view', 'dashboard.sales', 'profile.view'] }
@@ -101,7 +107,7 @@ try {
   })
   async function capture(name, testid) {
     const selector = `[data-testid="${testid}"]`
-    await waitForVisibleWithEvidence(page, selector, report, name, browserEvents)
+    await diagnostic.operation('wait_' + name, () => waitForVisibleWithEvidence(page, selector, report, name, browserEvents, diagnostic))
     await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))))
     await page.screenshot({ path: path.join(report, name + '.png') })
     const paint = await page.locator(selector).evaluate(el => {
@@ -109,15 +115,15 @@ try {
       const hit = document.elementFromPoint(Math.min(innerWidth - 1, rect.x + rect.width / 2), Math.min(innerHeight - 1, rect.y + rect.height / 2))
       return { width: rect.width, height: rect.height, display: style.display, visibility: style.visibility, opacity: style.opacity, uncovered: !!hit && (hit === el || el.contains(hit)), shell: !!document.querySelector('[data-testid="shell-sidebar"]') }
     })
-    observations.push({ name, paint, documents })
+    observations.push({ name, paint, documents, ...diagnostic.stamp() })
     assert.ok(paint.width > 0 && paint.height > 0 && paint.uncovered && paint.shell)
     assert.equal(paint.visibility, 'visible'); assert.notEqual(paint.display, 'none'); assert.notEqual(paint.opacity, '0')
   }
-  await page.goto(dashboard + '/crm/welcome')
+  await diagnostic.operation('goto_welcome', () => page.goto(dashboard + '/crm/welcome'))
   await capture('packaged-welcome', 'page-welcome')
-  await page.locator('a[href="/crm/flows"]').first().click()
+  await diagnostic.operation('click_flows', () => page.locator('a[href="/crm/flows"]').first().click())
   await capture('packaged-flows', 'page-flows')
-  await page.goto(dashboard + '/crm/flows')
+  await diagnostic.operation('goto_direct_flows', () => page.goto(dashboard + '/crm/flows'))
   await capture('packaged-direct-flows', 'page-flows')
   assert.deepEqual(pageErrors, [], 'healthy packaged navigation must not emit pageerror')
   const chunks = assets.filter(n => n.endsWith('.js') && fs.readFileSync(path.join(spa, 'assets', n), 'utf8').includes('page-flows'))
@@ -126,18 +132,28 @@ try {
   // Break the real lazy module using a real backend 404, without faking its response.
   await page.route(chunkPattern, route => route.continue({ url: dashboard + '/crm/assets/missing-t004-d02.js' }))
   const before = documents
-  await page.goto(dashboard + '/crm/flows')
+  await diagnostic.operation('goto_missing_flow', () => page.goto(dashboard + '/crm/flows'))
   await capture('packaged-error', 'route-error')
   assert.equal(documents - before, 2, 'one navigation and one automatic reload')
-  await page.getByRole('button', { name: 'Tentar novamente', exact: true }).click()
+  await diagnostic.operation('click_retry', () => page.getByRole('button', { name: 'Tentar novamente', exact: true }).click())
   await capture('packaged-budget-exhausted', 'route-error')
   assert.equal(documents - before, 2, 'retry must not loop or reload')
   await page.unroute(chunkPattern)
-  await page.getByRole('button', { name: 'Recarregar', exact: true }).click()
+  await diagnostic.operation('click_reload', () => page.getByRole('button', { name: 'Recarregar', exact: true }).click())
   await capture('packaged-recovered', 'page-flows')
   assert.equal(documents - before, 3)
+} catch (error) {
+  primaryError = error
+  if (!hasFailureEvidence(error)) {
+    try { await captureBrowserFailure(page, '[before-or-outside-visibility-gate]', report, 'nginx-browser', browserEvents ?? { pageErrors: [], consoleErrors: [], failedRequests: [], failedResponses: [], responses: [] }, error, diagnostic) } catch { /* original error and teardown take precedence */ }
+  }
+  throw error
 } finally {
-  fs.writeFileSync(path.join(report, 'nginx-http.json'), JSON.stringify(observations, null, 2))
-  if (browser) await browser.close()
-  try { fs.writeFileSync(path.join(report, 'nginx-compose.log'), compose('logs', '--no-color')) } finally { compose('down', '-v', '--remove-orphans') }
+  await finishBeforeTeardown(diagnostic, [
+    () => fs.writeFileSync(path.join(report, 'nginx-http.json'), JSON.stringify(observations, null, 2), { flag: 'wx' }),
+    async () => { if (browser) await browser.close() },
+    () => fs.writeFileSync(path.join(report, 'nginx-compose.log'), composeLogEvidence(compose('logs', '--no-color', '--timestamps'), diagnostic.url), { flag: 'wx' }),
+    () => compose('down', '-v', '--remove-orphans'),
+    () => privateCompose.cleanup(), // Only this invocation's private config.
+  ], primaryError)
 }
