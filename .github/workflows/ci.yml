@@ -152,7 +152,7 @@ jobs:
       - name: Check integrated CRM types and gateway contracts before acceptance
         run: |
           diag() { node "$GITHUB_WORKSPACE/scripts/crm-release/listener-diagnostic.mjs" "$RUNNER_TEMP/crm-source" "$CRM_REPORT_DIR" "$@"; }
-          diag node-contracts node --test scripts/crm-release/release.test.mjs scripts/crm-release/prepare-ci-tests.test.mjs scripts/crm-release/tsx-conditions.test.mjs scripts/crm-release/listener-diagnostic.test.mjs scripts/crm-release/nginx-network-diagnostic.test.mjs
+          diag node-contracts node --test scripts/crm-release/release.test.mjs scripts/crm-release/prepare-ci-tests.test.mjs scripts/crm-release/tsx-conditions.test.mjs scripts/crm-release/listener-diagnostic.test.mjs scripts/crm-release/nginx-network-diagnostic.test.mjs scripts/crm-release/nginx-browser-network-scope.test.mjs
           cd "$RUNNER_TEMP/crm-source"
           diag request-db node --test apps/api/src/lib/request-db.node.test.mjs
           for package in @crm/api @crm/core @crm/web @crm/worker @crm/wa-port @crm/wa-gateway-rpc; do diag "type-${package#@crm/}" pnpm --filter "$package" typecheck; done
@@ -217,6 +217,8 @@ jobs:
           docker rm "$cid"
           tar -czf "$RUNNER_TEMP/crm-artifact/spa.tar.gz" -C "$RUNNER_TEMP/ci-spa" .
           node scripts/crm-release/package-ci.mjs "$RUNNER_TEMP/crm-source" "$RUNNER_TEMP/crm-artifact" "$GITHUB_SHA"
+      - name: Prepare pinned Playwright Server image before the measured rehearsal
+        run: docker pull mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
       - name: Real Nginx backend and dashboard proxy HTTP rehearsal with the packaged SPA
         env:
           CRM_SSO_SECRET: synthetic-ci-only

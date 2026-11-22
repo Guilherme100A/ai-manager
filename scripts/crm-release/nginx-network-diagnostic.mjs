@@ -52,10 +52,10 @@ export function privateComposeConfig(source, content, io = fs) {
   }
   return { file, cleanup }
 }
-export async function finishBeforeTeardown(diagnostic, steps, primaryError) {
+export async function finishBeforeTeardown(diagnostic, steps, primaryError, beforeFinish = []) {
   let cleanupError
   try { diagnostic.emit('harness', 'teardown_pending') } catch (error) { cleanupError = error }
-  for (const step of [() => diagnostic.finish(), ...steps]) {
+  for (const step of [...beforeFinish, () => diagnostic.finish(), ...steps]) {
     try { await step() } catch (error) { cleanupError ??= error }
   }
   if (!primaryError && cleanupError) throw cleanupError
@@ -88,7 +88,7 @@ export function pageEvidence(raw, sanitizeUrl = () => '[redacted-url]') {
 
 export function createDiagnostic({ report, project, composeFile, env = process.env,
   clock = { utc: () => new Date().toISOString(), mono: () => process.hrtime.bigint() },
-  io = fs, launch = spawn, sink, maxBytes = 2 * 1024 * 1024, maxEvents = 10000, salt = randomBytes(16).toString('hex') } = {}) {
+  io = fs, launch = spawn, sink, probeTimers = { setTimeout, clearTimeout }, maxBytes = 2 * 1024 * 1024, maxEvents = 10000, salt = randomBytes(16).toString('hex') } = {}) {
   const started = clock.mono(), hash = value => createHash('sha256').update(salt + String(value)).digest('hex').slice(0, 20)
   const allowedPaths = new Set(['/', '/crm/welcome', '/crm/flows', '/flows', '/crm/api/auth/profile', '/crm/.well-known/oauth-authorization-server'])
   const ports = new Set()
@@ -118,7 +118,7 @@ export function createDiagnostic({ report, project, composeFile, env = process.e
   const url = value => {
     try {
       const u = new URL(value), local = ['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname) && ['http:', 'https:'].includes(u.protocol)
-      const origin = local ? `${u.protocol}//loopback${u.port ? ':' + u.port : ''}` : '<origin-' + hash(u.origin) + '>'
+      const origin = u.protocol === 'http:' && u.hostname === 'dashboard' && !u.port ? 'http://dashboard' : local ? `${u.protocol}//loopback${u.port ? ':' + u.port : ''}` : '<origin-' + hash(u.origin) + '>'
       return origin + (allowedPaths.has(u.pathname) ? u.pathname : '/<path-' + hash(u.pathname) + '>')
     } catch { return '[redacted-url]' }
   }
@@ -127,12 +127,12 @@ export function createDiagnostic({ report, project, composeFile, env = process.e
     const collector = args[0] === 'inspect' ? 'container_state' : args.includes('ps') ? 'containers' : args[0] === 'version' ? 'docker_version' : 'compose_version'
     let child, buffer = '', done = false, overflow = false
     const end = (status, signal, reason) => {
-      if (done) return; done = true; clearTimeout(timer); if (child) children.delete(child)
+      if (done) return; done = true; probeTimers.clearTimeout(timer); if (child) children.delete(child)
       if (status === 0 && !overflow) { try { consume(buffer) } catch { emit('collector', 'unavailable', { collector, reason: 'projection_failed' }) } }
       else emit('collector', 'unavailable', { collector, reason, exitCode: Number.isInteger(status) ? status : null, signal: /^SIG[A-Z]+$/.test(signal ?? '') ? signal : null })
       resolve()
     }
-    const timer = setTimeout(() => { child?.kill('SIGKILL'); end(null, 'SIGKILL', 'probe_timeout') }, 2000)
+    const timer = probeTimers.setTimeout(() => { child?.kill('SIGKILL'); end(null, 'SIGKILL', 'probe_timeout') }, 2000)
     try {
       child = launch(exe, args, { stdio: ['ignore', 'pipe', 'ignore'] }); children.add(child)
       child.stdout?.on('data', chunk => { buffer += chunk; if (buffer.length > 65536) { overflow = true; child.kill('SIGKILL'); end(null, 'SIGKILL', 'probe_limit') } })
@@ -183,16 +183,18 @@ export function createDiagnostic({ report, project, composeFile, env = process.e
         return { id: hash(name), state, addresses: addresses?.length ?? 0, topology_id: hash(JSON.stringify(addresses)) }
       })
       const routes = ['/proc/net/route', '/proc/net/ipv6_route'].map(file => hash(io.readFileSync(file, 'utf8')))
-      emit('host', 'snapshot', { stage, availability: true, links, route_ids: routes })
+      let namespace_id = null
+      try { namespace_id = createHash('sha256').update(io.readlinkSync('/proc/self/ns/net')).digest('hex') } catch { /* explicitly unavailable */ }
+      emit('host', 'snapshot', { stage, scope: 'runner', availability: true, links, route_ids: routes, namespace_id, namespace_available: namespace_id !== null })
     } catch { emit('host', 'snapshot', { stage, availability: false, reason: 'network_snapshot_unavailable' }) }
   }
   const containerSnapshot = stage => {
     if (!composeFile) return Promise.resolve()
     return probe('docker', ['compose', '-p', project, '-f', composeFile, 'ps', '-aq'], text => {
       const ids = text.trim().split(/\s+/).filter(id => /^[a-f0-9]{12,64}$/.test(id)).slice(0, 16)
-      for (const id of ids) probe('docker', ['inspect', '--format', '{{json .State}}\t{{json .RestartCount}}\t{{json .NetworkSettings.Networks}}', id], text => {
-        const [state, restarts, networks] = text.trim().split('\t').map(v => JSON.parse(v))
-        emit('docker', 'snapshot', { stage, container_id: hash(id), state: ['created', 'running', 'paused', 'restarting', 'removing', 'exited', 'dead'].includes(state.Status) ? state.Status : 'unknown', health: ['healthy', 'unhealthy', 'starting'].includes(state.Health?.Status) ? state.Health.Status : 'none', restarts: Number.isSafeInteger(restarts) && restarts >= 0 ? restarts : null, network_ids: Object.values(networks ?? {}).map(n => hash(n.NetworkID)).slice(0, 16) })
+      for (const id of ids) probe('docker', ['inspect', '--format', '{{json .State}}\t{{json .RestartCount}}\t{{json .NetworkSettings.Networks}}\t{{json (index .Config.Labels "com.docker.compose.service")}}\t{{json .Image}}', id], text => {
+        const [state, restarts, networks, service, image] = text.trim().split('\t').map(v => JSON.parse(v))
+        emit('docker', 'snapshot', { stage, container_id: hash(id), service: ['browser', 'crm-api', 'crm-web', 'dashboard', 'postgres', 'redis'].includes(service) ? service : 'unknown', image_id: /^sha256:[a-f0-9]{64}$/.test(image ?? '') ? image : null, state: ['created', 'running', 'paused', 'restarting', 'removing', 'exited', 'dead'].includes(state.Status) ? state.Status : 'unknown', health: ['healthy', 'unhealthy', 'starting'].includes(state.Health?.Status) ? state.Health.Status : 'none', restarts: Number.isSafeInteger(restarts) && restarts >= 0 ? restarts : null, network_ids: Object.values(networks ?? {}).map(n => hash(n.NetworkID)).slice(0, 16) })
       })
     })
   }
@@ -220,12 +222,15 @@ export function createDiagnostic({ report, project, composeFile, env = process.e
       return data
     })
     monitor('docker', 'docker', ['events', '--format', '{{json .}}', '--filter', 'type=network', '--filter', 'type=container'], line => dockerEvent(JSON.parse(line), project, hash))
-    probe('docker', ['version', '--format', '{{.Server.Version}}'], text => emit('docker', 'version', { version: /^v?\d+(\.\d+){1,3}(-rc\d+)?$/.test(text.trim()) ? text.trim() : 'unknown' }))
-    probe('docker', ['compose', 'version', '--short'], text => emit('compose', 'version', { version: /^v?\d+(\.\d+){1,3}(-rc\d+)?$/.test(text.trim()) ? text.trim() : 'unknown' }))
     networkSnapshot('before_compose')
   }
+  let versions
+  const collectVersions = () => versions ??= Promise.allSettled([
+    probe('docker', ['version', '--format', '{{.Server.Version}}'], text => emit('docker', 'version', { version: /^v?\d+(\.\d+){1,3}(-rc\d+)?$/.test(text.trim()) ? text.trim() : 'unknown' })),
+    probe('docker', ['compose', 'version', '--short'], text => emit('compose', 'version', { version: /^v?\d+(\.\d+){1,3}(-rc\d+)?$/.test(text.trim()) ? text.trim() : 'unknown' })),
+  ])
   const operation = (name, fn) => {
-    if (!/^(compose_up|nginx_t_(crm-web|dashboard)|http_probe|api_probe|discovery_probe|chromium_launch|goto_(welcome|direct_flows|missing_flow)|click_(flows|retry|reload)|wait_packaged-(welcome|flows|direct-flows|error|budget-exhausted|recovered))$/.test(name)) name = 'operation'
+    if (!/^(compose_up|nginx_t_(crm-web|dashboard)|http_probe|api_probe|discovery_probe|chromium_launch|chromium_connect|browser_readiness|browser_observer_ready|goto_(welcome|direct_flows|missing_flow)|click_(flows|retry|reload)|wait_packaged-(welcome|flows|direct-flows|error|budget-exhausted|recovered))$/.test(name)) name = 'operation'
     const processOperation = name === 'compose_up' || name.startsWith('nginx_t_')
     const source = processOperation ? 'wrapper' : 'harness'
     const unavailable = { signal: null, signal_unavailable: true, timeout: null, timeout_unavailable: true }
@@ -286,7 +291,7 @@ export function createDiagnostic({ report, project, composeFile, env = process.e
       if (fd !== undefined) { try { io.closeSync(fd) } catch { /* never mask the primary failure */ } }
     }
   }
-  return { start, snapshot, operation, attach, finish, url, pageEvidence: raw => pageEvidence(raw, url), emit,
+  return { start, collectVersions, snapshot, operation, attach, finish, url, id: hash, pageEvidence: raw => pageEvidence(raw, url), emit,
     targets: origins => { for (const origin of origins) { try { ports.add(Number(new URL(origin).port)) } catch { /* no raw URL in diagnostics */ } } },
     allowAssets: assets => { for (const asset of assets) if (/^[a-zA-Z0-9_.-]+$/.test(asset)) { allowedPaths.add('/crm/assets/' + asset); allowedPaths.add('/assets/' + asset) } },
     browserMetadata: (browser, version) => emit('browser', 'metadata', { chromium: /^[\d.]+$/.test(browser.version()) ? browser.version() : 'unknown', playwright: /^[\d.]+$/.test(version) ? version : 'unknown' }),

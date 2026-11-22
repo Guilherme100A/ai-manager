@@ -280,3 +280,49 @@ test('healthy gate source retains original HTTP/MIME/no-store/paint/recovery ass
   assert.ok(!source.includes('setDefaultTimeout') && !source.includes('waitForTimeout') && !source.includes('net-log'))
   assert.ok(source.indexOf('diagnostic.start()') < source.indexOf("diagnostic.operation('compose_up'"))
 })
+test('DIAG01 both version probes settle once before a real >2s synchronous Compose block', async () => {
+  const rows = [], trace = [], active = new Set()
+  const timers = { setTimeout(fn, ms) { assert.equal(ms, 2000); const token = setTimeout(() => { active.delete(token); trace.push('timeout'); fn() }, ms); active.add(token); return token }, clearTimeout(token) { active.delete(token); clearTimeout(token) } }
+  const launch = (exe, args) => {
+    const child = new EventEmitter(); child.stdout = new EventEmitter(); child.kill = signal => { queueMicrotask(() => child.emit('close', null, signal)); return true }
+    if (exe === 'ip' || args[0] === 'events') { trace.push('monitor'); return child }
+    trace.push('probe')
+    setImmediate(() => { child.stdout.emit('data', Buffer.from('29.8.2\n')); trace.push('probe_done'); child.emit('close', 0, null) })
+    return child
+  }
+  const diag = createDiagnostic({ launch, probeTimers: timers, sink: line => rows.push(JSON.parse(line)) })
+  diag.start(); await diag.collectVersions(); await diag.collectVersions()
+  assert.equal(trace.filter(x => x === 'monitor').length, 2)
+  assert.equal(trace.filter(x => x === 'probe').length, 2)
+  assert.equal(trace.filter(x => x === 'probe_done').length, 2)
+  assert.equal(active.size, 0)
+  const primary = new Error('Step failed: disposable-nginx-up'); let composeCalls = 0
+  assert.throws(() => diag.operation('compose_up', () => {
+    composeCalls++; trace.push('compose')
+    const start = performance.now(); while (performance.now() - start < 2050) { /* deliberate event-loop block */ }
+    throw primary
+  }), error => error === primary)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(composeCalls, 1)
+  assert.equal(trace.includes('timeout'), false)
+  assert.ok(trace.lastIndexOf('probe_done') < trace.indexOf('compose'))
+  assert.equal(rows.filter(r => r.event === 'version').length, 2)
+  assert.ok(!rows.some(r => r.reason === 'probe_timeout'))
+  await diag.finish()
+})
+test('DIAG01 genuinely unresponsive children hit the unchanged 2s limit; Compose is not repeated', async () => {
+  const rows = [], calls = []
+  const launch = (_exe, args) => {
+    calls.push(args); const child = new EventEmitter(); child.stdout = new EventEmitter()
+    child.kill = signal => { queueMicrotask(() => child.emit('close', null, signal)); return true }
+    return child
+  }
+  const diag = createDiagnostic({ launch, sink: line => rows.push(JSON.parse(line)) })
+  await diag.collectVersions(); await diag.collectVersions()
+  assert.equal(calls.length, 2)
+  assert.equal(rows.filter(r => r.reason === 'probe_timeout').length, 2)
+  let composeCalls = 0; diag.operation('compose_up', () => { composeCalls++; return 'ok' })
+  assert.equal(composeCalls, 1)
+  assert.ok(!JSON.stringify(rows).includes('docker_absent'))
+  await diag.finish()
+})

@@ -7,6 +7,7 @@ import { randomBytes } from 'node:crypto'
 import { TREE, command, composeArgs, read, validateManifest } from './lib.mjs'
 import { waitForVisibleWithEvidence, captureBrowserFailure, hasFailureEvidence } from './nginx-browser-evidence.mjs'
 import { createDiagnostic, mimeEvidence, composeLogEvidence, privateComposeConfig, finishBeforeTeardown } from './nginx-network-diagnostic.mjs'
+import { prepareBrowser, browserOrigin, controlEndpoint, waitServerReady, connectBrowser, closeBrowser, startBrowserObserver } from './nginx-browser-network-scope.mjs'
 
 function assertMissingAssetCache(policy) {
   assert.equal(policy, 'no-store', 'missing assets require exactly Cache-Control: no-store')
@@ -27,11 +28,17 @@ assert.equal(proof.Config.Labels['crm.source-tree'], TREE)
 assert.equal(release.source_tree, TREE)
 const base = JSON.parse(command('real-compose-model', 'docker', [...composeArgs(repo, path.join(report, 'unused-state')), 'config', '--format', 'json']))
 const project = `t004d02_${process.env.GITHUB_RUN_ID}_${process.pid}`
+// Preflight is deliberately outside the measured Compose/browser window. Never
+// build an image, download packages or fall back to a host browser on failure.
+const preparedBrowser = prepareBrowser(source, { run: command, emit: data => {
+  try { fs.writeFileSync(path.join(report, `nginx-browser-preflight-${process.pid}.json`), JSON.stringify(data, null, 2), { flag: 'wx', mode: 0o600 }) } catch { /* safe evidence only; primary error is preserved */ }
+} })
 // Operational config contains synthetic credentials: never upload the raw model.
 // The private config is outside both upload trees and removed after down.
 const mount = (source, target) => ({ type: 'bind', source, target, read_only: true })
 // No shared containers/volumes: the API uses this project's disposable DB and Redis.
 const privateCompose = privateComposeConfig(source, JSON.stringify({ services: {
+  browser: preparedBrowser.service,
   postgres: { image: 'postgres:16-alpine', environment: { POSTGRES_USER: 'wsm', POSTGRES_PASSWORD: 'wsm', POSTGRES_DB: 'wsm' }, tmpfs: ['/var/lib/postgresql/data'], healthcheck: { test: ['CMD-SHELL', 'pg_isready -U wsm'], interval: '2s', retries: 30 } },
   redis: { image: 'redis:7-alpine' },
   'crm-api': { image: release.image_id, environment: { ...base.services['crm-api'].environment, WA_GATEWAY: 'fake', AI_MODE: 'fake', CRM_QUEUE_PREFIX: project, CREDENTIALS_KEY: randomBytes(32).toString('base64') }, depends_on: { postgres: { condition: 'service_healthy' }, redis: { condition: 'service_started' } }, healthcheck: base.services['crm-api'].healthcheck },
@@ -43,10 +50,12 @@ const file = privateCompose.file
 const compose = (...args) => command('disposable-nginx-' + args[0], 'docker', ['compose', '-p', project, '-f', file, ...args])
 const observations = []
 const diagnostic = createDiagnostic({ report, project, composeFile: file })
-let browser, page, browserEvents
+let browser, page, browserEvents, browserObserver
 let primaryError
 try {
   diagnostic.start()
+  await diagnostic.collectVersions() // Both 2s probes settle before synchronous up.
+  diagnostic.emit('browser', 'isolation', { mode: 'container', data_origin: 'http://dashboard/crm', control_scope: 'runner_loopback', host_control_implemented: false, ...preparedBrowser.evidence })
   diagnostic.operation('compose_up', () => compose('up', '-d', '--wait', '--wait-timeout', '180'))
   for (const service of ['crm-web', 'dashboard']) diagnostic.operation('nginx_t_' + service, () => compose('exec', '-T', service, 'nginx', '-t'))
   const origin = service => 'http://' + compose('port', service, '80').trim()
@@ -86,7 +95,12 @@ try {
 
   // Paint and recover the image-exported SPA through both real Nginx servers.
   const { chromium } = await import(pathToFileURL(path.join(source, 'node_modules/@playwright/test/index.mjs')))
-  browser = await diagnostic.operation('chromium_launch', () => chromium.launch({ headless: true }))
+  await diagnostic.operation('browser_readiness', () => waitServerReady(project, file))
+  const endpoint = controlEndpoint(compose('port', 'browser', '3000').trim())
+  browser = await diagnostic.operation('chromium_connect', () => connectBrowser(chromium, endpoint))
+  browserObserver = startBrowserObserver(compose('ps', '-q', 'browser').trim(), diagnostic)
+  await diagnostic.operation('browser_observer_ready', () => browserObserver.ready)
+  const browserDashboard = browserOrigin()
   try { diagnostic.browserMetadata(browser, read(path.join(source, 'node_modules/@playwright/test/package.json')).version) } catch { diagnostic.emit('collector', 'unavailable', { reason: 'browser_metadata_unavailable' }) }
   page = await browser.newPage({ viewport: { width: 1440, height: 1000 } })
   const pageErrors = []
@@ -119,20 +133,20 @@ try {
     assert.ok(paint.width > 0 && paint.height > 0 && paint.uncovered && paint.shell)
     assert.equal(paint.visibility, 'visible'); assert.notEqual(paint.display, 'none'); assert.notEqual(paint.opacity, '0')
   }
-  await diagnostic.operation('goto_welcome', () => page.goto(dashboard + '/crm/welcome'))
+  await diagnostic.operation('goto_welcome', () => page.goto(browserDashboard + '/crm/welcome'))
   await capture('packaged-welcome', 'page-welcome')
   await diagnostic.operation('click_flows', () => page.locator('a[href="/crm/flows"]').first().click())
   await capture('packaged-flows', 'page-flows')
-  await diagnostic.operation('goto_direct_flows', () => page.goto(dashboard + '/crm/flows'))
+  await diagnostic.operation('goto_direct_flows', () => page.goto(browserDashboard + '/crm/flows'))
   await capture('packaged-direct-flows', 'page-flows')
   assert.deepEqual(pageErrors, [], 'healthy packaged navigation must not emit pageerror')
   const chunks = assets.filter(n => n.endsWith('.js') && fs.readFileSync(path.join(spa, 'assets', n), 'utf8').includes('page-flows'))
   assert.equal(chunks.length, 1, 'identify the packaged lazy flows module')
   const chunkPattern = '**/crm/assets/' + chunks[0]
   // Break the real lazy module using a real backend 404, without faking its response.
-  await page.route(chunkPattern, route => route.continue({ url: dashboard + '/crm/assets/missing-t004-d02.js' }))
+  await page.route(chunkPattern, route => route.continue({ url: browserDashboard + '/crm/assets/missing-t004-d02.js' }))
   const before = documents
-  await diagnostic.operation('goto_missing_flow', () => page.goto(dashboard + '/crm/flows'))
+  await diagnostic.operation('goto_missing_flow', () => page.goto(browserDashboard + '/crm/flows'))
   await capture('packaged-error', 'route-error')
   assert.equal(documents - before, 2, 'one navigation and one automatic reload')
   await diagnostic.operation('click_retry', () => page.getByRole('button', { name: 'Tentar novamente', exact: true }).click())
@@ -151,9 +165,9 @@ try {
 } finally {
   await finishBeforeTeardown(diagnostic, [
     () => fs.writeFileSync(path.join(report, 'nginx-http.json'), JSON.stringify(observations, null, 2), { flag: 'wx' }),
-    async () => { if (browser) await browser.close() },
+    () => closeBrowser(browser),
     () => fs.writeFileSync(path.join(report, 'nginx-compose.log'), composeLogEvidence(compose('logs', '--no-color', '--timestamps'), diagnostic.url), { flag: 'wx' }),
-    () => compose('down', '-v', '--remove-orphans'),
+    () => compose('down', '-v', '--remove-orphans', '--timeout', '10'),
     () => privateCompose.cleanup(), // Only this invocation's private config.
-  ], primaryError)
+  ], primaryError, [async () => { if (browserObserver) await browserObserver.stop() }])
 }
