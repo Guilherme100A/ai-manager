@@ -92,17 +92,59 @@ export async function connectBrowser(chromium, endpoint) {
   check(/^ws:\/\/127\.0\.0\.1:\d+\/$/.test(endpoint), 'browser_control_endpoint_invalid')
   return chromium.connect(endpoint, { timeout: 30000 }) // Never connectOverCDP/exposeNetwork/host fallback.
 }
-export function waitServerReady(project, composeFile, { launch = spawn, timeoutMs = 30000 } = {}) {
+export function waitServerReady(project, composeFile, { launch = spawn, timeoutMs = 30000, stopTimeoutMs = 250 } = {}) {
   return new Promise((resolve, reject) => {
-    let child, text = '', done = false
-    const end = error => { if (done) return; done = true; clearTimeout(timer); child?.kill('SIGTERM'); error ? reject(error) : resolve() }
+    let child, text = '', bytes = 0, done = false, closed = false, closeResolve
+    const closure = new Promise(resolveClosed => { closeResolve = resolveClosed })
+    const ignore = () => {}
+    const onChildError = () => end(new Error('CI02 browser_readiness_unavailable'))
+    const onStreamError = () => end(new Error('CI02 browser_readiness_unavailable'))
+    const onClose = () => { closed = true; closeResolve(); if (!done) end(new Error('CI02 browser_server_ended')) }
+    const release = () => {
+      child?.removeListener('close', onClose)
+      child?.removeListener('error', onChildError)
+      child?.on('error', ignore) // Late process/pipe errors cannot replace readiness.
+      child?.stdout?.removeListener('error', onStreamError)
+      child?.stdout?.on('error', ignore)
+      try { child?.stdout?.destroy?.() } catch { /* only the owned log pipe */ }
+      try { child?.unref?.() } catch { /* no global process or service is signalled */ }
+    }
+    const stop = async () => {
+      if (!child || closed) return
+      try { child.kill('SIGTERM') } catch { /* still enforce the bounded escalation */ }
+      let stopTimer
+      try {
+        await Promise.race([closure, new Promise(stopped => {
+          stopTimer = setTimeout(() => { try { child.kill('SIGKILL') } catch { /* own child may already have exited */ }; stopped() }, stopTimeoutMs)
+        })])
+      } finally { clearTimeout(stopTimer) }
+    }
+    const end = error => {
+      if (done) return
+      done = true; clearTimeout(timer)
+      child?.stdout?.removeListener('data', onData)
+      try { child?.stdout?.pause?.() } catch { /* queued callbacks also check done */ }
+      text = ''; bytes = 0
+      // Keep the first readiness result, but settle only after close or the
+      // existing R1-style TERM grace + KILL of this single owned subscriber.
+      stop().then(() => { release(); error ? reject(error) : resolve() })
+    }
+    const onData = chunk => {
+      if (done) return
+      try {
+        const incoming = chunk.toString(), size = Buffer.byteLength(incoming)
+        if (bytes + size > 65536) return end(new Error('CI02 browser_readiness_limit'))
+        bytes += size; text += incoming
+        if (/Listening on ws:\/\/(?:0\.0\.0\.0|\[::\]|localhost):3000\//.test(text)) end()
+      } catch { end(new Error('CI02 browser_readiness_unavailable')) }
+    }
     const timer = setTimeout(() => end(new Error('CI02 browser_readiness_timeout')), timeoutMs)
     try {
       child = launch('docker', ['compose', '-p', project, '-f', composeFile, 'logs', '--follow', '--no-color', 'browser'], { stdio: ['ignore', 'pipe', 'ignore'] })
-      child.stdout.on('data', chunk => { text += chunk; if (text.length > 65536) return end(new Error('CI02 browser_readiness_limit')); if (/Listening on ws:\/\/(?:0\.0\.0\.0|\[::\]|localhost):3000\//.test(text)) end() })
-      child.stdout.on('error', () => end(new Error('CI02 browser_readiness_unavailable')))
-      child.once('error', () => end(new Error('CI02 browser_readiness_unavailable')))
-      child.once('close', () => end(new Error('CI02 browser_server_ended')))
+      child.stdout.on('data', onData)
+      child.stdout.on('error', onStreamError)
+      child.on('error', onChildError)
+      child.once('close', onClose)
     } catch { end(new Error('CI02 browser_readiness_unavailable')) }
   })
 }

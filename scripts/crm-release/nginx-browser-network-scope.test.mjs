@@ -132,6 +132,82 @@ test('server readiness uses a single passive log subscription and a bounded fail
   await assert.rejects(waitServerReady('own-project', 'private', { launch: () => unavailable, timeoutMs: 5 }), /readiness_timeout/)
   assert.ok(unavailable.kills.includes('SIGTERM'))
 })
+const bounded = async promise => {
+  let timer
+  try { return await Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(Error('owned log cleanup did not settle')), 1500) })]) }
+  finally { clearTimeout(timer) }
+}
+test('D01 readiness waits for owned close, normal shutdown has one subscription and no escalation', async () => {
+  const c = child(); let calls = 0, settled = false
+  c.kill = signal => { c.kills.push(signal); return true }
+  const ready = waitServerReady('own-project', 'private-config', { launch() { calls++; queueMicrotask(() => c.stdout.emit('data', Buffer.from('Listening on ws://0.0.0.0:3000/\n'))); return c }, stopTimeoutMs: 1000 })
+  ready.then(() => { settled = true })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(settled, false)
+  assert.equal(c.stdout.listenerCount('data'), 0)
+  c.emit('close', 0, null)
+  await bounded(ready)
+  assert.equal(calls, 1); assert.deepEqual(c.kills, ['SIGTERM'])
+})
+test('D01 stubborn owned subscriber escalates with R1 grace and discards queued/late data before settling', async () => {
+  const c = child(), order = []; let savedData, conversions = 0, calls = 0
+  const poison = { toString() { conversions++; return secret.repeat(10000) } }
+  c.stdout.pause = () => order.push('pause')
+  c.stdout.destroy = () => order.push('destroy')
+  c.unref = () => order.push('unref')
+  c.kill = signal => {
+    c.kills.push(signal); order.push(signal)
+    c.stdout.emit('data', poison)
+    savedData(poison) // Also model a data callback already queued before removal.
+    c.stdout.emit('error', Error(secret))
+    if (signal === 'SIGTERM') queueMicrotask(() => { c.emit('error', Error(secret)); c.emit('error', Error(secret)) })
+    return true // Neither signal produces close in this reproduction.
+  }
+  const ready = waitServerReady('own-project', 'private-config', { launch() {
+    calls++; queueMicrotask(() => { savedData = c.stdout.listeners('data')[0]; c.stdout.emit('data', Buffer.from('Listening on ws://0.0.0.0:3000/\n')) }); return c
+  } })
+  await bounded(ready); order.push('settled')
+  assert.equal(calls, 1); assert.deepEqual(c.kills, ['SIGTERM', 'SIGKILL'])
+  assert.ok(order.indexOf('SIGKILL') < order.indexOf('settled'))
+  assert.ok(order.includes('destroy') && order.includes('unref'))
+  assert.equal(c.stdout.listenerCount('data'), 0); assert.equal(c.listenerCount('close'), 0)
+  for (let i = 0; i < 20; i++) { c.stdout.emit('data', poison); savedData(poison) }
+  c.stdout.emit('error', Error(secret)); c.emit('error', Error(secret)); c.emit('close', 0)
+  assert.equal(conversions, 0)
+  assert.deepEqual(c.kills, ['SIGTERM', 'SIGKILL'])
+})
+for (const [failure, message] of [
+  ['timeout', 'browser_readiness_timeout'], ['overflow', 'browser_readiness_limit'],
+  ['stream', 'browser_readiness_unavailable'], ['spawn', 'browser_readiness_unavailable'],
+]) test('D01 bounded cleanup preserves first ' + failure + ' failure and permits down/config cleanup', async () => {
+  const c = child(), order = []; let calls = 0, conversions = 0, savedData
+  const late = { toString() { conversions++; return secret.repeat(10000) } }
+  c.kill = signal => { c.kills.push(signal); c.stdout.emit('data', late); savedData?.(late); c.emit('error', Error('late error')); return true }
+  let primary
+  const ready = waitServerReady('own-project', 'private-config', { timeoutMs: 5, stopTimeoutMs: 5, launch() {
+    calls++; queueMicrotask(() => {
+      savedData = c.stdout.listeners('data')[0]
+      if (failure === 'overflow') c.stdout.emit('data', Buffer.alloc(65537))
+      if (failure === 'stream') c.stdout.emit('error', Error(secret))
+      if (failure === 'spawn') c.emit('error', Error(secret))
+    }); return c
+  } })
+  const harness = async () => {
+    try { await bounded(ready) }
+    catch (error) { primary = error; throw error }
+    finally { await finishBeforeTeardown({ emit() {}, finish: async () => order.push('finish') }, [() => { order.push('down'); throw Error('down failure') }, () => order.push('config-cleanup')], primary) }
+  }
+  await assert.rejects(harness(), error => error === primary && error.message.includes(message))
+  assert.equal(calls, 1)
+  assert.deepEqual(c.kills, ['SIGTERM', 'SIGKILL'])
+  assert.deepEqual(order, ['finish', 'down', 'config-cleanup'])
+  assert.equal(conversions, 0); assert.equal(c.stdout.listenerCount('data'), 0)
+})
+test('D01 synchronous spawn failure settles without a second subscription or resource to kill', async () => {
+  let calls = 0
+  await assert.rejects(bounded(waitServerReady('own-project', 'private-config', { launch() { calls++; throw Error(secret) } })), /browser_readiness_unavailable/)
+  assert.equal(calls, 1)
+})
 test('close timeout is own/bounded and cannot prevent observer, down and config cleanup', async () => {
   const order = [], primary = new Error('original timeout')
   await finishBeforeTeardown({ emit() {}, finish: async () => order.push('finish') }, [() => closeBrowser({ close: () => new Promise(() => {}) }, { timeoutMs: 5 }), () => { order.push('down'); throw Error('down failed') }, () => order.push('config-cleanup')], primary, [() => order.push('observer-stop')])
