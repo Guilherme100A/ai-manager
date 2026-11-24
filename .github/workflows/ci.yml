@@ -138,7 +138,7 @@ jobs:
         run: |
           mkdir -p "$CRM_REPORT_DIR" "$RUNNER_TEMP/output/shared-offers"
           node scripts/prepare-shared-offers-crm.mjs "$RUNNER_TEMP/crm-source"
-          test "$(git -C "$RUNNER_TEMP/crm-source" write-tree)" = fcf5007316b6cb214e1a63d85532b28984997cde
+          test "$(git -C "$RUNNER_TEMP/crm-source" write-tree)" = 4ca23fc779974f3772dcf5e6aeb6f0604fde0e0c
       - name: Install and build test dependencies on the runner only
         run: |
           diag() { node "$GITHUB_WORKSPACE/scripts/crm-release/listener-diagnostic.mjs" "$RUNNER_TEMP/crm-source" "$CRM_REPORT_DIR" "$@"; }
@@ -182,7 +182,7 @@ jobs:
           diag meta-routes pnpm --filter @crm/api exec vitest run src/routes/meta-profiles src/routes/meta-structure src/routes/meta-entities src/routes/meta-pixels --maxWorkers=2 --reporter=json --outputFile="$CRM_REPORT_DIR/meta-routes.json"
           node -e 'const r=require(process.argv[1]); if(!r.numTotalTests || r.numPassedTests!==r.numTotalTests || r.numPendingTests || r.numFailedTests || !r.success) process.exit(1)' "$CRM_REPORT_DIR/meta-routes.json"
           diag meta-discovery-web pnpm --filter @crm/web exec vitest run src/features/facebook --reporter=json --outputFile="$CRM_REPORT_DIR/meta-discovery-web.json"
-          node -e 'const r=require(process.argv[1]); if(r.numTotalTests!==44 || r.numPassedTests!==44 || r.numPendingTests || r.numFailedTests || !r.success) process.exit(1)' "$CRM_REPORT_DIR/meta-discovery-web.json"
+          node -e 'const r=require(process.argv[1]); if(r.numTotalTests!==49 || r.numPassedTests!==49 || r.numPendingTests || r.numFailedTests || !r.success) process.exit(1)' "$CRM_REPORT_DIR/meta-discovery-web.json"
           diag meta-discovery-core pnpm --filter @crm/core exec vitest run src/meta-ads/client/graph.unit.test.ts src/meta-ads/profiles/oauth.unit.test.ts --reporter=json --outputFile="$CRM_REPORT_DIR/meta-discovery-core.json"
           node -e 'const r=require(process.argv[1]); if(r.numTotalTests!==9 || r.numPassedTests!==9 || r.numPendingTests || r.numFailedTests || !r.success) process.exit(1)' "$CRM_REPORT_DIR/meta-discovery-core.json"
           diag meta-discovery-acceptance pnpm exec vitest run --config tests/acceptance/vitest.config.ts tests/acceptance/T005-R4 --reporter=json --outputFile="$CRM_REPORT_DIR/meta-discovery-acceptance.json"
@@ -204,7 +204,7 @@ jobs:
       - name: Build immutable Alpine/musl release (never copy runner node_modules)
         run: |
           printf '.git\n**/node_modules\n**/dist\noutput\n.env\ntest-results\nplaywright-report\n**/.vite\ntests/acceptance/T125/operational-ci.test.ts\ntests/acceptance/T125/revisor-gated-ci.test.ts\ntests/acceptance/T125/persistent-login-ci.test.ts\n' > "$RUNNER_TEMP/crm-source/.dockerignore"
-          docker build --platform linux/amd64 --build-arg SOURCE_TREE=fcf5007316b6cb214e1a63d85532b28984997cde -f integrations/shared-offers/Dockerfile -t "crm-shared-offers:$GITHUB_SHA" "$RUNNER_TEMP/crm-source"
+          docker build --platform linux/amd64 --build-arg SOURCE_TREE=4ca23fc779974f3772dcf5e6aeb6f0604fde0e0c -f integrations/shared-offers/Dockerfile -t "crm-shared-offers:$GITHUB_SHA" "$RUNNER_TEMP/crm-source"
           docker run --rm --network none -w /crm/apps/api "crm-shared-offers:$GITHUB_SHA" node /crm/node_modules/tsx/dist/cli.mjs --conditions=development -e "import('@crm/core').then(()=>console.log('Alpine workspace/dependencies load'))"
           docker volume create "ci_crm_${GITHUB_RUN_ID}_deps"
           docker run --rm --network none -v "ci_crm_${GITHUB_RUN_ID}_deps:/crm/node_modules:ro" "crm-shared-offers:$GITHUB_SHA" node -e "require('fs').accessSync('/crm/node_modules/tsx/dist/cli.mjs')"
