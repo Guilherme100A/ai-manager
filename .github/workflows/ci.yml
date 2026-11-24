@@ -182,7 +182,7 @@ jobs:
           diag meta-routes pnpm --filter @crm/api exec vitest run src/routes/meta-profiles src/routes/meta-structure src/routes/meta-entities src/routes/meta-pixels --maxWorkers=2 --reporter=json --outputFile="$CRM_REPORT_DIR/meta-routes.json"
           node -e 'const r=require(process.argv[1]); if(!r.numTotalTests || r.numPassedTests!==r.numTotalTests || r.numPendingTests || r.numFailedTests || !r.success) process.exit(1)' "$CRM_REPORT_DIR/meta-routes.json"
           diag meta-discovery-web pnpm --filter @crm/web exec vitest run src/features/facebook --reporter=json --outputFile="$CRM_REPORT_DIR/meta-discovery-web.json"
-          node -e 'const r=require(process.argv[1]); if(r.numTotalTests!==41 || r.numPassedTests!==41 || r.numPendingTests || r.numFailedTests || !r.success) process.exit(1)' "$CRM_REPORT_DIR/meta-discovery-web.json"
+          node -e 'const r=require(process.argv[1]); if(r.numTotalTests!==44 || r.numPassedTests!==44 || r.numPendingTests || r.numFailedTests || !r.success) process.exit(1)' "$CRM_REPORT_DIR/meta-discovery-web.json"
           diag meta-discovery-core pnpm --filter @crm/core exec vitest run src/meta-ads/client/graph.unit.test.ts src/meta-ads/profiles/oauth.unit.test.ts --reporter=json --outputFile="$CRM_REPORT_DIR/meta-discovery-core.json"
           node -e 'const r=require(process.argv[1]); if(r.numTotalTests!==9 || r.numPassedTests!==9 || r.numPendingTests || r.numFailedTests || !r.success) process.exit(1)' "$CRM_REPORT_DIR/meta-discovery-core.json"
           diag meta-discovery-acceptance pnpm exec vitest run --config tests/acceptance/vitest.config.ts tests/acceptance/T005-R4 --reporter=json --outputFile="$CRM_REPORT_DIR/meta-discovery-acceptance.json"
