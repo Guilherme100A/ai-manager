@@ -1,0 +1,1260 @@
+diff --git a/apps/api/src/routes/meta-profiles/index.ts b/apps/api/src/routes/meta-profiles/index.ts
+index 54a5c37..fb36315 100644
+--- a/apps/api/src/routes/meta-profiles/index.ts
++++ b/apps/api/src/routes/meta-profiles/index.ts
+@@ -80,7 +80,8 @@ export function metaProfilesRoutes(deps: ResolvedDeps) {
+     const { companyId } = getCompanyCtx(c)
+     const area = workspaceId(c.get('businessArea'))
+     const { profile_id } = c.req.valid('query')
+-    return c.json({ items: await metaDomain(() => svc().listWorkspaceCandidates(companyId, area, profile_id)), provider_access_verified: true })
++    const { items, blocked } = await metaDomain(() => svc().listWorkspaceCandidates(companyId, area, profile_id))
++    return c.json({ items, blocked, provider_access_verified: true })
+   })
+   app.post('/api/meta/workspace/ad-accounts', view, requireMetaManager, validate('json', linkAccount), async (c) => {
+     const { companyId } = getCompanyCtx(c)
+@@ -90,6 +91,14 @@ export function metaProfilesRoutes(deps: ResolvedDeps) {
+     setAudit(c, { action: 'meta.workspace.ad_account.link', targetType: 'meta_ad_account', targetId: account.id, detail: { business_area_id: area } })
+     return c.json({ ad_account: account })
+   })
++  app.delete('/api/meta/workspace/ad-accounts/:id', view, requireMetaManager, async (c) => {
++    const { companyId } = getCompanyCtx(c)
++    const area = workspaceId(c.get('businessArea'))
++    const id = c.req.param('id')
++    const { fb_account_id } = await metaDomain(() => svc().unlinkWorkspaceAccount(companyId, area, id))
++    setAudit(c, { action: 'meta.workspace.ad_account.unlink', targetType: 'meta_ad_account', targetId: id, detail: { business_area_id: area, fb_account_id } })
++    return c.body(null, 204)
++  })
+   const pixel = requirePerm('facebook.pixel')
+   app.get('/api/meta/workspace/pixels', view, pixel, validate('query', pixelAccount), async (c) => {
+     const { companyId } = getCompanyCtx(c)
+diff --git a/apps/api/src/routes/meta-profiles/meta-profiles.db.unit.test.ts b/apps/api/src/routes/meta-profiles/meta-profiles.db.unit.test.ts
+index 9cc682a..cbf0d92 100644
+--- a/apps/api/src/routes/meta-profiles/meta-profiles.db.unit.test.ts
++++ b/apps/api/src/routes/meta-profiles/meta-profiles.db.unit.test.ts
+@@ -1,12 +1,13 @@
+ /* eslint-disable @typescript-eslint/no-explicit-any -- respostas JSON lidas como dados soltos */
+ // Meta pela API contra o FakeMetaGraph (AC-T99-02..05): OAuth start/callback, state inválido ou de outra empresa,
+-// refresh preservando `included_in_dashboard`, nenhum token nas respostas e permissões de gestão.
++// refresh preservando `included_in_dashboard`, nenhum token nas respostas e permissões de gestão; contas por workspace
++// (F-02): disponíveis × vinculadas a outro Admin, vincular e desvincular (409 com pixel ligado).
+ import { randomBytes } from 'node:crypto'
+ import { FakeMetaGraph } from '@crm/core/meta-testing'
+-import { companyMembers, createDb, metaAdAccounts, metaProfiles, users, type Database } from '@crm/db'
++import { auditLogs, companyMembers, createDb, metaAdAccounts, metaProfiles, pixelConfigs, users, type Database } from '@crm/db'
+ import { createTempDatabase, type TempDatabase } from '@crm/db/testing'
+ import { createLogger, generateCredentialsKey, initCredentialsCrypto, MemoryMailer, redisConnection } from '@crm/node-kit'
+-import { eq } from 'drizzle-orm'
++import { and, eq } from 'drizzle-orm'
+ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+ import { createApp, type RedisClient } from '../../app'
+ 
+@@ -14,6 +15,7 @@ let temp: TempDatabase
+ let db: Database
+ let redis: RedisClient
+ let app: ReturnType<typeof createApp>
++let graphUrl: string
+ const fake = new FakeMetaGraph({ appId: 'app-t99', appSecret: 'secret-t99', pageSize: 2 })
+ const H = { 'content-type': 'application/json', 'x-requested-with': 'crm' }
+ const WEB = 'http://web.test'
+@@ -58,6 +60,7 @@ async function connect(s: Session, fbUser: string): Promise<any> {
+ beforeAll(async () => {
+   initCredentialsCrypto({ key: generateCredentialsKey() })
+   const { url } = await fake.start()
++  graphUrl = url
+   temp = await createTempDatabase({ migrate: true })
+   db = createDb(temp.url, { max: 6 })
+   redis = redisConnection({ url: process.env.REDIS_URL ?? 'redis://127.0.0.1:6379/1' })
+@@ -224,3 +227,144 @@ describe('perfis e contas', () => {
+     expect((await call(s, 'GET', `/api/meta/profiles/${profile.id}`)).body.profile.active).toBe(false)
+   })
+ })
++
++describe('F-02 contas por workspace', () => {
++  // O OAuth de workspace exige callback HTTPS; o resto do app é o mesmo (banco, redis, fake da Graph).
++  const HTTPS_REDIRECT = 'https://api.test/api/meta/oauth/callback'
++  const previousGate = process.env.SHARED_OFFERS_COMPANY_ID
++  let ws: ReturnType<typeof createApp>
++  let owner: Session
++  let admin1: string
++  let admin2: string
++  const X = 'act_9201'
++  const Y = 'act_9202'
++  const Z = 'act_9203'
++  const wcall = async (s: Session, method: string, path: string, area?: string, body?: unknown) => {
++    const res = await ws.request(path, {
++      method,
++      headers: { ...H, cookie: s.cookie, ...(area ? { 'x-business-area-id': area } : {}) },
++      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
++    })
++    const text = await res.text()
++    return { status: res.status, body: text ? (JSON.parse(text) as any) : {} }
++  }
++  const connectWs = async (s: Session, area: string, fbUser: string) => {
++    const start = await wcall(s, 'POST', '/api/meta/oauth/start', area, {})
++    expect(start.status).toBe(200)
++    const res = await ws.request(`/api/meta/oauth/callback?${new URLSearchParams({ code: fake.issueCode(fbUser, HTTPS_REDIRECT), state: stateOf(start.body.oauth_url) })}`, { headers: { cookie: s.cookie } })
++    expect(new URL(res.headers.get('location') ?? 'http://x/').searchParams.get('meta_oauth')).toBe('success')
++    const profile = ((await wcall(s, 'GET', '/api/meta/profiles', area)).body.items as any[]).find((p) => p.fb_user_id === fbUser)
++    // completeOAuth no workspace não sincroniza contas: nada vinculado até a escolha explícita.
++    expect(profile.ad_accounts).toEqual([])
++    return profile
++  }
++  const candidates = async (area: string, profileId: string) => {
++    const r = await wcall(owner, 'GET', `/api/meta/workspace/ad-accounts?profile_id=${profileId}`, area)
++    expect(r.status).toBe(200)
++    return r.body as { items: any[]; blocked: any[]; provider_access_verified: boolean }
++  }
++  const rowsOf = (fb: string) => db.select().from(metaAdAccounts).where(and(eq(metaAdAccounts.companyId, owner.companyId), eq(metaAdAccounts.fbAccountId, fb)))
++  let p1: any
++  let p2: any
++
++  beforeAll(async () => {
++    ws = createApp({
++      db,
++      redis,
++      mailer: new MemoryMailer(),
++      trustProxy: true,
++      logger: createLogger({ level: 'silent' }),
++      metaConfig: { appId: fake.appId, appSecret: fake.appSecret, graphUrl, version: 'v26.0', redirectUri: HTTPS_REDIRECT, webUrl: WEB, dialogUrl: 'https://www.facebook.com' },
++    })
++    owner = await signUp()
++    process.env.SHARED_OFFERS_COMPANY_ID = owner.companyId
++    const init = await wcall(owner, 'POST', '/api/business-areas/initialize', undefined, {})
++    expect(init.status).toBe(200)
++    ;[admin1, admin2] = (init.body.items as any[]).map((a) => a.id)
++    fake.addUser({ id: 'fb-ws1', name: 'WS1', adAccounts: [{ id: X, name: 'Loja X', currency: 'BRL', account_status: 1 }, { id: Y, name: 'Loja Y', currency: 'BRL', account_status: 1 }, { id: Z, name: 'Loja Z', currency: 'USD', account_status: 2 }] })
++    fake.addUser({ id: 'fb-ws2', name: 'WS2', adAccounts: [{ id: X, name: 'Loja X', currency: 'BRL', account_status: 1 }, { id: Z, name: 'Loja Z', currency: 'USD', account_status: 2 }] })
++    p1 = await connectWs(owner, admin1!, 'fb-ws1')
++    p2 = await connectWs(owner, admin2!, 'fb-ws2')
++    // Z fica vinculada ao Admin 2.
++    expect((await wcall(owner, 'POST', '/api/meta/workspace/ad-accounts', admin2, { profile_id: p2.id, fb_account_id: Z })).status).toBe(200)
++  }, 120_000)
++
++  afterAll(() => {
++    if (previousGate === undefined) delete process.env.SHARED_OFFERS_COMPANY_ID
++    else process.env.SHARED_OFFERS_COMPANY_ID = previousGate
++  })
++
++  it('A1: GET separa items [X,Y] (linked_ad_account_id null) e blocked [Z] (vinculada ao Admin 2)', async () => {
++    const r = await candidates(admin1!, p1.id)
++    expect(r.provider_access_verified).toBe(true)
++    expect(r.items.map((a) => [a.fb_account_id, a.linked_ad_account_id])).toEqual([[X, null], [Y, null]])
++    expect(r.blocked).toEqual([{ fb_account_id: Z, name: 'Loja Z', currency: 'USD', account_status: 2 }])
++    // No Admin 2, Z aparece como vinculada aqui.
++    const z = (await rowsOf(Z))[0]!
++    expect((await candidates(admin2!, p2.id)).items.find((a) => a.fb_account_id === Z)).toMatchObject({ linked_ad_account_id: z.id })
++  })
++
++  it('A5: POST de Z (vinculada ao Admin 2) no Admin 1 é recusado e nenhuma linha é criada', async () => {
++    const r = await wcall(owner, 'POST', '/api/meta/workspace/ad-accounts', admin1, { profile_id: p1.id, fb_account_id: Z })
++    expect(r.status).toBe(404)
++    expect((await rowsOf(Z)).map((a) => a.businessAreaId)).toEqual([admin2])
++  })
++
++  it('A2 + A3: ligar X → 200 e entra no perfil incluída; desligar sem pixel → 204, volta disponível e sai de blocked no Admin 2', async () => {
++    const link = await wcall(owner, 'POST', '/api/meta/workspace/ad-accounts', admin1, { profile_id: p1.id, fb_account_id: X })
++    expect(link.status).toBe(200)
++    expect(link.body.ad_account).toMatchObject({ fb_account_id: X, profile_id: p1.id, included_in_dashboard: true })
++    const id = link.body.ad_account.id
++    const profile = (await wcall(owner, 'GET', `/api/meta/profiles/${p1.id}`, admin1)).body.profile
++    expect(profile.ad_accounts.map((a: any) => [a.fb_account_id, a.included_in_dashboard])).toEqual([[X, true]])
++    expect((await candidates(admin1!, p1.id)).items.find((a) => a.fb_account_id === X)).toMatchObject({ linked_ad_account_id: id })
++    expect((await candidates(admin2!, p2.id)).blocked.map((a) => a.fb_account_id)).toEqual([X])
++
++    const del = await wcall(owner, 'DELETE', `/api/meta/workspace/ad-accounts/${id}`, admin1)
++    expect(del.status).toBe(204)
++    expect((await wcall(owner, 'GET', `/api/meta/profiles/${p1.id}`, admin1)).body.profile.ad_accounts).toEqual([])
++    expect(await rowsOf(X)).toEqual([])
++    expect((await candidates(admin1!, p1.id)).items.find((a) => a.fb_account_id === X)).toMatchObject({ linked_ad_account_id: null })
++    const after2 = await candidates(admin2!, p2.id)
++    expect(after2.blocked).toEqual([])
++    expect(after2.items.map((a) => a.fb_account_id)).toContain(X)
++    await expect
++      .poll(async () => (await db.select().from(auditLogs).where(and(eq(auditLogs.companyId, owner.companyId), eq(auditLogs.action, 'meta.workspace.ad_account.unlink')))).map((l) => [l.targetId, l.detail]), { timeout: 5_000 })
++      .toEqual([[id, expect.objectContaining({ business_area_id: admin1, fb_account_id: X })]])
++  })
++
++  it('A4: desligar com pixel ligado → 409 com details.pixels e nada é apagado', async () => {
++    const id = (await wcall(owner, 'POST', '/api/meta/workspace/ad-accounts', admin1, { profile_id: p1.id, fb_account_id: X })).body.ad_account.id
++    const [pixel] = await db.insert(pixelConfigs).values({ companyId: owner.companyId, businessAreaId: admin1!, metaAdAccountId: id, pixelId: '920100', name: 'Pixel X', accessTokenEnc: 'v1.synthetic' }).returning()
++    const r = await wcall(owner, 'DELETE', `/api/meta/workspace/ad-accounts/${id}`, admin1)
++    expect(r.status).toBe(409)
++    expect(r.body.error.message).toBe('Desvincule os pixels desta conta antes')
++    expect(r.body.error.details.pixels).toEqual([{ id: pixel!.id, pixel_id: '920100', name: 'Pixel X' }])
++    expect((await rowsOf(X)).map((a) => a.id)).toEqual([id])
++    expect(await db.select().from(pixelConfigs).where(eq(pixelConfigs.id, pixel!.id))).toHaveLength(1)
++    // Sem o pixel, o desvínculo passa.
++    await db.delete(pixelConfigs).where(eq(pixelConfigs.id, pixel!.id))
++    expect((await wcall(owner, 'DELETE', `/api/meta/workspace/ad-accounts/${id}`, admin1)).status).toBe(204)
++  })
++
++  it('A6: id de outro Admin ou de outra empresa → 404; quem não é dono do workspace não desvincula; sem workspace → erro de validação', async () => {
++    const z = (await rowsOf(Z))[0]!
++    expect((await wcall(owner, 'DELETE', `/api/meta/workspace/ad-accounts/${z.id}`, admin1)).status).toBe(404)
++    expect((await wcall(owner, 'DELETE', '/api/meta/workspace/ad-accounts/not-a-uuid', admin2)).status).toBe(404)
++    const other = await signUp()
++    expect((await wcall(other, 'DELETE', `/api/meta/workspace/ad-accounts/${z.id}`, admin2)).status).toBe(404)
++    // Membro com facebook.profiles (não gestor): o middleware de workspace já esconde o Admin dele (404); com papel
++    // admin (gestor de perfis, mas não dono) também. requireMetaManager (403) fica como segunda trava da rota.
++    for (const role of ['member', 'admin'] as const) {
++      const u = await signUp()
++      await db.insert(companyMembers).values({ companyId: owner.companyId, userId: u.userId, role, permissionKeys: role === 'member' ? ['facebook.profiles'] : null })
++      await db.update(users).set({ lastCompanyId: owner.companyId }).where(eq(users.id, u.userId))
++      const r = await wcall(u, 'DELETE', `/api/meta/workspace/ad-accounts/${z.id}`, admin2)
++      expect([403, 404]).toContain(r.status)
++    }
++    // Sem o header de workspace: workspaceId() recusa com VALIDATION_ERROR (422), como GET/POST.
++    const none = await wcall(owner, 'DELETE', `/api/meta/workspace/ad-accounts/${z.id}`)
++    expect([none.status, none.body.error.code]).toEqual([422, 'VALIDATION_ERROR'])
++    expect(await rowsOf(Z)).toHaveLength(1)
++  })
++})
+diff --git a/apps/api/src/routes/meta-profiles/shared.ts b/apps/api/src/routes/meta-profiles/shared.ts
+index 4d5f581..ffdb8a8 100644
+--- a/apps/api/src/routes/meta-profiles/shared.ts
++++ b/apps/api/src/routes/meta-profiles/shared.ts
+@@ -41,7 +41,7 @@ export async function metaDomain<T>(fn: () => Promise<T>): Promise<T> {
+   } catch (err) {
+     if (!(err instanceof MetaProfilesError)) throw err
+     if (err.code === 'not_found') throw new ApiError('NOT_FOUND', err.message)
+-    if (err.code === 'conflict') throw new ApiError('CONFLICT', err.message)
++    if (err.code === 'conflict') throw new ApiError('CONFLICT', err.message, err.details)
+     if (err.code === 'invalid_state') throw new ApiError('VALIDATION_ERROR', err.message, { fields: [{ path: 'state', message: err.message }] })
+     if (err.code === 'not_configured') throw new ApiError('CONFLICT', err.message, { error_code: 'meta_not_configured' })
+     if (err.code === 'token_invalid') throw new ApiError('CONFLICT', err.message, { error_code: 'meta_token_invalid', ...err.details })
+diff --git a/apps/web/src/features/facebook/api.ts b/apps/web/src/features/facebook/api.ts
+index 352fec7..76228f3 100644
+--- a/apps/web/src/features/facebook/api.ts
++++ b/apps/web/src/features/facebook/api.ts
+@@ -26,6 +26,7 @@ export interface MetaProfile {
+   ad_accounts: MetaAdAccount[]
+   ad_accounts_count: number
+   ad_accounts_included_count: number
++  updated_at?: string
+ }
+ 
+ export const profilesKey = (companyId: string | null | undefined) => ['facebook', 'profiles', companyId ?? '', activeBusinessArea()] as const
+@@ -251,14 +252,21 @@ export const deletePixel = (id: string) => api.delete<void>(`/api/meta/pixels/${
+ 
+ export type { BundleLevel }
+ 
+-// Discovery is read-only. Linking always requires an explicit selection.
+-export type WorkspaceAdAccount = Pick<MetaAdAccount, 'fb_account_id' | 'name' | 'currency' | 'account_status'>
++// Discovery is read-only: links and unlinks happen only on an explicit switch action.
++export type BlockedWorkspaceAdAccount = Pick<MetaAdAccount, 'fb_account_id' | 'name' | 'currency' | 'account_status'>
++/** `linked_ad_account_id`: UUID CRM da conta vinculada neste workspace, ou `null`. */
++export type WorkspaceAdAccount = BlockedWorkspaceAdAccount & { linked_ad_account_id: string | null }
++export interface WorkspaceAccounts {
++  items: WorkspaceAdAccount[]
++  /** Contas do perfil vinculadas a outro workspace da empresa (só leitura). */
++  blocked: BlockedWorkspaceAdAccount[]
++}
+ export const workspaceAccountsKey = (companyId: string | null | undefined, profileId?: string) =>
+   ['facebook', 'workspace-accounts', companyId ?? '', activeBusinessArea(), ...(profileId ? [profileId] : [])] as const
+ export const fetchWorkspaceAccounts = (profileId: string) =>
+   api
+-    .get<{ items: WorkspaceAdAccount[] }>('/api/meta/workspace/ad-accounts', { query: { profile_id: profileId } })
+-    .then((r) => r.items)
++    .get<WorkspaceAccounts>('/api/meta/workspace/ad-accounts', { query: { profile_id: profileId } })
++    .then((r): WorkspaceAccounts => ({ items: r.items, blocked: r.blocked ?? [] }))
+ export const linkWorkspaceAccount = (profileId: string, fbAccountId: string) =>
+   api
+     .post<{ ad_account: MetaAdAccount }>('/api/meta/workspace/ad-accounts', {
+@@ -266,4 +274,7 @@ export const linkWorkspaceAccount = (profileId: string, fbAccountId: string) =>
+       fb_account_id: fbAccountId,
+     })
+     .then((r) => r.ad_account)
++/** 204; 409 com `details.pixels` enquanto houver pixel ligado à conta. */
++export const unlinkWorkspaceAccount = (adAccountId: string) =>
++  api.delete<void>(`/api/meta/workspace/ad-accounts/${encodeURIComponent(adAccountId)}`)
+ export const maskedAccountId = (id: string) => '***' + id.replace(/^act_/, '').slice(-4)
+diff --git a/apps/web/src/features/facebook/facebook.unit.test.ts b/apps/web/src/features/facebook/facebook.unit.test.ts
+index 6a86090..2abcdf8 100644
+--- a/apps/web/src/features/facebook/facebook.unit.test.ts
++++ b/apps/web/src/features/facebook/facebook.unit.test.ts
+@@ -43,7 +43,11 @@ import {
+   togglePatch,
+   totals,
+   validatePixel,
++  oauthFocusProfile,
++  unlinkBlockingPixels,
++  workspaceSwitchState,
+ } from './rules'
++import { HttpError } from '@/lib/http'
+ import { campaignsSearchSchema, profilesSearchSchema } from './search'
+ 
+ const access = (perms: string[], extra: Partial<{ isOwner: boolean; role: 'owner' | 'admin' | 'member'; isPlatformAdmin: boolean }> = {}) => ({
+@@ -411,6 +415,33 @@ describe('AC-T106-05 perfis e pixel', () => {
+     expect(oauthResult({ meta_oauth: 'other' })).toBeNull()
+     expect(oauthResult({})).toBeNull()
+   })
++  it('chave da conta no workspace: ligada = vinculada aqui; desabilitada sem gestão ou durante mutação/recarga', () => {
++    const linked = { linked_ad_account_id: 'uuid-1' }
++    const free = { linked_ad_account_id: null }
++    expect(workspaceSwitchState(linked, { manager: true, locked: false })).toEqual({ checked: true, disabled: false })
++    expect(workspaceSwitchState(free, { manager: true, locked: false })).toEqual({ checked: false, disabled: false })
++    expect(workspaceSwitchState(free, { manager: true, locked: true })).toEqual({ checked: false, disabled: true })
++    expect(workspaceSwitchState(linked, { manager: false, locked: false })).toEqual({ checked: true, disabled: true })
++  })
++  it('pós-OAuth no workspace: abre o único perfil ou o de updated_at mais recente', () => {
++    expect(oauthFocusProfile([])).toBeNull()
++    expect(oauthFocusProfile([{ id: 'only' }])).toBe('only')
++    expect(
++      oauthFocusProfile([
++        { id: 'old', updated_at: '2026-11-20T10:00:00.000Z' },
++        { id: 'new', updated_at: '2026-11-24T10:00:00.000Z' },
++        { id: 'mid', updated_at: '2026-11-22T10:00:00.000Z' },
++      ]),
++    ).toBe('new')
++    expect(oauthFocusProfile([{ id: 'a' }, { id: 'b', updated_at: '2026-11-01T00:00:00.000Z' }])).toBe('b')
++  })
++  it('desvínculo recusado: só o 409 com details.pixels lista os pixels', () => {
++    const pixels = [{ id: 'c1', pixel_id: '123', name: 'Loja' }]
++    expect(unlinkBlockingPixels(new HttpError(409, 'CONFLICT', 'Desvincule os pixels desta conta antes', { pixels }))).toEqual(pixels)
++    expect(unlinkBlockingPixels(new HttpError(409, 'CONFLICT', 'x', {}))).toBeNull()
++    expect(unlinkBlockingPixels(new HttpError(404, 'NOT_FOUND', 'x', { pixels }))).toBeNull()
++    expect(unlinkBlockingPixels(new Error('x'))).toBeNull()
++  })
+   it('iniciais do avatar', () => {
+     expect(initials('Maria da Silva', '123')).toBe('MS')
+     expect(initials('Ana', '123')).toBe('A')
+diff --git a/apps/web/src/features/facebook/profiles-page.tsx b/apps/web/src/features/facebook/profiles-page.tsx
+index dee8cf1..3945b34 100644
+--- a/apps/web/src/features/facebook/profiles-page.tsx
++++ b/apps/web/src/features/facebook/profiles-page.tsx
+@@ -2,7 +2,7 @@
+ // inclusão de conta no dashboard otimista com rollback, ações de gestão (só owner/admin) e o toast do retorno do OAuth
+ // (`?meta_oauth=success|error&meta_message=`), removendo os params da URL em seguida.
+ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+-import { Check, ChevronDown, Plus, RefreshCw, Trash2, Link2 } from 'lucide-react'
++import { Check, ChevronDown, Plus, RefreshCw, Settings2, Trash2, Link2 } from 'lucide-react'
+ import { useEffect, useRef, useState } from 'react'
+ import { Button } from '@/components/ui/button'
+ import { ConfirmDialog, serverMessage } from '@/features/settings-quick-replies/kit'
+@@ -22,12 +22,21 @@ import {
+   fetchWorkspaceAccounts,
+   linkWorkspaceAccount,
+   maskedAccountId,
++  unlinkWorkspaceAccount,
+   workspaceAccountsKey,
+   type WorkspaceAdAccount,
+   type MetaProfile,
+ } from './api'
+ import { NS, useFacebookSession } from './layout'
+-import { applyAccountToggle, canManageProfiles, initials, oauthResult } from './rules'
++import {
++  applyAccountToggle,
++  canManageProfiles,
++  initials,
++  oauthFocusProfile,
++  oauthResult,
++  unlinkBlockingPixels,
++  workspaceSwitchState,
++} from './rules'
+ 
+ export interface ProfilesSearch {
+   meta_oauth?: string
+@@ -67,6 +76,21 @@ export function ProfilesPage({ search, onClearSearch }: { search: ProfilesSearch
+   const [removing, setRemoving] = useState<MetaProfile | null>(null)
+   const [busy, setBusy] = useState<string | null>(null)
+   const handled = useRef(false)
++  // 'Gerenciar contas' e o retorno do OAuth no workspace: expande o card e rola até as contas autorizadas.
++  const [reveal, setReveal] = useState<{ id: string; n: number } | null>(null)
++  const revealCandidates = (id: string) => {
++    setExpanded((e) => ({ ...e, [id]: true }))
++    setReveal((r) => ({ id, n: (r?.n ?? 0) + 1 }))
++  }
++  useEffect(() => {
++    if (!reveal) return
++    const frame = requestAnimationFrame(() => {
++      document
++        .querySelector(`[data-testid="facebook-candidates-${reveal.id}"]`)
++        ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
++    })
++    return () => cancelAnimationFrame(frame)
++  }, [reveal])
+ 
+   // Retorno do OAuth: toast, recarrega (agora e após 2,5 s) e limpa a URL.
+   useEffect(() => {
+@@ -83,10 +107,14 @@ export function ProfilesPage({ search, onClearSearch }: { search: ProfilesSearch
+       clearBundles()
+       void qc.invalidateQueries({ queryKey: workspaceAccountsKey(companyId) })
+       setTimeout(() => {
+-        if (current()) {
+-          void qc.invalidateQueries({ queryKey: key })
+-          void qc.invalidateQueries({ queryKey: workspaceAccountsKey(companyId) })
+-        }
++        if (!current()) return
++        void qc.invalidateQueries({ queryKey: workspaceAccountsKey(companyId) })
++        // Workspace: depois do refetch, abre as contas do perfil recém-conectado (o único ou o mais recente).
++        void qc.invalidateQueries({ queryKey: key }).then(() => {
++          if (!area || !current()) return
++          const target = oauthFocusProfile(qc.getQueryData<MetaProfile[]>(key) ?? [])
++          if (target) revealCandidates(target)
++        })
+       }, OAUTH_RELOAD_MS)
+     } else notify('facebook-oauth-error', t('profiles.oauth.error'), r.message ?? undefined)
+     onClearSearch()
+@@ -220,6 +248,7 @@ export function ProfilesPage({ search, onClearSearch }: { search: ProfilesSearch
+               manager={manager}
+               busy={busy}
+               onToggleOpen={() => setExpanded((e) => ({ ...e, [p.id]: !isOpen(p) }))}
++              onManage={area ? () => revealCandidates(p.id) : undefined}
+               onRefresh={() => void refresh(p)}
+               onReconnect={() => void connect(p.id)}
+               onRemove={() => setRemoving(p)}
+@@ -263,6 +292,7 @@ function ProfileCard({
+   manager,
+   busy,
+   onToggleOpen,
++  onManage,
+   onRefresh,
+   onReconnect,
+   onRemove,
+@@ -275,6 +305,8 @@ function ProfileCard({
+   manager: boolean
+   busy: string | null
+   onToggleOpen: () => void
++  /** Só com workspace ativo. */
++  onManage?: () => void
+   onRefresh: () => void
+   onReconnect: () => void
+   onRemove: () => void
+@@ -348,6 +380,11 @@ function ProfileCard({
+             {t('profiles.accounts')}
+             <ChevronDown className={cn('transition-transform', open && 'rotate-180')} aria-hidden />
+           </Button>
++          {onManage ? (
++            <Button variant="ghost" size="sm" data-testid={`facebook-profile-manage-${p.id}`} onClick={onManage}>
++              <Settings2 aria-hidden /> {t('profiles.discovery.manage')}
++            </Button>
++          ) : null}
+           {manager ? (
+             <>
+               <Button
+@@ -457,9 +494,10 @@ function WorkspaceAccounts({
+   const area = activeBusinessArea()
+   const key = workspaceAccountsKey(companyId, profile.id)
+   const list = useQuery({ queryKey: key, queryFn: () => fetchWorkspaceAccounts(profile.id), retry: false })
+-  const [selected, setSelected] = useState<WorkspaceAdAccount | null>(null)
++  // Desligar pede confirmação inline; ligar é direto.
++  const [unlinking, setUnlinking] = useState<WorkspaceAdAccount | null>(null)
+   const [pending, setPending] = useState(false)
+-  const [error, setError] = useState(false)
++  const [error, setError] = useState<string | null>(null)
+   const lock = useRef(false)
+   const mounted = useRef(true)
+   useEffect(() => {
+@@ -469,28 +507,49 @@ function WorkspaceAccounts({
+     }
+   }, [])
+   const current = () => mounted.current && activeCompany() === companyId && activeBusinessArea() === area
+-  const confirm = async () => {
+-    if (!selected || lock.current || !current()) return
++  const name = (a: { name: string | null; fb_account_id: string }) => a.name || maskedAccountId(a.fb_account_id)
++  const run = async (action: () => Promise<unknown>, onError: (err: unknown) => string) => {
++    if (lock.current || !current()) return
+     lock.current = true
+     setPending(true)
+-    setError(false)
++    setError(null)
+     try {
+-      await linkWorkspaceAccount(profile.id, selected.fb_account_id)
++      await action()
+       if (!current()) return
+       await onLinked()
+       if (!current()) return
+       await qc.invalidateQueries({ queryKey: key })
+-      setSelected(null)
+-    } catch {
+-      if (current()) setError(true)
++      setUnlinking(null)
++    } catch (err) {
++      if (current()) setError(onError(err))
+     } finally {
+       lock.current = false
+       if (current()) setPending(false)
+     }
+   }
++  const link = (a: WorkspaceAdAccount) =>
++    void run(
++      () => linkWorkspaceAccount(profile.id, a.fb_account_id),
++      () => t('profiles.discovery.linkError'),
++    )
++  const unlink = (a: WorkspaceAdAccount) => {
++    const id = a.linked_ad_account_id
++    if (!id) return
++    void run(
++      () => unlinkWorkspaceAccount(id),
++      (err) => {
++        const pixels = unlinkBlockingPixels(err)
++        return pixels
++          ? t('profiles.discovery.unlinkHasPixels', { pixels: pixels.map((p) => p.name || p.pixel_id).join(', ') })
++          : t('profiles.discovery.unlinkError')
++      },
++    )
++  }
++  const locked = pending || busy || list.isFetching
++  const data = list.data
+   return (
+     <section
+-      className="mb-4 flex flex-col gap-2"
++      className="mb-4 flex scroll-mt-4 flex-col gap-2"
+       data-testid={`facebook-candidates-${profile.id}`}
+       aria-busy={list.isFetching || pending}
+     >
+@@ -503,63 +562,134 @@ function WorkspaceAccounts({
+             {t('common.retry')}
+           </Button>
+         </div>
+-      ) : list.isPending ? (
++      ) : !data ? (
+         <p>{t('profiles.discovery.loading')}</p>
+-      ) : list.data.length === 0 ? (
++      ) : data.items.length === 0 && data.blocked.length === 0 ? (
+         <p data-testid="facebook-candidates-empty">{t('profiles.discovery.empty')}</p>
+       ) : (
+         <ul className="flex flex-col gap-2">
+-          {list.data.map((a) => {
+-            const linked = profile.ad_accounts.some((account) => account.fb_account_id === a.fb_account_id)
++          {data.items.map((a) => {
++            const state = workspaceSwitchState(a, { manager, locked })
+             return (
+               <li
+                 key={a.fb_account_id}
+-                className="flex flex-wrap items-center gap-3 rounded-md border p-2"
++                className="flex items-center gap-3 rounded-md border p-2"
+                 data-testid="facebook-candidate"
+               >
+-                <span className="min-w-0 flex-1 text-sm">
+-                  <span className="block font-medium">{a.name || maskedAccountId(a.fb_account_id)}</span>
+-                  <span>
+-                    {maskedAccountId(a.fb_account_id)} · {a.currency ?? '—'} ·{' '}
+-                    {t('profiles.discovery.status', { status: a.account_status ?? '—' })}
+-                  </span>
+-                </span>
+-                {linked ? (
+-                  <span>{t('profiles.discovery.linked')}</span>
+-                ) : manager ? (
+-                  <Button
+-                    variant="outline"
+-                    disabled={pending || busy || list.isFetching}
+-                    onClick={() => {
+-                      setError(false)
+-                      setSelected(a)
+-                    }}
+-                  >
+-                    {t('profiles.discovery.link')}
+-                  </Button>
+-                ) : null}
++                <AccountSummary account={a} />
++                <AccountSwitch
++                  testId={`facebook-candidate-switch-${a.fb_account_id}`}
++                  label={name(a)}
++                  checked={state.checked}
++                  disabled={state.disabled}
++                  onClick={() => {
++                    setError(null)
++                    if (state.checked) setUnlinking(a)
++                    else {
++                      setUnlinking(null)
++                      link(a)
++                    }
++                  }}
++                />
+               </li>
+             )
+           })}
++          {data.blocked.map((a) => (
++            <li
++              key={a.fb_account_id}
++              className="flex items-center gap-3 rounded-md border border-dashed p-2 opacity-70"
++              data-testid="facebook-candidate-blocked"
++            >
++              <AccountSummary account={a} note={t('profiles.discovery.blocked')} />
++              <AccountSwitch
++                testId={`facebook-candidate-switch-${a.fb_account_id}`}
++                label={name(a)}
++                checked={false}
++                disabled
++                onClick={() => undefined}
++              />
++            </li>
++          ))}
+         </ul>
+       )}
+-      {selected ? (
+-        <div className="rounded-md border p-3" role="group" aria-label={t('profiles.discovery.confirmTitle')}>
+-          <p>
+-            {t('profiles.discovery.confirm', {
+-              name: selected.name || maskedAccountId(selected.fb_account_id),
+-              id: maskedAccountId(selected.fb_account_id),
+-            })}
++      {unlinking ? (
++        <div className="rounded-md border p-3" role="group" aria-label={t('profiles.discovery.unlinkConfirmTitle')}>
++          <p className="text-sm">
++            {t('profiles.discovery.unlinkConfirm', { name: name(unlinking), id: maskedAccountId(unlinking.fb_account_id) })}
+           </p>
+-          {error ? <p role="alert">{t('profiles.discovery.linkError')}</p> : null}
+-          <Button disabled={pending || busy} onClick={() => void confirm()}>
+-            {t(error ? 'common.retry' : 'profiles.discovery.link')}
+-          </Button>
+-          <Button variant="ghost" disabled={pending} onClick={() => setSelected(null)}>
+-            {t('common.cancel')}
+-          </Button>
++          <div className="mt-2 flex flex-wrap gap-2">
++            <Button variant="destructive" disabled={pending || busy} onClick={() => unlink(unlinking)}>
++              {t('profiles.discovery.unlink')}
++            </Button>
++            <Button variant="ghost" disabled={pending} onClick={() => setUnlinking(null)}>
++              {t('common.cancel')}
++            </Button>
++          </div>
+         </div>
+       ) : null}
++      {error ? (
++        <p role="alert" className="text-sm text-destructive">
++          {error}
++        </p>
++      ) : null}
+     </section>
+   )
+ }
++
++function AccountSummary({
++  account: a,
++  note,
++}: {
++  account: { fb_account_id: string; name: string | null; currency: string | null; account_status: number | null }
++  note?: string
++}) {
++  const t = useT(NS)
++  return (
++    <span className="min-w-0 flex-1 text-sm">
++      <span className="block truncate font-medium">{a.name || maskedAccountId(a.fb_account_id)}</span>
++      <span className="block truncate text-xs text-muted-foreground">
++        {maskedAccountId(a.fb_account_id)} · {a.currency ?? '—'} ·{' '}
++        {t('profiles.discovery.status', { status: a.account_status ?? '—' })}
++      </span>
++      {note ? <span className="block text-xs text-muted-foreground">{note}</span> : null}
++    </span>
++  )
++}
++
++function AccountSwitch({
++  testId,
++  label,
++  checked,
++  disabled,
++  onClick,
++}: {
++  testId: string
++  label: string
++  checked: boolean
++  disabled: boolean
++  onClick: () => void
++}) {
++  return (
++    <button
++      type="button"
++      role="switch"
++      aria-checked={checked}
++      aria-label={label}
++      data-testid={testId}
++      disabled={disabled}
++      onClick={onClick}
++      className={cn(
++        'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50',
++        checked ? 'bg-primary' : 'bg-muted-foreground/30',
++      )}
++    >
++      <span
++        aria-hidden
++        className={cn(
++          'inline-block size-5 rounded-full bg-background shadow transition-transform',
++          checked ? 'translate-x-5' : 'translate-x-0.5',
++        )}
++      />
++    </button>
++  )
++}
+diff --git a/apps/web/src/features/facebook/rules.ts b/apps/web/src/features/facebook/rules.ts
+index de9dbab..a18b4fb 100644
+--- a/apps/web/src/features/facebook/rules.ts
++++ b/apps/web/src/features/facebook/rules.ts
+@@ -1,6 +1,7 @@
+ // Regras puras do módulo Facebook (T106; 11 §2, §3.4, §4, §5): sub-rota permitida, status das entidades, colunas de
+ // métricas (ordem persistida por empresa), valores pareados, totais, ordenação, busca, orçamento e estados do bundle.
+ // Testadas em facebook.unit.test.ts; os componentes só montam a tela sobre elas.
++import { HttpError } from '@/lib/http'
+ import { hasAny, type Session } from '@/lib/session'
+ import type { BundleEnvelope, BundleMode, BundleRow, MetaProfile } from './api'
+ 
+@@ -532,6 +533,34 @@ export function oauthResult(search: Record<string, unknown>): { status: 'success
+   return { status: s, message: typeof m === 'string' && m.trim() ? m.trim() : null }
+ }
+ 
++/**
++ * Chave de uma conta autorizada no workspace: ligada quando já tem vínculo neste workspace; desabilitada para quem
++ * não gere perfis e durante qualquer mutação/recarga.
++ */
++export function workspaceSwitchState(
++  account: { linked_ad_account_id: string | null },
++  opts: { manager: boolean; locked: boolean },
++): { checked: boolean; disabled: boolean } {
++  return { checked: account.linked_ad_account_id != null, disabled: !opts.manager || opts.locked }
++}
++
++/** Perfil a abrir depois do OAuth no workspace: o único, ou o de `updated_at` mais recente. */
++export function oauthFocusProfile(profiles: readonly Pick<MetaProfile, 'id' | 'updated_at'>[]): string | null {
++  if (profiles.length <= 1) return profiles[0]?.id ?? null
++  const time = (p: Pick<MetaProfile, 'updated_at'>) => {
++    const t = p.updated_at ? Date.parse(p.updated_at) : NaN
++    return Number.isNaN(t) ? -Infinity : t
++  }
++  return profiles.reduce((best, p) => (time(p) > time(best) ? p : best)).id
++}
++
++/** Pixels que impedem o desvínculo (409 `details.pixels`), ou `null` se o erro for outro. */
++export function unlinkBlockingPixels(err: unknown): { id: string; pixel_id: string; name: string }[] | null {
++  if (!(err instanceof HttpError) || err.status !== 409) return null
++  const pixels = (err.details as { pixels?: unknown } | undefined)?.pixels
++  return Array.isArray(pixels) && pixels.length ? (pixels as { id: string; pixel_id: string; name: string }[]) : null
++}
++
+ /** Iniciais do avatar (nome ou id). */
+ export function initials(name: string | null | undefined, fallback: string): string {
+   const parts = (name ?? '').trim().split(/\s+/).filter(Boolean)
+diff --git a/apps/web/src/i18n/en/facebook.json b/apps/web/src/i18n/en/facebook.json
+index 200cdac..a262186 100644
+--- a/apps/web/src/i18n/en/facebook.json
++++ b/apps/web/src/i18n/en/facebook.json
+@@ -262,15 +262,19 @@
+     "discovery": {
+       "available": "Accounts authorized by Meta",
+       "linked": "Linked to this profile",
+-      "hint": "Select an account to link it to this workspace. Discovery does not create links.",
++      "hint": "Turn the switch on to link the account to this workspace; turn it off to unlink. Discovery does not create links.",
+       "loading": "Loading authorized accounts…",
+       "empty": "Meta returned no available accounts for this profile.",
+       "loadError": "Could not query Meta. Check your connection and permissions or reconnect the profile and retry.",
+-      "link": "Link account",
+-      "confirmTitle": "Confirm link",
+-      "confirm": "Link {name} ({id}) to this workspace?",
+       "linkError": "Could not link the account. Check permissions, access and possible conflicts and retry.",
+-      "status": "Status: {status}"
++      "status": "Status: {status}",
++      "manage": "Manage accounts",
++      "blocked": "Linked to another workspace",
++      "unlinkConfirmTitle": "Confirm unlink",
++      "unlinkConfirm": "Unlink {name} ({id}) from this workspace? The account leaves this workspace's Ads Manager and dashboard.",
++      "unlink": "Unlink",
++      "unlinkError": "Could not unlink the account. Check permissions and retry.",
++      "unlinkHasPixels": "Unlink this account's pixels first: {pixels}."
+     }
+   },
+   "events": {
+diff --git a/apps/web/src/i18n/es/facebook.json b/apps/web/src/i18n/es/facebook.json
+index 41a450e..44d3184 100644
+--- a/apps/web/src/i18n/es/facebook.json
++++ b/apps/web/src/i18n/es/facebook.json
+@@ -262,15 +262,19 @@
+     "discovery": {
+       "available": "Cuentas autorizadas en Meta",
+       "linked": "Vinculadas a este perfil",
+-      "hint": "Seleccione una cuenta para vincularla a este workspace. La consulta no crea vínculos.",
++      "hint": "Active el interruptor para vincular la cuenta a este workspace; desactívelo para desvincularla. La consulta no crea vínculos.",
+       "loading": "Cargando cuentas autorizadas…",
+       "empty": "Meta no devolvió cuentas disponibles para este perfil.",
+       "loadError": "No se pudo consultar Meta. Revise la conexión y los permisos o reconecte el perfil e intente nuevamente.",
+-      "link": "Vincular",
+-      "confirmTitle": "Confirmar vínculo",
+-      "confirm": "¿Vincular {name} ({id}) a este workspace?",
+       "linkError": "No se pudo vincular. Revise permisos, acceso y posibles conflictos e intente nuevamente.",
+-      "status": "Estado: {status}"
++      "status": "Estado: {status}",
++      "manage": "Gestionar cuentas",
++      "blocked": "Vinculada a otro workspace",
++      "unlinkConfirmTitle": "Confirmar desvinculación",
++      "unlinkConfirm": "¿Desvincular {name} ({id}) de este workspace? La cuenta sale del Administrador y del panel de este workspace.",
++      "unlink": "Desvincular",
++      "unlinkError": "No se pudo desvincular. Revise los permisos e intente nuevamente.",
++      "unlinkHasPixels": "Desvincule primero los píxeles de esta cuenta: {pixels}."
+     }
+   },
+   "events": {
+diff --git a/apps/web/src/i18n/pt-BR/facebook.json b/apps/web/src/i18n/pt-BR/facebook.json
+index 3a156ec..febdbe3 100644
+--- a/apps/web/src/i18n/pt-BR/facebook.json
++++ b/apps/web/src/i18n/pt-BR/facebook.json
+@@ -262,15 +262,19 @@
+     "discovery": {
+       "available": "Contas autorizadas na Meta",
+       "linked": "Vinculadas neste perfil",
+-      "hint": "Selecione uma conta para vinculá-la a este workspace. A descoberta não cria vínculos.",
++      "hint": "Ligue a chave para vincular a conta a este workspace; desligue para desvincular. A consulta não cria vínculos.",
+       "loading": "Carregando contas autorizadas…",
+       "empty": "A Meta não retornou contas disponíveis para este perfil.",
+       "loadError": "Não foi possível consultar a Meta. Verifique a conexão, as permissões ou reconecte o perfil e tente novamente.",
+-      "link": "Vincular",
+-      "confirmTitle": "Confirmar vínculo",
+-      "confirm": "Vincular {name} ({id}) a este workspace?",
+       "linkError": "Não foi possível vincular. Verifique permissões, acesso e possíveis conflitos e tente novamente.",
+-      "status": "Status: {status}"
++      "status": "Status: {status}",
++      "manage": "Gerenciar contas",
++      "blocked": "Vinculada a outro workspace",
++      "unlinkConfirmTitle": "Confirmar desvínculo",
++      "unlinkConfirm": "Desvincular {name} ({id}) deste workspace? A conta sai do Gerenciador e do dashboard deste workspace.",
++      "unlink": "Desvincular",
++      "unlinkError": "Não foi possível desvincular. Verifique permissões e tente novamente.",
++      "unlinkHasPixels": "Desvincule os pixels desta conta antes: {pixels}."
+     }
+   },
+   "events": {
+diff --git a/packages/core/src/meta-ads/profiles/service.ts b/packages/core/src/meta-ads/profiles/service.ts
+index 9e84bed..0787e94 100644
+--- a/packages/core/src/meta-ads/profiles/service.ts
++++ b/packages/core/src/meta-ads/profiles/service.ts
+@@ -16,6 +16,11 @@ export type MetaProfilesErrorCode = 'not_found' | 'invalid_state' | 'not_configu
+ export const metaAreaFilter = (column: typeof metaProfiles.businessAreaId | typeof metaAdAccounts.businessAreaId | typeof pixelConfigs.businessAreaId, area: string | null = null) =>
+   sql`${column} is not distinct from ${area}::uuid`
+ 
++const isForeignKeyViolation = (err: unknown) => {
++  for (let e: unknown = err, i = 0; e && i < 4; e = (e as { cause?: unknown }).cause, i++) if ((e as { code?: unknown }).code === '23503') return true
++  return false
++}
++
+ export class MetaProfilesError extends Error {
+   constructor(
+     readonly code: MetaProfilesErrorCode,
+@@ -254,18 +259,45 @@ export class MetaProfilesService {
+     })
+   }
+ 
++  /**
++   * Contas do perfil na Meta separadas em `items` (disponíveis ou já vinculadas neste Admin, com
++   * `linked_ad_account_id`) e `blocked` (vinculadas a outro Admin da mesma empresa).
++   */
+   async listWorkspaceCandidates(companyId: string, area: string, profileId: string) {
+     const profile = await this.profileRow(companyId, profileId, area)
+     const candidates = await this.discover(profile)
+-    const elsewhere = await this.db.select({ id: metaAdAccounts.fbAccountId }).from(metaAdAccounts).where(and(
+-      eq(metaAdAccounts.companyId, companyId), isNotNull(metaAdAccounts.businessAreaId), sql`${metaAdAccounts.businessAreaId} <> ${area}`,
++    const linked = await this.db.select({ id: metaAdAccounts.id, fbAccountId: metaAdAccounts.fbAccountId, area: metaAdAccounts.businessAreaId }).from(metaAdAccounts).where(and(
++      eq(metaAdAccounts.companyId, companyId), isNotNull(metaAdAccounts.businessAreaId),
++    ))
++    const here = new Map(linked.filter(a => a.area === area).map(a => [a.fbAccountId, a.id]))
++    const elsewhere = new Set(linked.filter(a => a.area !== area).map(a => a.fbAccountId))
++    const items = candidates.filter(a => !elsewhere.has(a.fb_account_id)).map(a => ({ ...a, linked_ad_account_id: here.get(a.fb_account_id) ?? null }))
++    const blocked = candidates.filter(a => elsewhere.has(a.fb_account_id))
++    return { items, blocked }
++  }
++
++  /** Desvincula a conta deste Admin. Recusa (409) enquanto houver pixel ligado a ela; nada em cascata. */
++  async unlinkWorkspaceAccount(companyId: string, area: string, id: string) {
++    const account = UUID_RE.test(id) ? await this.workspaceAccount(companyId, area, id) : undefined
++    if (!account) throw new MetaProfilesError('not_found', 'Conta não vinculada a este workspace')
++    const pixels = () => this.db.select({ id: pixelConfigs.id, pixel_id: pixelConfigs.pixelId, name: pixelConfigs.name }).from(pixelConfigs).where(and(
++      eq(pixelConfigs.companyId, companyId), eq(pixelConfigs.metaAdAccountId, account.id),
+     ))
+-    const unavailable = new Set(elsewhere.map(a => a.id))
+-    return candidates.filter(account => !unavailable.has(account.fb_account_id))
++    const hasPixels = (list: { id: string; pixel_id: string; name: string }[]) => new MetaProfilesError('conflict', 'Desvincule os pixels desta conta antes', { pixels: list })
++    const before = await pixels()
++    if (before.length) throw hasPixels(before)
++    try {
++      await this.db.delete(metaAdAccounts).where(and(eq(metaAdAccounts.companyId, companyId), eq(metaAdAccounts.businessAreaId, area), eq(metaAdAccounts.id, account.id)))
++    } catch (err) {
++      // Pixel ligado entre a conferência e o delete: a FK de pixel_configs recusa.
++      if (!isForeignKeyViolation(err)) throw err
++      throw hasPixels(await pixels())
++    }
++    return { fb_account_id: account.fbAccountId }
+   }
+ 
+   async linkWorkspaceAccount(companyId: string, area: string, profileId: string, fbAccountId: string) {
+-    const found = (await this.listWorkspaceCandidates(companyId, area, profileId)).find(a => a.fb_account_id === fbAccountId)
++    const found = (await this.listWorkspaceCandidates(companyId, area, profileId)).items.find(a => a.fb_account_id === fbAccountId)
+     if (!found) throw new MetaProfilesError('not_found', 'Conta indisponível neste workspace ou no perfil da Meta')
+     const [row] = await this.db.insert(metaAdAccounts).values({
+       companyId, businessAreaId: area, profileId, fbAccountId, name: found.name, currency: found.currency, accountStatus: found.account_status,
+diff --git a/tests/acceptance/T005-R4/browser-discovery.mjs b/tests/acceptance/T005-R4/browser-discovery.mjs
+index d912fe5..cf1f0e2 100644
+--- a/tests/acceptance/T005-R4/browser-discovery.mjs
++++ b/tests/acceptance/T005-R4/browser-discovery.mjs
+@@ -1,4 +1,4 @@
+-/* global document, location */
++/* global document, location, window */
+ import assert from 'node:assert/strict'
+ import { createServer } from 'node:http'
+ import { mkdir, writeFile } from 'node:fs/promises'
+@@ -44,7 +44,9 @@ const company = {
+ }
+ const areaA = '22222222-2222-4222-8222-222222222222',
+   areaB = '33333333-3333-4333-8333-333333333333'
+-const pid = '44444444-4444-4444-8444-444444444444'
++const pid = '44444444-4444-4444-8444-444444444444',
++  oldPid = '88888888-8888-4888-8888-888888888888'
++const linkedId = '77777777-7777-4777-8777-777777777777'
+ const auth = {
+   user: {
+     id: '55555555-5555-4555-8555-555555555555',
+@@ -66,6 +68,14 @@ const profile = {
+   ad_accounts: [],
+   ad_accounts_count: 0,
+   ad_accounts_included_count: 0,
++  updated_at: '2026-11-24T10:00:00.000Z',
++}
++const olderProfile = {
++  ...profile,
++  id: oldPid,
++  fb_user_id: '200',
++  fb_user_name: 'Older profile',
++  updated_at: '2026-11-01T10:00:00.000Z',
+ }
+ const accounts = Array.from({ length: 101 }, (_, i) => ({
+   fb_account_id: 'act_' + (9000000000303n + BigInt(i)).toString(),
+@@ -73,13 +83,20 @@ const accounts = Array.from({ length: 101 }, (_, i) => ({
+   currency: 'BRL',
+   account_status: 1,
+ }))
++const last = accounts.at(-1)
++// Linked to another workspace of the same company: shown, never actionable.
++const blocked = { fb_account_id: 'act_9000000000999', name: 'Elsewhere account', currency: 'USD', account_status: 1 }
++const linked = new Map()
+ let mode = 'success',
+   links = 0,
++  unlinks = 0,
+   refreshes = 0,
+   gets = 0,
++  twoProfiles = false,
+   delayResolve,
+   postResolve,
+-  postFail = false
++  postFail = false,
++  deleteMode = 'ok'
+ const requests = [],
+   errors = []
+ page.on('pageerror', (e) => errors.push(e.message))
+@@ -107,18 +124,21 @@ await page.route('**/crm/api/**', async (route) => {
+     }
+   else if (path === '/meta/profiles')
+     body = {
+-      items: [
++      items:
+         area === areaB
+-          ? {
+-              ...profile,
+-              id: '66666666-6666-4666-8666-666666666666',
+-              fb_user_name: 'Other workspace',
+-              ad_accounts: [],
+-              ad_accounts_count: 0,
+-              ad_accounts_included_count: 0,
+-            }
+-          : profile,
+-      ],
++          ? [
++              {
++                ...profile,
++                id: '66666666-6666-4666-8666-666666666666',
++                fb_user_name: 'Other workspace',
++                ad_accounts: [],
++                ad_accounts_count: 0,
++                ad_accounts_included_count: 0,
++              },
++            ]
++          : twoProfiles
++            ? [olderProfile, profile]
++            : [profile],
+     }
+   else if (path.endsWith('/refresh-ad-accounts')) {
+     refreshes++
+@@ -142,12 +162,17 @@ await page.route('**/crm/api/**', async (route) => {
+           },
+         },
+       })
+-    body = { items: mode === 'empty' || area === areaB ? [] : accounts, provider_access_verified: true }
++    const empty = mode === 'empty' || area === areaB
++    body = {
++      items: empty ? [] : accounts.map((a) => ({ ...a, linked_ad_account_id: linked.get(a.fb_account_id) ?? null })),
++      blocked: empty ? [] : [blocked],
++      provider_access_verified: true,
++    }
+   } else if (path === '/meta/workspace/ad-accounts' && request.method() === 'POST') {
+     links++
+     const input = request.postDataJSON()
+     assert.equal(input.profile_id, pid)
+-    assert.equal(input.fb_account_id, accounts.at(-1).fb_account_id)
++    assert.equal(input.fb_account_id, last.fb_account_id)
+     assert.equal(area, areaA)
+     if (postResolve === 'hold')
+       await new Promise((r) => {
+@@ -156,15 +181,36 @@ await page.route('**/crm/api/**', async (route) => {
+     if (postFail)
+       return route.fulfill({ status: 409, json: { error: { code: 'CONFLICT', message: 'Synthetic conflict' } } })
+     const account = {
+-      ...accounts.at(-1),
+-      id: '77777777-7777-4777-8777-777777777777',
+-      account_id: accounts.at(-1).fb_account_id.slice(4),
++      ...last,
++      id: linkedId,
++      account_id: last.fb_account_id.slice(4),
+       included_in_dashboard: true,
+     }
++    linked.set(last.fb_account_id, linkedId)
+     profile.ad_accounts = [account]
+     profile.ad_accounts_count = 1
+     profile.ad_accounts_included_count = 1
+     body = { ad_account: account }
++  } else if (path.startsWith('/meta/workspace/ad-accounts/') && request.method() === 'DELETE') {
++    unlinks++
++    assert.equal(path, `/meta/workspace/ad-accounts/${linkedId}`)
++    assert.equal(area, areaA)
++    if (deleteMode === 'pixels')
++      return route.fulfill({
++        status: 409,
++        json: {
++          error: {
++            code: 'CONFLICT',
++            message: 'Desvincule os pixels desta conta antes',
++            details: { pixels: [{ id: '99999999-9999-4999-8999-999999999999', pixel_id: '123456', name: 'Pixel Loja' }] },
++          },
++        },
++      })
++    linked.delete(last.fb_account_id)
++    profile.ad_accounts = []
++    profile.ad_accounts_count = 0
++    profile.ad_accounts_included_count = 0
++    return route.fulfill({ status: 204, body: '' })
+   } else if (path === '/app-config') body = { support_widget: { provider: 'none' } }
+   else if (path.includes('/events'))
+     return route.fulfill({ status: 200, contentType: 'text/event-stream', body: ': fixture\n\n' })
+@@ -174,6 +220,8 @@ await page.route('**/crm/api/**', async (route) => {
+ page.setDefaultTimeout(15000)
+ console.log('Built packaged SPA; starting browser checks')
+ const candidates = page.getByTestId('facebook-candidate')
++const lastSwitch = page.getByTestId(`facebook-candidate-switch-${last.fb_account_id}`)
++const checked = async (loc) => (await loc.getAttribute('aria-checked')) === 'true'
+ const refresh = async (wait = true) => {
+   await page.getByTestId(`facebook-profile-refresh-${pid}`).click()
+   if (wait)
+@@ -184,47 +232,89 @@ const refresh = async (wait = true) => {
+       pid,
+     )
+ }
++const idle = () =>
++  page.waitForFunction(
++    (pid) => document.querySelector(`[data-testid="facebook-candidates-${pid}"]`)?.getAttribute('aria-busy') === 'false',
++    pid,
++  )
++const inViewport = (testId) =>
++  page.getByTestId(testId).evaluate((el) => {
++    const r = el.getBoundingClientRect()
++    return r.top >= -1 && r.top < window.innerHeight
++  })
+ try {
+   await page.goto(origin + '/crm/facebook/profiles?meta_oauth=success')
+   await candidates.nth(100).waitFor()
+   await page.waitForTimeout(2700) // settle the existing delayed OAuth reload before failure injection
+   await candidates.nth(100).waitFor()
++  await idle()
+   assert.equal(await candidates.count(), 101)
+   assert.equal(links, 0)
+   assert.match(await page.getByTestId(`facebook-profile-count-${pid}`).innerText(), /0/)
+   assert.match(await candidates.nth(100).innerText(), /\*\*\*0403/)
+   assert.match(await candidates.nth(100).innerText(), /BRL/)
+-  assert.equal((await page.locator('body').innerText()).includes(accounts.at(-1).fb_account_id), false)
+-  await candidates.nth(100).getByRole('button').click()
+-  assert.equal(links, 0)
++  assert.equal((await page.locator('body').innerText()).includes(last.fb_account_id), false)
++  // Switch per account: unchecked, named by the account (never the raw id).
++  assert.equal(await lastSwitch.getAttribute('role'), 'switch')
++  assert.equal(await checked(lastSwitch), false)
++  assert.equal(await lastSwitch.getAttribute('aria-label'), last.name)
++  // Account linked to another workspace: listed, disabled, labelled.
++  const blockedRow = page.getByTestId('facebook-candidate-blocked')
++  assert.equal(await blockedRow.count(), 1)
++  assert.match(await blockedRow.innerText(), /Vinculada a outro workspace/)
++  assert.equal(await page.getByTestId(`facebook-candidate-switch-${blocked.fb_account_id}`).isDisabled(), true)
++
++  // Turning on links directly (no confirmation); a failure shows an alert and leaves the switch off.
+   postFail = true
+-  await page
+-    .getByRole('group', { name: 'Confirmar vínculo' })
+-    .getByRole('button', { name: 'Vincular', exact: true })
+-    .click()
+-  await page.getByRole('group').getByRole('alert').waitFor()
++  await lastSwitch.click()
++  await page.getByTestId(`facebook-candidates-${pid}`).getByRole('alert').waitFor()
++  assert.equal(links, 1)
++  await idle()
++  assert.equal(await checked(lastSwitch), false)
+   postFail = false
+   postResolve = 'hold'
+-  await page
+-    .getByRole('group')
+-    .getByRole('button', { name: 'Tentar novamente' })
+-    .evaluate((button) => {
+-      button.click()
+-      button.click()
+-    })
+-  await page.waitForFunction(() => document.querySelector('[role=group] button')?.disabled)
++  // Double click while the first request is pending sends a single POST; switches lock meanwhile.
++  await lastSwitch.evaluate((button) => {
++    button.click()
++    button.click()
++  })
++  await page.waitForFunction((id) => document.querySelector(`[data-testid="${id}"]`)?.disabled, `facebook-candidate-switch-${accounts[0].fb_account_id}`)
+   assert.equal(links, 2)
+   while (typeof postResolve !== 'function') await new Promise((r) => setTimeout(r, 10))
+   postResolve()
+-  await page.getByTestId('facebook-account-77777777-7777-4777-8777-777777777777').waitFor()
+-  assert.equal(await page.getByTestId('facebook-account-toggle-77777777-7777-4777-8777-777777777777').isChecked(), true)
++  await page.getByTestId(`facebook-account-${linkedId}`).waitFor()
++  await page.waitForFunction((id) => document.querySelector(`[data-testid="${id}"]`)?.getAttribute('aria-checked') === 'true', `facebook-candidate-switch-${last.fb_account_id}`)
++  assert.equal(await page.getByTestId(`facebook-account-toggle-${linkedId}`).isChecked(), true)
+   await page.reload()
+-  await page.getByTestId('facebook-account-77777777-7777-4777-8777-777777777777').waitFor()
++  await page.getByTestId(`facebook-account-${linkedId}`).waitFor()
++  await idle()
++  assert.equal(await checked(lastSwitch), true)
+   assert.equal(links, 2)
++
++  // Turning off asks inline; 409 lists the pixels and nothing changes; then it unlinks.
++  await lastSwitch.click()
++  const confirm = page.getByRole('group', { name: 'Confirmar desvínculo' })
++  await confirm.waitFor()
++  assert.equal(unlinks, 0)
++  await confirm.getByRole('button', { name: 'Cancelar' }).click()
++  assert.equal(await confirm.count(), 0)
++  await lastSwitch.click()
++  deleteMode = 'pixels'
++  await confirm.getByRole('button', { name: 'Desvincular', exact: true }).click()
++  const pixelAlert = page.getByTestId(`facebook-candidates-${pid}`).getByRole('alert')
++  await pixelAlert.waitFor()
++  assert.match(await pixelAlert.innerText(), /Pixel Loja/)
++  assert.equal(unlinks, 1)
++  assert.equal(await checked(lastSwitch), true)
++  assert.equal(await page.getByTestId(`facebook-account-${linkedId}`).count(), 1)
++  deleteMode = 'ok'
++  await confirm.getByRole('button', { name: 'Desvincular', exact: true }).click()
++  await page.getByTestId(`facebook-account-${linkedId}`).waitFor({ state: 'detached' })
++  await page.waitForFunction((id) => document.querySelector(`[data-testid="${id}"]`)?.getAttribute('aria-checked') === 'false', `facebook-candidate-switch-${last.fb_account_id}`)
++  assert.equal(unlinks, 2)
++  assert.equal(await confirm.count(), 0)
++
+   // Successful refresh may still report zero links; candidates must remain visible.
+-  profile.ad_accounts = []
+-  profile.ad_accounts_count = 0
+-  profile.ad_accounts_included_count = 0
+   await refresh()
+   await candidates.nth(100).waitFor()
+   for (const failure of ['token', 'scope', 'failure', 'network']) {
+@@ -235,11 +325,7 @@ try {
+     mode = 'success'
+     await page.getByTestId(`facebook-candidates-${pid}`).getByRole('button', { name: 'Tentar novamente' }).click()
+     await candidates.nth(100).waitFor()
+-    await page.waitForFunction(
+-      (pid) =>
+-        document.querySelector(`[data-testid="facebook-candidates-${pid}"]`)?.getAttribute('aria-busy') === 'false',
+-      pid,
+-    )
++    await idle()
+   }
+   mode = 'empty'
+   await refresh()
+@@ -270,12 +356,13 @@ try {
+   await page.getByText('Other workspace', { exact: true }).waitFor()
+   await page.getByTestId('facebook-candidates-empty').waitFor()
+   assert.equal(await candidates.count(), 0)
++  assert.equal(await page.getByTestId('facebook-candidate-blocked').count(), 0)
+   assert.equal(links, 2)
+   assert.equal(
+     requests.some((r) => /campaign|adset|structure|oauth\/start/.test(r.path)),
+     false,
+   )
+-  // Permission checks are still enforced by the server; readers get no linking action.
++  // Permission checks are still enforced by the server; readers see disabled switches.
+   company.role = 'member'
+   mode = 'success'
+   await page.evaluate(
+@@ -286,14 +373,16 @@ try {
+     { company: company.id, areaA },
+   )
+   await candidates.nth(100).waitFor()
+-  assert.equal(await candidates.getByRole('button').count(), 0)
++  await idle()
++  assert.equal(await candidates.getByRole('switch').count(), 101)
++  assert.equal(await page.locator('[data-testid^="facebook-candidate-switch-"]:not([disabled])').count(), 0)
+   assert.equal(links, 2)
+   company.role = 'owner'
+   await page.reload()
+   await candidates.nth(100).waitFor()
+-  await candidates.nth(100).getByRole('button').click()
++  await idle()
+   postResolve = 'hold'
+-  await page.getByRole('group').getByRole('button', { name: 'Vincular', exact: true }).click()
++  await lastSwitch.click()
+   while (typeof postResolve !== 'function') await new Promise((r) => setTimeout(r, 10))
+   await page.evaluate(
+     ({ company, areaB }) => {
+@@ -306,12 +395,56 @@ try {
+   postResolve()
+   await page.getByTestId('facebook-candidates-empty').waitFor()
+   assert.equal(await candidates.count(), 0)
+-  assert.equal(await page.getByTestId('facebook-account-77777777-7777-4777-8777-777777777777').count(), 0)
++  assert.equal(await page.getByTestId(`facebook-account-${linkedId}`).count(), 0)
+   assert.equal(links, 3)
++
++  // After OAuth with several profiles: the most recently updated one opens and scrolls to its accounts.
++  twoProfiles = true
++  linked.clear()
++  profile.ad_accounts = []
++  await page.evaluate(
++    ({ company, areaA }) => {
++      sessionStorage.setItem('crm.business-area.' + company, areaA)
++      location.assign('/crm/facebook/profiles?meta_oauth=success')
++    },
++    { company: company.id, areaA },
++  )
++  await page.getByText('Older profile', { exact: true }).waitFor()
++  await page.waitForFunction((pid) => document.querySelector(`[data-testid="facebook-profile-${pid}"]`)?.dataset.expanded === 'true', pid, { timeout: 10000 })
++  assert.equal(await page.getByTestId(`facebook-profile-${oldPid}`).getAttribute('data-expanded'), 'false')
++  await page.getByTestId(`facebook-candidates-${pid}`).waitFor()
++  await page.waitForTimeout(800) // smooth scroll
++  assert.equal(await inViewport(`facebook-candidates-${pid}`), true)
++  // 'Gerenciar contas' expands the card and scrolls to its accounts.
++  await page.evaluate(() => window.scrollTo(0, 0))
++  await page.getByTestId(`facebook-profile-manage-${oldPid}`).click()
++  await page.getByTestId(`facebook-candidates-${oldPid}`).waitFor()
++  assert.equal(await page.getByTestId(`facebook-profile-${oldPid}`).getAttribute('data-expanded'), 'true')
++  await page.waitForTimeout(800)
++  assert.equal(await inViewport(`facebook-candidates-${oldPid}`), true)
++  await page.screenshot({ path: resolve(evidence, 'manage-desktop.png') })
++
++  // Mobile: switches fit the viewport and the page does not scroll sideways.
++  twoProfiles = false
++  await page.setViewportSize({ width: 390, height: 844 })
++  await page.reload()
++  await candidates.nth(100).waitFor()
++  await idle()
++  const fit = await page.evaluate((id) => {
++    const r = document.querySelector(`[data-testid="${id}"]`).getBoundingClientRect()
++    return { right: r.right, width: window.innerWidth, scroll: document.documentElement.scrollWidth }
++  }, `facebook-candidate-switch-${accounts[0].fb_account_id}`)
++  assert.ok(fit.right <= fit.width, JSON.stringify(fit))
++  assert.ok(fit.scroll <= fit.width, JSON.stringify(fit))
++  await page.getByTestId(`facebook-profile-manage-${pid}`).click()
++  await page.waitForTimeout(800)
++  assert.equal(await inViewport(`facebook-candidates-${pid}`), true)
++  await page.screenshot({ path: resolve(evidence, 'manage-mobile.png') })
++
+   assert.deepEqual(errors, [])
+   await writeFile(
+     resolve(evidence, 'checks.json'),
+-    JSON.stringify({ links, refreshes, gets, candidates: 101, requests, errors }, null, 2),
++    JSON.stringify({ links, unlinks, refreshes, gets, candidates: 101, requests, errors }, null, 2),
+   )
+   console.log('T005-R4 browser acceptance passed')
+ } finally {
