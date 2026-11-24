@@ -28,7 +28,7 @@ index 54a5c37..fb36315 100644
    app.get('/api/meta/workspace/pixels', view, pixel, validate('query', pixelAccount), async (c) => {
      const { companyId } = getCompanyCtx(c)
 diff --git a/apps/api/src/routes/meta-profiles/meta-profiles.db.unit.test.ts b/apps/api/src/routes/meta-profiles/meta-profiles.db.unit.test.ts
-index 9cc682a..cbf0d92 100644
+index 9cc682a..c1a94f3 100644
 --- a/apps/api/src/routes/meta-profiles/meta-profiles.db.unit.test.ts
 +++ b/apps/api/src/routes/meta-profiles/meta-profiles.db.unit.test.ts
 @@ -1,12 +1,13 @@
@@ -120,7 +120,7 @@ index 9cc682a..cbf0d92 100644
 +    owner = await signUp()
 +    process.env.SHARED_OFFERS_COMPANY_ID = owner.companyId
 +    const init = await wcall(owner, 'POST', '/api/business-areas/initialize', undefined, {})
-+    expect(init.status).toBe(200)
++    expect(init.status).toBe(201) // initialize cria as 3 áreas: 201
 +    ;[admin1, admin2] = (init.body.items as any[]).map((a) => a.id)
 +    fake.addUser({ id: 'fb-ws1', name: 'WS1', adAccounts: [{ id: X, name: 'Loja X', currency: 'BRL', account_status: 1 }, { id: Y, name: 'Loja Y', currency: 'BRL', account_status: 1 }, { id: Z, name: 'Loja Z', currency: 'USD', account_status: 2 }] })
 +    fake.addUser({ id: 'fb-ws2', name: 'WS2', adAccounts: [{ id: X, name: 'Loja X', currency: 'BRL', account_status: 1 }, { id: Z, name: 'Loja Z', currency: 'USD', account_status: 2 }] })

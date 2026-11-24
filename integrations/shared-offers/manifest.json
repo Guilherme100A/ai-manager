@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/Guilherme100A/crm-copy.git",
   "base_sha": "acf78e2da49865afa06fe6a4cee77bcf0e888152",
-  "expected_tree": "7aed6c530ec5c3dd3009d1acd78014c795fcdcda",
+  "expected_tree": "fcf5007316b6cb214e1a63d85532b28984997cde",
   "sanitization": {
     "excluded_files": [
       "scripts/elevenlabs-account-diagnose.ts",
@@ -28,7 +28,7 @@
     ],
     "reason": "Exclude unrelated operator scripts/private deployment context and audit-only harnesses; replace operational hosts in documentation and URL fixtures with reserved example.test hosts. Original local source preserved.",
     "baseline_tree": "539e4a6dac07e50188e418d0e1a3d669e5f6d687",
-    "final_tree": "7aed6c530ec5c3dd3009d1acd78014c795fcdcda"
+    "final_tree": "fcf5007316b6cb214e1a63d85532b28984997cde"
   },
   "test_only_changes": [
     {
@@ -650,8 +650,8 @@
     {
       "file": "25-meta-account-selection.patch",
       "description": "F-02 workspace Meta ad-account selection: GET separates items (with linked_ad_account_id) from accounts linked to another Admin (blocked); new DELETE /api/meta/workspace/ad-accounts/:id (404 outside this Admin, 409 with details.pixels while a pixel is linked, 204 otherwise; audit meta.workspace.ad_account.unlink). Profiles page: per-account switch (link directly, inline confirmation to unlink), blocked accounts disabled, 'Gerenciar contas' and post-OAuth reveal of the newest profile. i18n pt-BR/en/es, API db tests A1-A6 (CI Postgres), unit and T005-R4 fake-HTTP acceptance updates. No migrations, dependencies, OAuth or MCP tool changes.",
-      "sha256": "9acf71cef9b6d8059c1e6bf3820cae99c12b377ccde72b63124651f8c6de2153",
-      "bytes": 63967,
+      "sha256": "14b29c3c58e2fa7c488854ede4a4f8f10237092dae98335096e821f5ae62f70f",
+      "bytes": 64003,
       "files": [
         "apps/api/src/routes/meta-profiles/index.ts",
         "apps/api/src/routes/meta-profiles/meta-profiles.db.unit.test.ts",
