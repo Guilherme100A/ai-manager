@@ -1,0 +1,672 @@
+diff --git a/apps/web/src/features/facebook/bundle-query.ts b/apps/web/src/features/facebook/bundle-query.ts
+new file mode 100644
+index 0000000..9806ca0
+--- /dev/null
++++ b/apps/web/src/features/facebook/bundle-query.ts
+@@ -0,0 +1,83 @@
++// Leitura do bundle do Gerenciador (T101/T106): opções do `useQuery` (modo async/sync/force, polling de reserva,
++// detecção de estagnação) e a reação ao SSE `meta.bundle.progress`. Fora do componente para ser testada com o
++// QueryClient real (campaigns-page.unit.test.tsx).
++import type { QueryClient, QueryKey } from '@tanstack/react-query'
++import { fetchBundle, type BundleEnvelope, type BundleMode, type BundleQuery } from './api'
++import type { BundleProgress } from './realtime'
++import { isRateLimited, progressReadMode, rowCount } from './rules'
++
++/** Polling de reserva enquanto o bundle está pendente (o SSE é o caminho normal). */
++export const POLL_MS = 3000
++/**
++ * Leituras `async` seguidas sem nenhum avanço (status, contas, linhas) antes de ler em modo `sync`. Bundle pronto com
++ * erro de conta não fica no cache do servidor, e o reenfileiramento com o mesmo jobId é deduplicado pelo BullMQ contra
++ * o job concluído: o estado ficaria `loading` até expirar (pendência registrada no relatório da T106).
++ */
++export const STALL_POLLS = 4
++export const CACHE_MS = 5 * 60_000
++
++/** Estado mutável da tela (refs do componente). */
++export interface BundleRefs {
++  mode: { current: BundleMode }
++  stall: { current: { sig: string | null; count: number } }
++  query: { current: BundleQuery }
++  /**
++   * `bundle_key` do último SSE ready/partial que chegou antes de o 202 dessa chave entrar no cache (B-05): sem ele,
++   * `progressReadMode` não tem com o que comparar e o evento se perde. Limpo na troca de filtros.
++   */
++  lateProgress: { current: string | null }
++}
++
++export const resetStall = (refs: BundleRefs) => {
++  refs.stall.current = { sig: null, count: 0 }
++}
++
++/** Opções do `useQuery` do bundle (sem `enabled`). */
++export function bundleQueryOptions(qc: QueryClient, key: QueryKey, refs: BundleRefs) {
++  return {
++    queryKey: key,
++    queryFn: async (): Promise<BundleEnvelope> => {
++      let mode = refs.mode.current
++      refs.mode.current = 'async'
++      if (mode === 'async' && refs.stall.current.count >= STALL_POLLS) mode = 'sync'
++      const res = await fetchBundle(refs.query.current, mode)
++      if (mode === 'async' && res.status !== 'ready') {
++        const sig = `${res.bundle_key}:${res.status}:${res.targets_done}:${rowCount(res)}`
++        refs.stall.current = { sig, count: sig === refs.stall.current.sig ? refs.stall.current.count + 1 : 0 }
++        if (res.bundle_key === refs.lateProgress.current) {
++          // O SSE já avisou ready/partial desta chave antes deste 202: relê uma vez, logo depois de o 202 entrar no cache.
++          refs.lateProgress.current = null
++          refs.mode.current = 'async'
++          setTimeout(() => void qc.refetchQueries({ queryKey: key, exact: true }), 0)
++        }
++      } else resetStall(refs)
++      return res
++    },
++    staleTime: (q: { state: { data?: BundleEnvelope } }) =>
++      q.state.data && q.state.data.status === 'ready' && !isRateLimited(q.state.data) ? CACHE_MS : 0,
++    gcTime: CACHE_MS,
++    refetchInterval: (q: { state: { data?: BundleEnvelope } }) => {
++      const d = q.state.data
++      if (!d || d.status === 'ready') return false
++      if (isRateLimited(d) && rowCount(d) === 0) return false
++      return POLL_MS
++    },
++    // O polling de reserva vale também com a aba em segundo plano (o query-core não dispara com document hidden).
++    refetchIntervalInBackground: true,
++    refetchOnWindowFocus: false,
++    retry: false,
++  } as const
++}
++
++/** SSE: parcial ou pronto → relê o estado em async (traz os erros de conta e o `rate_limited` do refresh; T129). */
++export function bundleProgressHandler(qc: QueryClient, key: QueryKey, refs: BundleRefs) {
++  return (p: BundleProgress) => {
++    const mode = progressReadMode(qc.getQueryData<BundleEnvelope>(key), p)
++    if (!mode) {
++      if (p.status === 'ready' || p.status === 'partial') refs.lateProgress.current = p.bundle_key
++      return
++    }
++    refs.mode.current = mode
++    void qc.refetchQueries({ queryKey: key, exact: true })
++  }
++}
+diff --git a/apps/web/src/features/facebook/campaigns-page.tsx b/apps/web/src/features/facebook/campaigns-page.tsx
+index 388a61d..bec0fd0 100644
+--- a/apps/web/src/features/facebook/campaigns-page.tsx
++++ b/apps/web/src/features/facebook/campaigns-page.tsx
+@@ -17,7 +17,9 @@ import { readStorage, writeStorage } from '@/lib/storage'
+ import { notify } from '@/lib/toast'
+ import { useIsDesktop, useMediaQuery } from '@/lib/use-media-query'
+ import { APP_NAME, cn } from '@/lib/utils'
+-import { bundleKeyPrefix, bundleQueryKey, fetchBundle, fetchProfiles, patchEntity, profilesKey, type BundleEnvelope, type BundleMode, type BundleQuery, type BundleRow } from './api'
++import { bundleKeyPrefix, bundleQueryKey, fetchProfiles, patchEntity, profilesKey, type BundleEnvelope, type BundleQuery, type BundleRow } from './api'
++import { bundleProgressHandler, bundleQueryOptions, resetStall, type BundleRefs } from './bundle-query'
++export { POLL_MS } from './bundle-query'
+ import { FacebookLayout, NS, selectClass, useFacebookSession } from './layout'
+ import { onBundleProgress } from './realtime'
+ import {
+@@ -49,7 +51,6 @@ import {
+   parseColumnOrder,
+   periodQuery,
+   PERIODS,
+-  rowCount,
+   serverStatusFilter,
+   shouldReplace,
+   sortRows,
+@@ -60,7 +61,6 @@ import {
+   statusTone,
+   togglePatch,
+   totals,
+-  progressReadMode,
+   type BundleLevel,
+   type EditMode,
+   type MetricColumn,
+@@ -78,15 +78,6 @@ export interface CampaignsSearch {
+   fb_until?: string
+ }
+ 
+-/** Polling de reserva enquanto o bundle está pendente (o SSE é o caminho normal). */
+-export const POLL_MS = 3000
+-/**
+- * Leituras `async` seguidas sem nenhum avanço (status, contas, linhas) antes de ler em modo `sync`. Bundle pronto com
+- * erro de conta não fica no cache do servidor, e o reenfileiramento com o mesmo jobId é deduplicado pelo BullMQ contra
+- * o job concluído: o estado ficaria `loading` até expirar (pendência registrada no relatório da T106).
+- */
+-const STALL_POLLS = 4
+-const CACHE_MS = 5 * 60_000
+ const AGO_TICK_MS = 15_000
+ 
+ /** Último "Atualizar" por empresa (o cooldown sobrevive à troca de aba do módulo). */
+@@ -139,37 +130,14 @@ export function CampaignsPage({ search, onSearch }: { search: CampaignsSearch; o
+   const key = bundleQueryKey(companyId, bq)
+   const keyStr = JSON.stringify(key)
+ 
+-  const modeRef = useRef<BundleMode>('async')
+-  const stall = useRef<{ sig: string | null; count: number }>({ sig: null, count: 0 })
+-  const bqRef = useRef(bq)
+-  bqRef.current = bq
+-  const query = useQuery({
+-    queryKey: key,
+-    queryFn: async () => {
+-      let mode = modeRef.current
+-      modeRef.current = 'async'
+-      if (mode === 'async' && stall.current.count >= STALL_POLLS) mode = 'sync'
+-      const res = await fetchBundle(bqRef.current, mode)
+-      if (mode === 'async' && res.status !== 'ready') {
+-        const sig = `${res.bundle_key}:${res.status}:${res.targets_done}:${rowCount(res)}`
+-        stall.current = { sig, count: sig === stall.current.sig ? stall.current.count + 1 : 0 }
+-      } else stall.current = { sig: null, count: 0 }
+-      return res
+-    },
+-    enabled: !!companyId && !!periodQ,
+-    staleTime: (q) => (q.state.data && q.state.data.status === 'ready' && !isRateLimited(q.state.data) ? CACHE_MS : 0),
+-    gcTime: CACHE_MS,
+-    refetchInterval: (q) => {
+-      const d = q.state.data
+-      if (!d || d.status === 'ready') return false
+-      if (isRateLimited(d) && rowCount(d) === 0) return false
+-      return POLL_MS
+-    },
+-    refetchOnWindowFocus: false,
+-    retry: false,
+-  })
++  const refs = useRef<BundleRefs | null>(null)
++  refs.current ??= { mode: { current: 'async' }, stall: { current: { sig: null, count: 0 } }, query: { current: bq }, lateProgress: { current: null } }
++  const bundleRefs = refs.current
++  bundleRefs.query.current = bq
++  const query = useQuery({ ...bundleQueryOptions(qc, key, bundleRefs), enabled: !!companyId && !!periodQ })
+   useEffect(() => {
+-    stall.current = { sig: null, count: 0 }
++    resetStall(bundleRefs)
++    bundleRefs.lateProgress.current = null
+   }, [keyStr])
+ 
+   // Bundle exibido: um pronto não é trocado por um pendente (refresh mostra os dados atuais até o novo ficar pronto).
+@@ -183,17 +151,8 @@ export function CampaignsPage({ search, onSearch }: { search: CampaignsSearch; o
+   // Refresh que caiu no limite da Meta para de consultar: some o "Atualizando" e fica o aviso do limite.
+   const refreshing = !!bundle && bundle.status === 'ready' && !!query.data && query.data.status !== 'ready' && !isRateLimited(query.data)
+ 
+-  // SSE: parcial ou pronto → relê o estado em async (traz os erros de conta e o `rate_limited` do refresh; T129).
+-  useEffect(
+-    () =>
+-      onBundleProgress((p) => {
+-        const mode = progressReadMode(qc.getQueryData<BundleEnvelope>(key), p)
+-        if (!mode) return
+-        modeRef.current = mode
+-        void qc.refetchQueries({ queryKey: key, exact: true })
+-      }),
+-    [keyStr, qc],
+-  )
++  // SSE: parcial ou pronto → relê o estado em async (bundle-query.ts).
++  useEffect(() => onBundleProgress(bundleProgressHandler(qc, key, bundleRefs)), [keyStr, qc])
+ 
+   const profiles = useQuery({ queryKey: profilesKey(companyId), queryFn: fetchProfiles, enabled: canProfiles && !!companyId })
+ 
+@@ -210,8 +169,8 @@ export function CampaignsPage({ search, onSearch }: { search: CampaignsSearch; o
+   const nowAgo = useNow(AGO_TICK_MS)
+ 
+   const forceRefresh = useCallback(() => {
+-    modeRef.current = 'force'
+-    stall.current = { sig: null, count: 0 }
++    bundleRefs.mode.current = 'force'
++    resetStall(bundleRefs)
+     void qc.refetchQueries({ queryKey: key, exact: true })
+   }, [keyStr, qc])
+ 
+diff --git a/apps/web/src/features/facebook/campaigns-page.unit.test.tsx b/apps/web/src/features/facebook/campaigns-page.unit.test.tsx
+new file mode 100644
+index 0000000..57a735f
+--- /dev/null
++++ b/apps/web/src/features/facebook/campaigns-page.unit.test.tsx
+@@ -0,0 +1,116 @@
++// B-05: o Gerenciador não pode ficar preso em "carregando". Usa as MESMAS opções do useQuery da campaigns-page
++// (bundle-query.ts) com o QueryClient real, fetch fake e timers fake: (a) o polling de reserva continua com a aba em
++// segundo plano; (b) o SSE ready que chega antes do 202 entrar no cache não se perde.
++import { environmentManager, focusManager, QueryClient, QueryObserver } from '@tanstack/react-query'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import { configureHttp } from '@/lib/http'
++import { bundleQueryKey, type BundleEnvelope, type BundleQuery, type BundleRow } from './api'
++import { bundleProgressHandler, bundleQueryOptions, POLL_MS, type BundleRefs } from './bundle-query'
++
++const COMPANY = '11111111-1111-4111-8111-111111111111'
++const K = 'bundle-key-b05'
++const BQ: BundleQuery = { status_filter: 'active', date_preset: 'today', display_currency: 'BRL', ad_account_ids: [] }
++
++const row = (id: string) => ({ id, ad_account_id: 'acc', ad_account_label: 'Conta', name: id, metrics: {} }) as unknown as BundleRow
++const envelope = (over: Partial<BundleEnvelope>): BundleEnvelope => ({
++  bundle_key: K,
++  status: 'loading',
++  campaign: [],
++  adset: [],
++  ad: [],
++  targets_done: 0,
++  targets_total: 3,
++  errors: [],
++  display_currency: 'BRL',
++  since: '2026-11-24',
++  until: '2026-11-24',
++  status_filter: 'active',
++  warnings: [],
++  cached: false,
++  generated_at: null,
++  ...over,
++})
++const loading = envelope({})
++const ready = envelope({ status: 'ready', targets_done: 3, campaign: [row('c1'), row('c2')], generated_at: '2026-11-24T12:00:00.000Z' })
++
++let replies: (() => Promise<{ status: number; body: BundleEnvelope }>)[]
++let gets: string[]
++const fakeFetch = vi.fn(async (input: RequestInfo | URL) => {
++  gets.push(String(input))
++  const next = replies.shift()
++  if (!next) throw new Error('GET inesperado')
++  const { status, body } = await next()
++  return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
++})
++
++function observe() {
++  const qc = new QueryClient()
++  const key = bundleQueryKey(COMPANY, BQ)
++  const refs: BundleRefs = { mode: { current: 'async' }, stall: { current: { sig: null, count: 0 } }, query: { current: BQ }, lateProgress: { current: null } }
++  const observer = new QueryObserver(qc, bundleQueryOptions(qc, key, refs))
++  const unsubscribe = observer.subscribe(() => undefined)
++  return { qc, key, refs, observer, unsubscribe }
++}
++
++beforeEach(() => {
++  vi.useFakeTimers()
++  replies = []
++  gets = []
++  fakeFetch.mockClear()
++  configureHttp({ fetch: fakeFetch as unknown as typeof fetch, companyId: COMPANY })
++  // Sem `window` o query-core se trata como servidor e não agenda timers: aqui ele age como no navegador.
++  environmentManager.setIsServer(() => false)
++  // Aba em segundo plano (document hidden): o query-core não dispara refetchInterval sem refetchIntervalInBackground.
++  focusManager.setFocused(false)
++})
++afterEach(() => {
++  focusManager.setFocused(undefined)
++  environmentManager.setIsServer(() => typeof window === 'undefined')
++  vi.useRealTimers()
++})
++
++describe('B-05 Gerenciador preso em carregando', () => {
++  it('a) aba oculta: 202 loading 0/3, depois 200 ready; o polling de reserva relê em 3 s e as linhas aparecem', async () => {
++    replies.push(async () => ({ status: 202, body: loading }), async () => ({ status: 200, body: ready }))
++    const { observer, unsubscribe } = observe()
++    await vi.advanceTimersByTimeAsync(0)
++    expect(gets).toHaveLength(1)
++    expect(gets[0]).toContain('async=1')
++    expect(observer.getCurrentResult().data?.status).toBe('loading')
++    await vi.advanceTimersByTimeAsync(POLL_MS)
++    expect(gets).toHaveLength(2)
++    const data = observer.getCurrentResult().data
++    expect(data?.status).toBe('ready')
++    expect(data?.campaign.map((r) => r.id)).toEqual(['c1', 'c2'])
++    unsubscribe()
++  })
++
++  it('b) aba oculta: SSE ready chega antes de o 1º GET (202) resolver → 2º GET imediato e a tela fica pronta', async () => {
++    let release!: () => void
++    const firstGet = new Promise<void>((r) => {
++      release = r
++    })
++    replies.push(
++      async () => {
++        await firstGet
++        return { status: 202, body: loading }
++      },
++      async () => ({ status: 200, body: ready }),
++    )
++    const { qc, key, refs, observer, unsubscribe } = observe()
++    await vi.advanceTimersByTimeAsync(0)
++    expect(gets).toHaveLength(1)
++    // O cache ainda não tem o 202: progressReadMode não tem com o que comparar.
++    expect(qc.getQueryData(key)).toBeUndefined()
++    bundleProgressHandler(qc, key, refs)({ bundle_key: K, status: 'ready', targets_done: 3, targets_total: 3 })
++    release()
++    // Bem antes do polling de reserva (3 s).
++    await vi.advanceTimersByTimeAsync(50)
++    expect(gets).toHaveLength(2)
++    expect(gets[1]).toContain('async=1')
++    const data = observer.getCurrentResult().data
++    expect(data?.status).toBe('ready')
++    expect(data?.campaign).toHaveLength(2)
++    unsubscribe()
++  })
++})
+diff --git a/apps/web/src/features/facebook/facebook.unit.test.ts b/apps/web/src/features/facebook/facebook.unit.test.ts
+index 2abcdf8..c9f639c 100644
+--- a/apps/web/src/features/facebook/facebook.unit.test.ts
++++ b/apps/web/src/features/facebook/facebook.unit.test.ts
+@@ -44,6 +44,7 @@ import {
+   totals,
+   validatePixel,
+   oauthFocusProfile,
++  profileCountLabel,
+   unlinkBlockingPixels,
+   workspaceSwitchState,
+ } from './rules'
+@@ -273,6 +274,31 @@ describe('AC-T106-03 atualizar, colunas e rótulos', () => {
+     const r = row({ id: 'a1', metrics: { meta_spend: 10, meta_spend_display: 55 } })
+     expect(cellValue(r, 'meta_spend')).toEqual({ value: 55 })
+   })
++  it('B-06: sem cotação (`_display` presente e nulo) → — , nunca o bruto em outra moeda; totais da métrica ficam nulos', () => {
++    const usd = row({
++      id: 'usd',
++      metrics: { meta_spend: 3.99, meta_spend_display: null, cost_per_lead_meta: 0.5, cost_per_lead_meta_display: null } as never,
++    })
++    expect(cellValue(usd, 'meta_spend').value).toBeNull()
++    expect(formatCell('meta_spend', cellValue(usd, 'meta_spend'), 'BRL', 'pt-BR')).toBe('—')
++    expect(cellValue(usd, 'cost_per_lead_meta').value).toBeNull()
++    expect(cellValue(usd, 'profit_pair').pair!.meta).toBeNull()
++    // Receita conhecida com gasto sem cotação: o lucro não trata o gasto como 0.
++    const withRevenue = row({ id: 'rev', metrics: { meta_spend: 3.99, meta_spend_display: null, purchase_value_meta: 10, purchase_value_meta_display: 50 } as never })
++    expect(cellValue(withRevenue, 'profit_pair').pair).toEqual({ internal: null, meta: null })
++    const brl = row({ id: 'brl', metrics: { meta_spend: 10, meta_spend_display: 10, conversations_meta: 2 } as never })
++    const t = totals([usd, brl])
++    expect(t.meta_spend.value).toBeNull()
++    expect(t.cost_per_lead_meta.value).toBeNull()
++    expect(formatCell('meta_spend', t.meta_spend, 'BRL', 'pt-BR')).toBe('—')
++    expect(totals([brl]).meta_spend.value).toBe(10)
++  })
++  it('B-06: sem a chave `_display` (servidor antigo) mantém o valor bruto', () => {
++    const r = row({ id: 'raw', metrics: { meta_spend: 42, cost_per_lead_meta: 1.5 } })
++    expect(cellValue(r, 'meta_spend').value).toBe(42)
++    expect(cellValue(r, 'cost_per_lead_meta').value).toBe(1.5)
++    expect(totals([r]).meta_spend.value).toBe(42)
++  })
+   it('totais / médias ponderadas', () => {
+     const rows = [
+       row({ id: 'a', metrics: { meta_spend: 100, purchase_value_meta: 300, purchases_pixel: 2, conversations_meta: 4, meta_impressions: 1000 } }),
+@@ -442,6 +468,16 @@ describe('AC-T106-05 perfis e pixel', () => {
+     expect(unlinkBlockingPixels(new HttpError(404, 'NOT_FOUND', 'x', { pixels }))).toBeNull()
+     expect(unlinkBlockingPixels(new Error('x'))).toBeNull()
+   })
++  it('B-07: contador do card — workspace mostra as vinculadas ao painel; legado continua "x de y"', () => {
++    const p = { ad_accounts_included_count: 2, ad_accounts_count: 101 }
++    expect(profileCountLabel(p, true)).toEqual({ key: 'profiles.countWorkspace', params: { count: 2 } })
++    expect(profileCountLabel(p, false)).toEqual({ key: 'profiles.count', params: { included: 2, total: 101 } })
++    for (const locale of ['pt-BR', 'en', 'es']) {
++      const profiles = (MESSAGES[locale]?.facebook as { profiles: { countWorkspace?: string; count?: string } }).profiles
++      expect(profiles.countWorkspace, locale).toContain('{count}')
++      expect(profiles.count, locale).toContain('{total}')
++    }
++  })
+   it('iniciais do avatar', () => {
+     expect(initials('Maria da Silva', '123')).toBe('MS')
+     expect(initials('Ana', '123')).toBe('A')
+diff --git a/apps/web/src/features/facebook/profiles-page.tsx b/apps/web/src/features/facebook/profiles-page.tsx
+index 3945b34..1447312 100644
+--- a/apps/web/src/features/facebook/profiles-page.tsx
++++ b/apps/web/src/features/facebook/profiles-page.tsx
+@@ -34,6 +34,7 @@ import {
+   initials,
+   oauthFocusProfile,
+   oauthResult,
++  profileCountLabel,
+   unlinkBlockingPixels,
+   workspaceSwitchState,
+ } from './rules'
+@@ -318,6 +319,7 @@ function ProfileCard({
+   const [imgFailed, setImgFailed] = useState(false)
+   const name = p.fb_user_name || p.fb_user_id
+   const expires = p.token_expires_at ? new Date(p.token_expires_at) : null
++  const countLabel = profileCountLabel(p, !!activeBusinessArea())
+   return (
+     <li
+       data-testid={`facebook-profile-${p.id}`}
+@@ -359,7 +361,7 @@ function ProfileCard({
+           </div>
+           <p className="text-sm text-muted-foreground">
+             <span data-testid={`facebook-profile-count-${p.id}`}>
+-              {t('profiles.count', { included: p.ad_accounts_included_count, total: p.ad_accounts_count })}
++              {t(countLabel.key, countLabel.params)}
+             </span>
+             {desktop && expires && !Number.isNaN(expires.getTime()) ? (
+               <span data-testid={`facebook-profile-expires-${p.id}`}>
+@@ -553,7 +555,17 @@ function WorkspaceAccounts({
+       data-testid={`facebook-candidates-${profile.id}`}
+       aria-busy={list.isFetching || pending}
+     >
+-      <p className="text-sm font-medium">{t('profiles.discovery.available')}</p>
++      <p className="text-sm font-medium">
++        {t('profiles.discovery.available')}
++        {data ? (
++          <span data-testid={`facebook-candidates-count-${profile.id}`} className="ml-2 font-normal text-muted-foreground">
++            {t('profiles.discovery.authorizedCount', {
++              linked: data.items.filter((a) => a.linked_ad_account_id != null).length,
++              authorized: data.items.length + data.blocked.length,
++            })}
++          </span>
++        ) : null}
++      </p>
+       <p className="text-sm text-muted-foreground">{t('profiles.discovery.hint')}</p>
+       {list.isError ? (
+         <div role="alert">
+diff --git a/apps/web/src/features/facebook/rules.ts b/apps/web/src/features/facebook/rules.ts
+index a18b4fb..d0ac689 100644
+--- a/apps/web/src/features/facebook/rules.ts
++++ b/apps/web/src/features/facebook/rules.ts
+@@ -164,14 +164,27 @@ export function dropColumn(order: readonly MetricColumn[], key: MetricColumn, ta
+ type Metrics = BundleRow['metrics']
+ const round2 = (n: number) => Math.round(n * 100) / 100
+ 
+-/** Valor monetário na moeda de exibição (`_display`), com o original como reserva. */
+-export function money(m: Metrics, key: 'meta_spend' | 'purchase_value_meta' | 'cost_per_purchase_meta' | 'cost_per_lead_meta' | 'purchase_value_leona'): number | null {
+-  const display = (m as Record<string, number | null | undefined>)[`${key}_display`]
+-  if (display !== undefined && display !== null) return display
++type MoneyKey = 'meta_spend' | 'purchase_value_meta' | 'cost_per_purchase_meta' | 'cost_per_lead_meta' | 'purchase_value_leona'
++
++/**
++ * Valor monetário na moeda de exibição. Com a chave `_display` presente, vale ela (`null` = sem cotação para a moeda:
++ * "—", nunca o valor bruto em outra moeda; B-06); o bruto só quando o servidor não manda `_display`.
++ */
++export function money(m: Metrics, key: MoneyKey): number | null {
++  const r = m as Record<string, number | null | undefined>
++  const displayKey = `${key}_display`
++  if (displayKey in r) return r[displayKey] ?? null
+   const v = m[key]
+   return v === undefined ? null : v
+ }
+ 
++/** Há valor bruto, mas sem cotação para a moeda de exibição (`_display` presente e nulo). */
++function unconverted(m: Metrics, key: MoneyKey): boolean {
++  const r = m as Record<string, number | null | undefined>
++  const displayKey = `${key}_display`
++  return displayKey in r && r[displayKey] == null && r[key] != null
++}
++
+ export interface Pair {
+   internal: number | null
+   meta: number | null
+@@ -191,6 +204,8 @@ export function cellValue(row: Pick<BundleRow, 'metrics'>, col: MetricColumn): C
+   const spend = money(m, 'meta_spend')
+   const pvMeta = money(m, 'purchase_value_meta')
+   const pvInternal = money(m, 'purchase_value_leona')
++  // Gasto sem cotação: o lucro não pode tratá-lo como 0.
++  const spendUnknown = unconverted(m, 'meta_spend')
+   switch (col) {
+     case 'meta_spend':
+       return { value: spend }
+@@ -199,8 +214,8 @@ export function cellValue(row: Pick<BundleRow, 'metrics'>, col: MetricColumn): C
+     case 'profit_pair':
+       return {
+         pair: {
+-          internal: pvInternal === null ? null : round2(pvInternal - (spend ?? 0)),
+-          meta: pvMeta === null ? null : round2(pvMeta - (spend ?? 0)),
++          internal: pvInternal === null || spendUnknown ? null : round2(pvInternal - (spend ?? 0)),
++          meta: pvMeta === null || spendUnknown ? null : round2(pvMeta - (spend ?? 0)),
+         },
+       }
+     case 'purchases':
+@@ -272,9 +287,16 @@ export function totals(rows: readonly BundleRow[]): Record<MetricColumn, CellVal
+   let conv: number | null = null
+   let clicks: number | null = null
+   let impr: number | null = null
++  // Uma linha sem cotação para a moeda de exibição deixa o total daquela métrica desconhecido (B-06).
++  let spendUnknown = false
++  let pvMetaUnknown = false
++  let pvInternalUnknown = false
+   const add = (acc: number | null, v: number | null | undefined) => (v === null || v === undefined ? acc : (acc ?? 0) + v)
+   for (const r of rows) {
+     const m = r.metrics
++    spendUnknown ||= unconverted(m, 'meta_spend')
++    pvMetaUnknown ||= unconverted(m, 'purchase_value_meta')
++    pvInternalUnknown ||= unconverted(m, 'purchase_value_leona')
+     const s = money(m, 'meta_spend') ?? 0
+     spend += s
+     const vm = money(m, 'purchase_value_meta')
+@@ -289,18 +311,22 @@ export function totals(rows: readonly BundleRow[]): Record<MetricColumn, CellVal
+     clicks = add(clicks, m.meta_link_clicks)
+     impr = add(impr, m.meta_impressions)
+   }
+-  spend = round2(spend)
++  const total = spendUnknown || !rows.length ? null : round2(spend)
++  if (pvMetaUnknown) pvMeta = null
++  if (pvInternalUnknown) pvInternal = null
++  if (pvMetaUnknown || spendUnknown) profitMeta = null
++  if (pvInternalUnknown || spendUnknown) profitInternal = null
+   const r2 = (v: number | null) => (v === null ? null : round2(v))
+   const purchases = (purchInternal ?? 0) + (purchPixel ?? 0)
+   return {
+-    meta_spend: { value: rows.length ? spend : null },
++    meta_spend: { value: total },
+     revenue_pair: { pair: { internal: r2(pvInternal), meta: r2(pvMeta) } },
+     profit_pair: { pair: { internal: r2(profitInternal), meta: r2(profitMeta) } },
+     purchases: { pair: { internal: purchInternal, meta: purchPixel } },
+-    roas_pair: { pair: { internal: roas(pvInternal, spend), meta: roas(pvMeta, spend) } },
+-    cost_per_purchase_meta: { value: purchases > 0 ? round2(spend / purchases) : null },
++    roas_pair: { pair: { internal: roas(pvInternal, total), meta: roas(pvMeta, total) } },
++    cost_per_purchase_meta: { value: total !== null && purchases > 0 ? round2(total / purchases) : null },
+     conversations_meta: { value: conv },
+-    cost_per_lead_meta: { value: conv && conv > 0 ? round2(spend / conv) : null },
++    cost_per_lead_meta: { value: total !== null && conv && conv > 0 ? round2(total / conv) : null },
+     meta_link_clicks: { value: clicks },
+     meta_impressions: { value: impr },
+   }
+@@ -544,6 +570,19 @@ export function workspaceSwitchState(
+   return { checked: account.linked_ad_account_id != null, disabled: !opts.manager || opts.locked }
+ }
+ 
++/**
++ * Contador do card do perfil (B-07): no workspace só existem contas vinculadas de propósito, então mostra quantas
++ * estão no painel; no legado (sem workspace) continua "{incluídas} de {total}".
++ */
++export function profileCountLabel(
++  p: Pick<MetaProfile, 'ad_accounts_included_count' | 'ad_accounts_count'>,
++  workspace: boolean,
++): { key: 'profiles.countWorkspace'; params: { count: number } } | { key: 'profiles.count'; params: { included: number; total: number } } {
++  return workspace
++    ? { key: 'profiles.countWorkspace', params: { count: p.ad_accounts_included_count } }
++    : { key: 'profiles.count', params: { included: p.ad_accounts_included_count, total: p.ad_accounts_count } }
++}
++
+ /** Perfil a abrir depois do OAuth no workspace: o único, ou o de `updated_at` mais recente. */
+ export function oauthFocusProfile(profiles: readonly Pick<MetaProfile, 'id' | 'updated_at'>[]): string | null {
+   if (profiles.length <= 1) return profiles[0]?.id ?? null
+@@ -658,7 +697,16 @@ export function applyProbable(row: BundleRow, include: boolean): BundleRow {
+       ...row.metrics,
+       purchases_leona: (m.purchases_leona ?? 0) + n,
+       purchase_value_leona: add(m.purchase_value_leona, m.purchase_value_leona_probable),
+-      purchase_value_leona_display: add(m.purchase_value_leona_display, m.purchase_value_leona_probable_display),
++      // Uma das parcelas sem cotação (bruto presente, `_display` nulo): a soma também fica sem cotação (B-06).
++      ...('purchase_value_leona_display' in m
++        ? {
++            purchase_value_leona_display:
++              (m.purchase_value_leona != null && m.purchase_value_leona_display == null) ||
++              (m.purchase_value_leona_probable != null && m.purchase_value_leona_probable_display == null)
++                ? null
++                : add(m.purchase_value_leona_display, m.purchase_value_leona_probable_display),
++          }
++        : {}),
+     },
+   }
+ }
+diff --git a/apps/web/src/i18n/en/facebook.json b/apps/web/src/i18n/en/facebook.json
+index a262186..8148b1d 100644
+--- a/apps/web/src/i18n/en/facebook.json
++++ b/apps/web/src/i18n/en/facebook.json
+@@ -239,6 +239,7 @@
+     "active": "Active",
+     "inactive": "Inactive",
+     "count": "{included} of {total} accounts on the dashboard",
++    "countWorkspace": "{count} account(s) linked to the dashboard",
+     "expires": "Token expires on {date}",
+     "accounts": "Ad accounts",
+     "refresh": "Refresh list",
+@@ -274,7 +275,8 @@
+       "unlinkConfirm": "Unlink {name} ({id}) from this workspace? The account leaves this workspace's Ads Manager and dashboard.",
+       "unlink": "Unlink",
+       "unlinkError": "Could not unlink the account. Check permissions and retry.",
+-      "unlinkHasPixels": "Unlink this account's pixels first: {pixels}."
++      "unlinkHasPixels": "Unlink this account's pixels first: {pixels}.",
++      "authorizedCount": "{linked} of {authorized} authorized"
+     }
+   },
+   "events": {
+diff --git a/apps/web/src/i18n/es/facebook.json b/apps/web/src/i18n/es/facebook.json
+index 44d3184..3893a93 100644
+--- a/apps/web/src/i18n/es/facebook.json
++++ b/apps/web/src/i18n/es/facebook.json
+@@ -239,6 +239,7 @@
+     "active": "Activo",
+     "inactive": "Inactivo",
+     "count": "{included} de {total} cuentas en el panel",
++    "countWorkspace": "{count} cuenta(s) vinculada(s) al panel",
+     "expires": "El token vence el {date}",
+     "accounts": "Cuentas publicitarias",
+     "refresh": "Actualizar lista",
+@@ -274,7 +275,8 @@
+       "unlinkConfirm": "¿Desvincular {name} ({id}) de este workspace? La cuenta sale del Administrador y del panel de este workspace.",
+       "unlink": "Desvincular",
+       "unlinkError": "No se pudo desvincular. Revise los permisos e intente nuevamente.",
+-      "unlinkHasPixels": "Desvincule primero los píxeles de esta cuenta: {pixels}."
++      "unlinkHasPixels": "Desvincule primero los píxeles de esta cuenta: {pixels}.",
++      "authorizedCount": "{linked} de {authorized} autorizadas"
+     }
+   },
+   "events": {
+diff --git a/apps/web/src/i18n/pt-BR/facebook.json b/apps/web/src/i18n/pt-BR/facebook.json
+index febdbe3..99b0958 100644
+--- a/apps/web/src/i18n/pt-BR/facebook.json
++++ b/apps/web/src/i18n/pt-BR/facebook.json
+@@ -239,6 +239,7 @@
+     "active": "Ativo",
+     "inactive": "Inativo",
+     "count": "{included} de {total} contas no painel",
++    "countWorkspace": "{count} conta(s) vinculada(s) ao painel",
+     "expires": "Token expira em {date}",
+     "accounts": "Contas de anúncios",
+     "refresh": "Atualizar lista",
+@@ -274,7 +275,8 @@
+       "unlinkConfirm": "Desvincular {name} ({id}) deste workspace? A conta sai do Gerenciador e do dashboard deste workspace.",
+       "unlink": "Desvincular",
+       "unlinkError": "Não foi possível desvincular. Verifique permissões e tente novamente.",
+-      "unlinkHasPixels": "Desvincule os pixels desta conta antes: {pixels}."
++      "unlinkHasPixels": "Desvincule os pixels desta conta antes: {pixels}.",
++      "authorizedCount": "{linked} de {authorized} autorizadas"
+     }
+   },
+   "events": {
+diff --git a/tests/acceptance/T005-R4/browser-discovery.mjs b/tests/acceptance/T005-R4/browser-discovery.mjs
+index cf1f0e2..35031c6 100644
+--- a/tests/acceptance/T005-R4/browser-discovery.mjs
++++ b/tests/acceptance/T005-R4/browser-discovery.mjs
+@@ -250,7 +250,9 @@ try {
+   await idle()
+   assert.equal(await candidates.count(), 101)
+   assert.equal(links, 0)
+-  assert.match(await page.getByTestId(`facebook-profile-count-${pid}`).innerText(), /0/)
++  // B-07: no workspace o card conta as vinculadas ao painel; a lista mostra vinculadas de autorizadas (101 + 1 bloqueada).
++  assert.equal(await page.getByTestId(`facebook-profile-count-${pid}`).innerText(), '0 conta(s) vinculada(s) ao painel')
++  assert.equal(await page.getByTestId(`facebook-candidates-count-${pid}`).innerText(), '0 de 102 autorizadas')
+   assert.match(await candidates.nth(100).innerText(), /\*\*\*0403/)
+   assert.match(await candidates.nth(100).innerText(), /BRL/)
+   assert.equal((await page.locator('body').innerText()).includes(last.fb_account_id), false)
+@@ -285,6 +287,8 @@ try {
+   await page.getByTestId(`facebook-account-${linkedId}`).waitFor()
+   await page.waitForFunction((id) => document.querySelector(`[data-testid="${id}"]`)?.getAttribute('aria-checked') === 'true', `facebook-candidate-switch-${last.fb_account_id}`)
+   assert.equal(await page.getByTestId(`facebook-account-toggle-${linkedId}`).isChecked(), true)
++  assert.equal(await page.getByTestId(`facebook-profile-count-${pid}`).innerText(), '1 conta(s) vinculada(s) ao painel')
++  await page.waitForFunction((id) => document.querySelector(`[data-testid="${id}"]`)?.textContent === '1 de 102 autorizadas', `facebook-candidates-count-${pid}`)
+   await page.reload()
+   await page.getByTestId(`facebook-account-${linkedId}`).waitFor()
+   await idle()

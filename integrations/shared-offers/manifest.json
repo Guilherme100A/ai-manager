@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/Guilherme100A/crm-copy.git",
   "base_sha": "acf78e2da49865afa06fe6a4cee77bcf0e888152",
-  "expected_tree": "fcf5007316b6cb214e1a63d85532b28984997cde",
+  "expected_tree": "4ca23fc779974f3772dcf5e6aeb6f0604fde0e0c",
   "sanitization": {
     "excluded_files": [
       "scripts/elevenlabs-account-diagnose.ts",
@@ -28,7 +28,7 @@
     ],
     "reason": "Exclude unrelated operator scripts/private deployment context and audit-only harnesses; replace operational hosts in documentation and URL fixtures with reserved example.test hosts. Original local source preserved.",
     "baseline_tree": "539e4a6dac07e50188e418d0e1a3d669e5f6d687",
-    "final_tree": "fcf5007316b6cb214e1a63d85532b28984997cde"
+    "final_tree": "4ca23fc779974f3772dcf5e6aeb6f0604fde0e0c"
   },
   "test_only_changes": [
     {
@@ -664,6 +664,24 @@
         "apps/web/src/i18n/es/facebook.json",
         "apps/web/src/i18n/pt-BR/facebook.json",
         "packages/core/src/meta-ads/profiles/service.ts",
+        "tests/acceptance/T005-R4/browser-discovery.mjs"
+      ]
+    },
+    {
+      "file": "26-manager-polling-fx-count.patch",
+      "description": "B-05/B-06/B-07 web-only fixes. B-05: Ads Manager bundle no longer stalls in loading: refetchIntervalInBackground keeps the fallback poll alive in a hidden tab, and a ready/partial SSE that arrives before the 202 reaches the cache is kept (lateProgress) and triggers one re-read; query options moved to bundle-query.ts and tested with the real QueryClient. B-06: money values without an exchange rate (_display present and null) render as an em dash instead of the raw amount in another currency; profit and totals of that metric become null. B-07: profile card counter in a workspace shows accounts linked to the dashboard (profiles.countWorkspace) and the expanded list shows linked of authorized; legacy unchanged. i18n pt-BR/en/es, unit tests and T005-R4 updated. No backend, migrations, dependencies, OAuth or MCP changes.",
+      "sha256": "c990c54e4e7a47dc938154883f7e44e526593f74a14160b703b4e70816865723",
+      "bytes": 33690,
+      "files": [
+        "apps/web/src/features/facebook/bundle-query.ts",
+        "apps/web/src/features/facebook/campaigns-page.tsx",
+        "apps/web/src/features/facebook/campaigns-page.unit.test.tsx",
+        "apps/web/src/features/facebook/facebook.unit.test.ts",
+        "apps/web/src/features/facebook/profiles-page.tsx",
+        "apps/web/src/features/facebook/rules.ts",
+        "apps/web/src/i18n/en/facebook.json",
+        "apps/web/src/i18n/es/facebook.json",
+        "apps/web/src/i18n/pt-BR/facebook.json",
         "tests/acceptance/T005-R4/browser-discovery.mjs"
       ]
     }
