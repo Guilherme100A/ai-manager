@@ -206,8 +206,10 @@ try {
   const cleanConnection = (await cq("INSERT INTO crm.connections(company_id,session_id,name) VALUES($1,$2,'previously managed fake chip') RETURNING id", [cleanCompany, randomUUID()])).rows[0].id
   const cleanFlow = (await cq("INSERT INTO crm.flows(company_id,name) VALUES($1,'ordinary flow') RETURNING id", [cleanCompany])).rows[0].id
   const cleanContact = (await cq("INSERT INTO crm.contacts(company_id,name) VALUES($1,'Ordinary contact') RETURNING id", [cleanCompany])).rows[0].id
-  const chatOf = async () => (await cq('INSERT INTO crm.chats(company_id,contact_id,connection_id) VALUES($1,$2,$3) RETURNING id', [cleanCompany, cleanContact, cleanConnection])).rows[0].id
-  const cleanChat = await chatOf(), cleanChat2 = await chatOf()
+  const cleanConnection2 = (await cq("INSERT INTO crm.connections(company_id,session_id,name) VALUES($1,$2,'second fake chip') RETURNING id", [cleanCompany, randomUUID()])).rows[0].id
+  // One chat per contact and connection: the second chat of the same contact uses the second chip.
+  const chatOf = async conn => (await cq('INSERT INTO crm.chats(company_id,contact_id,connection_id) VALUES($1,$2,$3) RETURNING id', [cleanCompany, cleanContact, conn])).rows[0].id
+  const cleanChat = await chatOf(cleanConnection), cleanChat2 = await chatOf(cleanConnection2)
   const cleanRun = (await cq("INSERT INTO crm.flow_runs(company_id,flow_id,contact_id,chat_id,status,trigger) VALUES($1,$2,$3,$4,'waiting','{}') RETURNING id", [cleanCompany, cleanFlow, cleanContact, cleanChat])).rows[0].id
   const legacyOffer = (await cq("INSERT INTO crm.offers(company_id,name,config) VALUES($1,'legacy offer history','{}') RETURNING id", [cleanCompany])).rows[0].id
   await migrateUrl(clean.url, { set: 'crm' })
