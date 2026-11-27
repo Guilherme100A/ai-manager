@@ -1,5 +1,5 @@
 diff --git a/tests/acceptance/T125/business-areas.test.ts b/tests/acceptance/T125/business-areas.test.ts
-index c81e0eef526408a6ee2d0376d0f5096294fe6030..e4711a0c1becb8213d6e67941996c2c67846d236 100644
+index c81e0eef526408a6ee2d0376d0f5096294fe6030..4cc2075d8c5002ae0fd33b0dcda56322ddb861e5 100644
 --- a/tests/acceptance/T125/business-areas.test.ts
 +++ b/tests/acceptance/T125/business-areas.test.ts
 @@ -8,7 +8,7 @@ import { chromium, type Browser } from '@playwright/test'
@@ -78,7 +78,7 @@ index c81e0eef526408a6ee2d0376d0f5096294fe6030..e4711a0c1becb8213d6e67941996c2c6
    expect((await call('GET', '/api/payment-integrations/' + bundles[1].integration_id, areas[0].id)).status).toBe(200)
    expect((await call('POST', '/api/meta/oauth/start', areas[0].id, {})).status).toBe(200)
    expect((await call('PUT', '/api/meta/ad-accounts/' + bundles[1].ad_account_id, areas[0].id, { included_in_dashboard: false })).status).toBe(404)
-@@ -172,21 +174,6 @@ it('shares chips, flows and payment accounts while filtering Meta resources by w
+@@ -172,26 +174,13 @@ it('shares chips, flows and payment accounts while filtering Meta resources by w
    expect(filtered.body).toMatchObject({ warnings: ['no_ad_accounts'], targets_total: 0 })
    expect((await call('POST', '/api/business-areas/' + areas[1].id + '/resources', undefined, { kind: 'integration', resource_id: bundles[0].integration_id })).status).toBe(409)
  })
@@ -100,7 +100,15 @@ index c81e0eef526408a6ee2d0376d0f5096294fe6030..e4711a0c1becb8213d6e67941996c2c6
  it('MCP carries an explicit area on each call without leaking state to the next caller, and retains read/write permissions', async () => {
    expect((await tool(reader, 'list_business_areas')).data.items).toHaveLength(3)
    expect((await tool(reader, 'initialize_business_areas')).error).toBe(true)
-@@ -208,62 +195,6 @@ it('flow editing rejects both foreign and dynamic destination references before
+   const listed = await toolNames(reader)
+-  expect(listed).toEqual(expect.arrayContaining(['list_business_areas', 'get_business_area_resource_catalog', 'share_workspace_flow']))
++  expect(listed).toEqual(expect.arrayContaining(['list_business_areas', 'get_business_area_resource_catalog']))
++  expect(listed).not.toContain('share_workspace_flow')
++  expect(await toolNames(writer)).toContain('share_workspace_flow')
+   for (const removed of ['list_offers', 'get_offer', 'create_offer', 'adopt_offer_business_area']) expect(listed).not.toContain(removed)
+   expect((await tool(reader, 'list_offers', { business_area_id: areas[0].id })).error).toBe(true)
+   const flow = await tool(writer, 'create_flow', { name: 'Area MCP flow', business_area_id: areas[0].id })
+@@ -208,62 +197,6 @@ it('flow editing rejects both foreign and dynamic destination references before
    }
    expect(await sys.q('select id from crm.flow_nodes where flow_id=$1', [id])).toHaveLength(0)
  })
@@ -163,7 +171,7 @@ index c81e0eef526408a6ee2d0376d0f5096294fe6030..e4711a0c1becb8213d6e67941996c2c6
  it('permissions and company gate are checked on each area management call', async () => {
    const user = bundles[0].owner_user_id
    await sys.q("update crm.company_members set role='member',permission_keys=ARRAY[]::text[] where company_id=$1 and user_id=$2", [t.companyId,user])
-@@ -277,8 +208,6 @@ it('another admin of the SAME company cannot discover area tools or read area da
+@@ -277,8 +210,6 @@ it('another admin of the SAME company cannot discover area tools or read area da
    const account = { ...foreign, companyId:t.companyId }
    expect((await call('GET','/api/business-areas',undefined,undefined,account)).status).toBe(404)
    expect((await call('GET','/api/business-areas/catalog',undefined,undefined,account)).status).toBe(404)
@@ -172,7 +180,7 @@ index c81e0eef526408a6ee2d0376d0f5096294fe6030..e4711a0c1becb8213d6e67941996c2c6
    expect((await call('GET','/api/payment-integrations',undefined,undefined,account)).status).toBe(404)
    expect((await call('GET','/api/events',undefined,undefined,account)).status).toBe(404)
    expect((await call('GET','/api/jobs',undefined,undefined,account)).status).toBe(404)
-@@ -287,7 +216,6 @@ it('another admin of the SAME company cannot discover area tools or read area da
+@@ -287,7 +218,6 @@ it('another admin of the SAME company cannot discover area tools or read area da
    expect((await tool(made.body.token,'list_business_areas')).error).toBe(true)
    expect((await tool(made.body.token,'get_business_area_resource_catalog')).error).toBe(true)
    expect((await tool(made.body.token,'list_flows')).data.flows).toEqual([])
@@ -180,7 +188,7 @@ index c81e0eef526408a6ee2d0376d0f5096294fe6030..e4711a0c1becb8213d6e67941996c2c6
    const profile=(await call('GET','/api/auth/profile',undefined,undefined,account)).body
    expect(profile.companies.find((c:any)=>c.id===t.companyId)).toMatchObject({business_areas_admin:false,business_areas_enabled:true})
    await sys.q('update crm.users set last_company_id=$1 where id=$2',[t.companyId,user])
-@@ -302,16 +230,15 @@ it('flows start private, can be shared deliberately and keep editing in the owne
+@@ -302,16 +232,15 @@ it('flows start private, can be shared deliberately and keep editing in the owne
    expect((await call('GET','/api/flows/'+id,b)).status).toBe(404)
    expect((await call('GET','/api/flows/names',b)).body.items.map((f:any)=>f.id)).not.toContain(id)
    await sys.q("update crm.flows set status='active',published_version=1 where id=$1", [id])
@@ -200,7 +208,7 @@ index c81e0eef526408a6ee2d0376d0f5096294fe6030..e4711a0c1becb8213d6e67941996c2c6
    const duplicated=await call('POST',`/api/flows/${id}/duplicate`,a,{})
    expect(duplicated.status).toBe(201)
    expect((await call('GET','/api/flows/'+duplicated.body.flow.id,b)).status).toBe(404)
-@@ -344,8 +271,17 @@ it('flows start private, can be shared deliberately and keep editing in the owne
+@@ -344,8 +273,17 @@ it('flows start private, can be shared deliberately and keep editing in the owne
    expect((await call('GET','/api/flow-runs/'+run.id,b)).status).toBe(200)
    expect((await tool(reader,'get_conversation_flow_runs',{id:chat.id,business_area_id:a})).data.items).toHaveLength(1)
    expect((await tool(reader,'get_conversation_flow_runs',{id:chat.id,business_area_id:b})).data.items).toHaveLength(1)
@@ -219,7 +227,7 @@ index c81e0eef526408a6ee2d0376d0f5096294fe6030..e4711a0c1becb8213d6e67941996c2c6
    const root = resolve(process.env.CRM_EMBEDDED_DIST!)
    server = createServer(async (req,res) => {
      try {
-@@ -388,32 +324,15 @@ it('desktop/mobile navigation selects the actual business area, filters offers a
+@@ -388,32 +326,15 @@ it('desktop/mobile navigation selects the actual business area, filters offers a
        expect(await page.getByTestId('nav-item-offers').count()).toBe(0)
        await page.getByTestId('flows-search').fill(privateFlow.name)
        await page.getByTestId('flows-item-menu-'+privateFlow.id).click()
@@ -231,7 +239,7 @@ index c81e0eef526408a6ee2d0376d0f5096294fe6030..e4711a0c1becb8213d6e67941996c2c6
 -      await page.getByRole('heading',{name:'Ofertas do workspace'}).waitFor()
 -      await expect.poll(()=>page.getByRole('button',{name:/Business offer 0/}).isVisible()).toBe(true)
 -      expect(await page.getByRole('button',{name:/Business offer 1/}).isVisible()).toBe(false)
-+      await page.getByTestId('flows-item-open-'+privateFlow.id).waitFor()
++      await page.getByTestId('flows-item-edit-'+privateFlow.id).waitFor()
 +      expect(await page.getByTestId('flows-item-commercial-'+privateFlow.id).count()).toBe(0)
 +      await page.keyboard.press('Escape')
        expect(await page.getByTestId('business-area-bm').textContent()).toContain('111000')
@@ -260,7 +268,7 @@ index c81e0eef526408a6ee2d0376d0f5096294fe6030..e4711a0c1becb8213d6e67941996c2c6
        await page.getByRole('navigation',{name:'Fluxos e recursos do workspace'}).getByRole('link',{name:'Fluxos'}).click()
        await page.getByTestId('flows-search').fill(privateFlow.name)
        await page.getByTestId('flows-item-menu-'+privateFlow.id).click()
-@@ -424,10 +343,6 @@ it('desktop/mobile navigation selects the actual business area, filters offers a
+@@ -424,10 +345,6 @@ it('desktop/mobile navigation selects the actual business area, filters offers a
        await page.getByRole('button',{name:'Trocar workspace'}).click()
        await page.getByTestId('workspace-enter-2').click()
        await page.getByTestId('page-flows').waitFor()
@@ -271,7 +279,7 @@ index c81e0eef526408a6ee2d0376d0f5096294fe6030..e4711a0c1becb8213d6e67941996c2c6
        expect(await page.getByTestId('business-area-bm').textContent()).toContain('222000')
        await page.getByRole('navigation',{name:'Fluxos e recursos do workspace'}).getByRole('link',{name:'Fluxos'}).click()
        await page.getByTestId('flows-search').fill(privateFlow.name)
-@@ -438,13 +353,14 @@ it('desktop/mobile navigation selects the actual business area, filters offers a
+@@ -438,13 +355,14 @@ it('desktop/mobile navigation selects the actual business area, filters offers a
        await page.getByRole('button',{name:'Trocar workspace'}).click()
        await page.getByTestId('workspace-enter-3').click()
        await expect.poll(()=>page.getByTestId('workspace-current').textContent()).toBe(areas[2].name)
@@ -290,7 +298,7 @@ index c81e0eef526408a6ee2d0376d0f5096294fe6030..e4711a0c1becb8213d6e67941996c2c6
        expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true)
        await page.goto(base+'/crm/facebook/profiles?'+new URLSearchParams({ meta_oauth: 'success', meta_workspace: areas[1].id }))
        await expect.poll(()=>page.getByTestId('workspace-current').textContent()).toBe(areas[1].name)
-@@ -464,64 +380,3 @@ it('desktop/mobile navigation selects the actual business area, filters offers a
+@@ -464,64 +382,3 @@ it('desktop/mobile navigation selects the actual business area, filters offers a
      expect((await unauthorized.request.get(base+'/crm/api/business-areas')).status()).toBe(404)
    } finally {await unauthorized.close()}
  },120000)
