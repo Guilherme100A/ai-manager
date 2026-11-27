@@ -1,0 +1,220 @@
+diff --git a/tests/acceptance/T125/crm003-browser.test.ts b/tests/acceptance/T125/crm003-browser.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2a5e17c8c339a9ab1b049bca2ac351add6416715
+--- /dev/null
++++ b/tests/acceptance/T125/crm003-browser.test.ts
+@@ -0,0 +1,70 @@
++// Build with VITE_BASE_PATH=/crm/ and VITE_API_BASE=/crm/api; use a disposable CI database and fake providers.
++// Browser against the built checkout and isolated in-process API, never a published server.
++/* eslint-disable @typescript-eslint/no-explicit-any -- HTTP adapter and server address */
++import { createServer, type Server } from 'node:http'
++import { existsSync, readFileSync, statSync } from 'node:fs'
++import { extname, resolve, sep } from 'node:path'
++import { chromium, type Browser } from '@playwright/test'
++import { afterAll, beforeAll, expect, it } from 'vitest'
++import { startSystem, tenant, type System, type Tenant } from './setup'
++
++let sys: System, user: Tenant, browser: Browser, server: Server, base: string
++const oldGate = process.env.SHARED_OFFERS_COMPANY_ID
++beforeAll(async () => {
++  for (const key of ['DATABASE_URL', 'REDIS_URL']) {
++    const value = process.env[key]
++    if (value && !['localhost', '127.0.0.1', '::1', '[::1]'].includes(new URL(value).hostname) && process.env.CRM003_DISPOSABLE_INFRA !== '1') throw new Error(`${key} must be local, or CRM003_DISPOSABLE_INFRA=1 must explicitly designate an isolated CI service`)
++  }
++  const root = resolve(process.env.CRM_EMBEDDED_DIST ?? 'apps/web/dist')
++  if (!existsSync(resolve(root, 'index.html'))) throw new Error('Build the web checkout first and set CRM_EMBEDDED_DIST to its dist')
++  sys = await startSystem(); user = await tenant(sys); process.env.SHARED_OFFERS_COMPANY_ID = user.companyId
++  server = createServer(async (req, res) => {
++    try {
++      const pathname = new URL(req.url!, 'http://localhost').pathname
++      if (pathname.startsWith('/crm/api/')) {
++        const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk))
++        const abort = new AbortController(); res.on('close', () => abort.abort())
++        const response = await sys.app.request(req.url!.slice(4), { method: req.method, headers: req.headers as any, signal: abort.signal, ...(!['GET', 'HEAD'].includes(req.method!) ? { body: Buffer.concat(chunks) } : {}) })
++        res.writeHead(response.status, Object.fromEntries(response.headers.entries()))
++        if (response.headers.get('content-type')?.includes('text/event-stream')) {
++          const reader = response.body!.getReader(); res.on('close', () => void reader.cancel().catch(() => {}))
++          for (;;) { const item = await reader.read(); if (item.done) break; res.write(Buffer.from(item.value)) }
++          res.end(); return
++        }
++        res.end(Buffer.from(await response.arrayBuffer())); return
++      }
++      const asset = resolve(root, '.' + pathname.replace(/^\/crm/, ''))
++      const file = asset.startsWith(root + sep) && existsSync(asset) && statSync(asset).isFile() ? asset : resolve(root, 'index.html')
++      const mime: Record<string, string> = { '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.woff2': 'font/woff2', '.png': 'image/png' }
++      res.setHeader('content-type', mime[extname(file)] ?? 'text/html'); res.end(readFileSync(file))
++    } catch { if (!res.headersSent) res.statusCode = 500; res.end() }
++  })
++  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
++  base = `http://127.0.0.1:${(server.address() as any).port}`
++  browser = await chromium.launch({ headless: true })
++}, 180000)
++afterAll(async () => {
++  await browser?.close()
++  if (server) { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())) }
++  await sys?.close()
++  if (oldGate === undefined) delete process.env.SHARED_OFFERS_COMPANY_ID; else process.env.SHARED_OFFERS_COMPANY_ID = oldGate
++}, 120000)
++
++it.each([1440, 390])('direct authenticated legacy URL is not found and navigation hides offers at %i px', async width => {
++  const context = await browser.newContext({ viewport: { width, height: 900 }, locale: 'pt-BR' })
++  try {
++    await context.addCookies([{ name: 'crm_session', value: user.token, url: base, httpOnly: true, sameSite: 'Lax' }])
++    const page = await context.newPage()
++    await page.goto(base + '/crm/flows')
++    await expect.poll(async () => (await page.getByTestId('workspace-entry').count()) + (await page.getByTestId('page-flows').count()), { timeout: 20000 }).toBeGreaterThan(0)
++    await page.goto(base + '/crm/offers')
++    await expect.poll(async () => page.getByRole('heading', { name: /Página não encontrada|Page not found/i }).count(), { timeout: 20000 }).toBe(1)
++    expect(new URL(page.url()).pathname).toBe('/crm/offers')
++    await page.reload()
++    await expect.poll(async () => page.getByRole('heading', { name: /Página não encontrada|Page not found/i }).count(), { timeout: 20000 }).toBe(1)
++    await page.goto(base + '/crm/flows')
++    await expect.poll(async () => (await page.getByTestId('workspace-entry').count()) + (await page.getByTestId('page-flows').count()), { timeout: 20000 }).toBeGreaterThan(0)
++    expect(await page.getByTestId('nav-item-offers').count()).toBe(0)
++    expect(await page.getByRole('link', { name: /^ofertas$/i }).count()).toBe(0)
++  } finally { await context.close() }
++})
+diff --git a/tests/acceptance/T125/crm003-regression.test.ts b/tests/acceptance/T125/crm003-regression.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..1c9c2073dd96e64be7c45a1e745583597b8c22ed
+--- /dev/null
++++ b/tests/acceptance/T125/crm003-regression.test.ts
+@@ -0,0 +1,138 @@
++// CRM-003 R1. Disposable PostgreSQL/Redis, synthetic tenants and fake providers only.
++/* eslint-disable @typescript-eslint/no-explicit-any -- acceptance JSON fixtures */
++import { randomUUID } from 'node:crypto'
++import { afterAll, beforeAll, expect, it } from 'vitest'
++import { FakeXPag } from '../../../packages/core/src/payments/xpag/fake'
++import { chatOf, history, messageFlow, phone, receive, sentTexts, startSystem, tenant, waitFor, type System, type Tenant } from './setup'
++
++let sys: System, user: Tenant, other: Tenant, readToken: string, writeToken: string
++const gateway = new FakeXPag({ clientId: 'crm003-test', clientSecret: 'synthetic-local-only' })
++const old = { gate: process.env.SHARED_OFFERS_COMPANY_ID, xpag: process.env.XPAG_API_URL, public: process.env.API_PUBLIC_URL }
++let sequence = 0
++const removed = ['list_offers', 'get_offer', 'get_offer_resources', 'get_offer_results', 'create_offer', 'update_offer', 'set_offer_connection_mode', 'list_conversation_offer_opportunities', 'adopt_offer_business_area']
++
++async function rpc(token: string, method: string, params: Record<string, unknown> = {}) {
++  const response = await sys.app.request('/api/mcp', { method: 'POST', headers: {
++    authorization: `Bearer ${token}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-06-18',
++  }, body: JSON.stringify({ jsonrpc: '2.0', id: ++sequence, method, params }) })
++  return { status: response.status, body: await response.json() as any }
++}
++
++beforeAll(async () => {
++  for (const key of ['DATABASE_URL', 'REDIS_URL']) {
++    const value = process.env[key]
++    if (value && !['localhost', '127.0.0.1', '::1', '[::1]'].includes(new URL(value).hostname) && process.env.CRM003_DISPOSABLE_INFRA !== '1') throw new Error(`${key} must be local, or CRM003_DISPOSABLE_INFRA=1 must explicitly designate an isolated CI service`)
++  }
++  await gateway.start()
++  process.env.XPAG_API_URL = gateway.url
++  process.env.API_PUBLIC_URL = 'http://crm003.invalid'
++  sys = await startSystem()
++  user = await tenant(sys); other = await tenant(sys)
++  process.env.SHARED_OFFERS_COMPANY_ID = user.companyId
++  const reader = await user.c.post('/api/mcp_credentials', { name: 'CRM003 reader', access: 'read' })
++  const writer = await user.c.post('/api/mcp_credentials', { name: 'CRM003 writer', access: 'write' })
++  expect(reader.status).toBe(201); expect(writer.status).toBe(201)
++  readToken = reader.body.token; writeToken = writer.body.token
++  // Historical row, not a newly activated feature: reproduces an already managed chip after upgrade.
++  await sys.q('insert into crm.offer_connections(company_id,connection_id) values($1,$2)', [user.companyId, user.connectionId])
++}, 180_000)
++
++afterAll(async () => {
++  await sys?.close(); await gateway.stop()
++  for (const [key, value] of Object.entries({ SHARED_OFFERS_COMPANY_ID: old.gate, XPAG_API_URL: old.xpag, API_PUBLIC_URL: old.public })) {
++    if (value === undefined) delete process.env[key]; else process.env[key] = value
++  }
++}, 120_000)
++
++it('removes commercial offer tools and calls while keeping areas and spy', async () => {
++  for (const token of [readToken, writeToken]) {
++    const listing = await rpc(token, 'tools/list')
++    expect(listing.status).toBe(200)
++    const names: string[] = listing.body.result.tools.map((tool: any) => tool.name)
++    for (const name of removed) expect(names, name).not.toContain(name)
++    expect(names).toContain('list_business_areas')
++    expect(names).toContain('list_spy_offers')
++    for (const name of removed) {
++      const result = await rpc(token, 'tools/call', { name, arguments: {} })
++      expect(Boolean(result.body.error || result.body.result?.isError), name).toBe(true)
++    }
++    expect((await rpc(token, 'tools/call', { name: 'list_business_areas', arguments: {} })).body.result?.isError).not.toBe(true)
++    expect((await rpc(token, 'tools/call', { name: 'list_spy_offers', arguments: {} })).body.result?.isError).not.toBe(true)
++  }
++})
++
++it('returns 404 for legacy API even with an authenticated enabled tenant', async () => {
++  for (const path of ['/api/offers', '/api/offers/resources', `/api/offers/${randomUUID()}`]) {
++    expect((await user.c.get(path)).status, path).toBe(404)
++    expect((await other.c.get(path)).status, path).toBe(404)
++  }
++})
++
++it('an inbound keyword on the previously managed chip triggers the ordinary flow', async () => {
++  const marker = `CRM003 keyword ${randomUUID()}`
++  const flow = await messageFlow(user, marker)
++  const config = await user.c.put(`/api/connection-flow-configs/${user.connectionId}`, { keyword_triggers: [{ flow_id: flow, conditions: [{ keyword: 'crm003', match_type: 'equals' }] }] })
++  expect(config.status, config.text).toBe(200)
++  const lead = phone(); await receive(sys, user, lead, 'crm003')
++  const chat = await chatOf(sys, user, lead)
++  await waitFor(async () => (await sentTexts(sys, user)).includes(marker), 45000, 'keyword response delivered to fake transport')
++  const persisted = await waitFor(async () => (await history(user, chat)).find((m: any) => (m.body ?? m.text) === marker), 20000, 'keyword response persisted')
++  expect(persisted.sender_type).toBe('flow')
++})
++
++it('runs a normal message and fake payment-to-sale flow on an originally managed chip without an opportunity', async () => {
++  const integration = await user.c.post('/api/payment-integrations', { label: 'CRM003 fake', gateway: 'xpag', client_id: 'crm003-test', client_secret: 'synthetic-local-only' })
++  expect(integration.status, integration.text).toBe(201)
++  const product = await user.c.post('/api/products', { name: 'CRM003 synthetic', currency: 'MXN', price_min_cents: 1, price_max_cents: 100000, price_fallback_cents: 12345 })
++  expect(product.status, product.text).toBe(201)
++  const flow = await user.c.post('/api/flows', { name: 'CRM003 ordinary flow' })
++  expect(flow.status, flow.text).toBe(201)
++  const id = flow.body.flow.id
++  const node = (id: string, type: string, action?: string, config?: object) => ({ id, type, name: id, position: { x: 0, y: 0 }, actions: action ? [{ id: `a-${id}`, type: action, order: 0, config }] : [] })
++  const edge = (from: string, handle: string, to: string) => ({ id: `${from}-${to}`, from, handle, to })
++  const marker = `CRM003 message ${randomUUID()}`
++  const definition = { schema: 'crm.flow/v1', entry: 'start', nodes: [
++    node('start', 'start'), node('message', 'message', 'send_message', { message_text: marker }),
++    node('payment', 'payment', 'create_payment_charge', { gateway: 'xpag', payment_integration_id: integration.body.integration.id, currency: 'MXN', method: 'SPEI', amount: '123.45', listener_ttl_value: 1, listener_ttl_unit: 'hours' }),
++    node('sale', 'approved_sale', 'register_approved_sale', { product_public_id: product.body.product.public_id, amount_template: '{gateway.value}', currency_template: 'MXN' }),
++  ], edges: [edge('start', 'source', 'message'), edge('message', 'source', 'payment'), edge('payment', 'output:payment_approved', 'sale')], variables: [], refs: {} }
++  const saved = await user.c.put(`/api/flows/${id}/definition`, definition)
++  expect(saved.status, saved.text).toBe(200)
++  const active = await user.c.post(`/api/flows/${id}/activate`, {})
++  expect(active.status, active.text).toBe(200)
++  const lead = phone(); await receive(sys, user, lead, 'CRM003 synthetic inbound')
++  const chat = await chatOf(sys, user, lead)
++  const triggered = await user.c.post(`/api/flows/${id}/trigger`, { chat_id: chat })
++  expect(triggered.status, triggered.text).toBeLessThan(300)
++  await waitFor(async () => (await sentTexts(sys, user)).includes(marker), 45000, 'fake transport delivered message')
++  const charge = await waitFor(async () => (await sys.q('select * from crm.payment_charges where company_id=$1', [user.companyId]))[0], 45000, 'fake charge persisted')
++  expect(charge.opportunity_id).toBeNull()
++  expect(Number(charge.amount_cents)).toBe(12345)
++  const hook = gateway.webhookFor(charge.transaction_id, { amount: 123.45 }); const url = new URL(hook.url!)
++  expect((await sys.app.request(url.pathname + url.search, { method: 'POST', headers: hook.headers, body: hook.rawBody })).status).toBe(202)
++  const sale = await waitFor(async () => (await sys.q('select * from crm.sales where company_id=$1', [user.companyId]))[0], 45000, 'approved sale persisted')
++  expect(sale).toMatchObject({ status: 'approved', currency: 'MXN', opportunity_id: null })
++  expect(Number(sale.amount_cents)).toBe(12345)
++  expect(await sys.q('select id from crm.sales where company_id=$1', [other.companyId])).toHaveLength(0)
++  expect((await sentTexts(sys, user)).filter(text => text === marker)).toHaveLength(1)
++})
++
++it('keeps private flows isolated between workspaces after removal of offers', async () => {
++  const initialized = await user.c.post('/api/business-areas/initialize', {})
++  expect(initialized.status, initialized.text).toBe(201)
++  const areas = initialized.body.items
++  expect(areas.map((area: any) => area.slot)).toEqual([1, 2, 3])
++  const a = { 'x-business-area-id': areas[0].id }, b = { 'x-business-area-id': areas[1].id }
++  const created = await user.c.post('/api/flows', { name: 'CRM003 private synthetic flow' }, a)
++  expect(created.status, created.text).toBe(201)
++  const id = created.body.flow.id
++  expect((await user.c.get(`/api/flows/${id}`, a)).status).toBe(200)
++  expect((await user.c.get(`/api/flows/${id}`, b)).status).toBe(404)
++  expect((await other.c.get(`/api/flows/${id}`)).status).toBe(404)
++  const list = await rpc(readToken, 'tools/call', { name: 'list_flows', arguments: { business_area_id: areas[1].id } })
++  expect(list.body.error).toBeUndefined()
++  expect(list.body.result?.isError).not.toBe(true)
++  const data = JSON.parse(list.body.result.content[0].text)
++  expect(data.flows.map((flow: any) => flow.id)).not.toContain(id)
++  expect((await user.c.get(`/api/flows/${id}`, a)).status).toBe(200)
++})

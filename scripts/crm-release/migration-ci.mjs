@@ -153,14 +153,14 @@ try {
   utility('pg_dump', ['-Fc', '--no-owner', '--dbname', b.url, '-f', beforePixelPolicy]); utility('pg_restore', ['--list', beforePixelPolicy])
   const restored48 = await create()
   utility('pg_restore', ['--no-owner', '--exit-on-error', '--dbname', restored48.url, beforePixelPolicy]); b = restored48
-  await migrateUrl(b.url, { set: 'crm' })
+  await migrateUrl(b.url, { set: 'crm', folders: { crm: partial(49) } })
   const journalAfter = (await b.client.query('SELECT hash,created_at FROM crm.__drizzle_migrations ORDER BY created_at')).rows
   assert.equal(journalAfter.length,49)
   assert.deepEqual(journalAfter.slice(0,48),journal48)
   const policy = await b.client.query('SELECT allowed_events FROM crm.pixel_configs WHERE id=$1 OR (business_area_id=$2 AND meta_ad_account_id=$3)', [legacyPixel.id,workspace,accountA.id])
   assert.deepEqual(policy.rows.map(x => x.allowed_events), [['Purchase'], ['Purchase']])
   await assert.rejects(b.client.query("UPDATE crm.pixel_configs SET allowed_events=ARRAY['Invalid'] WHERE id=$1", [legacyPixel.id]), e => e.code === '23514')
-  await migrateUrl(b.url, { set: 'crm' }); assert.deepEqual((await b.client.query('SELECT hash,created_at FROM crm.__drizzle_migrations ORDER BY created_at')).rows, journalAfter)
+  await migrateUrl(b.url, { set: 'crm', folders: { crm: partial(49) } }); assert.deepEqual((await b.client.query('SELECT hash,created_at FROM crm.__drizzle_migrations ORDER BY created_at')).rows, journalAfter)
   assert.equal((await b.client.query('SELECT count(*)::int n FROM crm.company_members')).rows[0].n, 3)
   assert.equal((await b.client.query('SELECT count(*)::int n FROM crm.release_fixture_link JOIN public.release_fixture_parent ON parent_id=id')).rows[0].n, 1)
   const scope = (await b.client.query('SELECT id,offer_scoped FROM crm.flow_runs ORDER BY id')).rows
@@ -183,7 +183,49 @@ try {
   await assert.rejects(c.client.query('UPDATE crm.flow_runs SET offer_scoped=true WHERE id=$1', [rows[0].run]), /invalid offer run scope/)
   assert.equal((await c.client.query('SELECT count(*)::int n FROM crm.messages WHERE company_id=$1 AND wa_message_id=$2', [company,waId])).rows[0].n, 2)
   assert.equal((await c.client.query('SELECT count(*)::int n FROM crm.pending_message_status')).rows[0].n,1)
-  metrics.passed = ['backup/restore0038 with public dependency', 'one shared company and three existing member identities preserved', '0039->0042 valid opportunity backfill and legacy scope', 'backup/restore0042 then upgrade0043 without changing43-prefix or assigning existing offers', 'backup/restore44 then upgrade45 preserving44-prefix and old outbound', 'two connections may contain same WA id; local duplicate and identity moves rejected', 'backup/restore45 then upgrade46 preserving45-prefix and status-only tenant FK', 'backup/restore46 then upgrade47 retaining private flow ownership and exact prefix', 'backup/restore48 and upgrade49 preserves prefix and limits legacy and scoped pixels to Purchase', '49-entry journal idempotence', 'unique indexes and scope/FK triggers', 'post0046 dump/restore with pending receipt', 'RPO tail-loss demonstrated without automatic production restore']
+  // CRM-003 A6: 0049 aborts atomically on dependent offer activity. The historical fixture keeps its active
+  // offer-scoped run (rows[1]); nothing is cancelled. The whole migration must roll back with an explanatory error.
+  const offerSchema = async client => (await client.query("SELECT json_build_object('trigger',EXISTS(SELECT 1 FROM pg_trigger WHERE tgname='validate_offer_run_scope'),'indexes',(SELECT count(*)::int FROM pg_indexes WHERE schemaname='crm' AND indexname IN ('flow_runs_active_contact_uq','flow_runs_active_chat_uq')),'frozen',(SELECT count(*)::int FROM pg_trigger WHERE tgname='offer_legacy_frozen' AND NOT tgisinternal)) s")).rows[0].s
+  const crmJournal = async client => (await client.query('SELECT hash,created_at FROM crm.__drizzle_migrations ORDER BY created_at')).rows
+  const before49 = path.join(dir, 'before0049.dump'); utility('pg_dump', ['-Fc', '--no-owner', '--dbname', b.url, '-f', before49]); utility('pg_restore', ['--list', before49])
+  const blocked = await create(); utility('pg_restore', ['--no-owner', '--exit-on-error', '--dbname', blocked.url, before49])
+  const blockedRuns = (await blocked.client.query('SELECT id,status,offer_scoped FROM crm.flow_runs ORDER BY id')).rows
+  assert.ok(blockedRuns.some(x => x.offer_scoped && ['running', 'waiting'].includes(x.status)), 'fixture must keep an active offer-scoped run')
+  await assert.rejects(migrateUrl(blocked.url, { set: 'crm' }), e => (e.cause?.code ?? e.code) === 'P0001' && /migração 0049 abortada: 1 run(s) de fluxo de oferta/.test(String(e.cause?.message ?? e.message)))
+  assert.deepEqual(await crmJournal(blocked.client), journalAfter)
+  assert.deepEqual(await offerSchema(blocked.client), { trigger: true, indexes: 2, frozen: 0 })
+  assert.deepEqual((await blocked.client.query('SELECT id,status,offer_scoped FROM crm.flow_runs ORDER BY id')).rows, blockedRuns)
+  await assert.rejects(migrateUrl(blocked.url, { set: 'crm' }), e => (e.cause?.code ?? e.code) === 'P0001')
+  assert.deepEqual(await crmJournal(blocked.client), journalAfter)
+  // Upgrade 49->50 without dependent activity: legacy offer history stays readable and frozen; one active run per contact.
+  const clean = await create()
+  await migrateUrl(clean.url, { set: 'wa' }); await migrateUrl(clean.url, { set: 'crm', folders: { crm: partial(49) } })
+  assert.deepEqual(await crmJournal(clean.client), journalAfter)
+  const cq = (sql, args) => clean.client.query(sql, args)
+  const cleanCompany = (await cq("INSERT INTO crm.companies(name,slug) VALUES('CI retire offers',$1) RETURNING id", ['retire-' + randomUUID()])).rows[0].id
+  const cleanConnection = (await cq("INSERT INTO crm.connections(company_id,session_id,name) VALUES($1,$2,'previously managed fake chip') RETURNING id", [cleanCompany, randomUUID()])).rows[0].id
+  const cleanFlow = (await cq("INSERT INTO crm.flows(company_id,name) VALUES($1,'ordinary flow') RETURNING id", [cleanCompany])).rows[0].id
+  const cleanContact = (await cq("INSERT INTO crm.contacts(company_id,name) VALUES($1,'Ordinary contact') RETURNING id", [cleanCompany])).rows[0].id
+  const chatOf = async () => (await cq('INSERT INTO crm.chats(company_id,contact_id,connection_id) VALUES($1,$2,$3) RETURNING id', [cleanCompany, cleanContact, cleanConnection])).rows[0].id
+  const cleanChat = await chatOf(), cleanChat2 = await chatOf()
+  const cleanRun = (await cq("INSERT INTO crm.flow_runs(company_id,flow_id,contact_id,chat_id,status,trigger) VALUES($1,$2,$3,$4,'waiting','{}') RETURNING id", [cleanCompany, cleanFlow, cleanContact, cleanChat])).rows[0].id
+  const legacyOffer = (await cq("INSERT INTO crm.offers(company_id,name,config) VALUES($1,'legacy offer history','{}') RETURNING id", [cleanCompany])).rows[0].id
+  await migrateUrl(clean.url, { set: 'crm' })
+  const journal50 = await crmJournal(clean.client)
+  assert.equal(journal50.length, 50); assert.deepEqual(journal50.slice(0, 49), journalAfter)
+  assert.deepEqual(await offerSchema(clean.client), { trigger: false, indexes: 1, frozen: 5 })
+  assert.deepEqual((await cq('SELECT id,name FROM crm.offers WHERE company_id=$1', [cleanCompany])).rows, [{ id: legacyOffer, name: 'legacy offer history' }])
+  await assert.rejects(cq("INSERT INTO crm.offers(company_id,name,config) VALUES($1,'new offer','{}')", [cleanCompany]), /offer_legacy_frozen/)
+  await assert.rejects(cq("UPDATE crm.offers SET name='changed' WHERE id=$1", [legacyOffer]), /offer_legacy_frozen/)
+  assert.equal((await cq('SELECT status FROM crm.flow_runs WHERE id=$1', [cleanRun])).rows[0].status, 'waiting')
+  await assert.rejects(cq("INSERT INTO crm.flow_runs(company_id,flow_id,contact_id,chat_id,status) VALUES($1,$2,$3,$4,'running')", [cleanCompany, cleanFlow, cleanContact, cleanChat2]), e => e.code === '23505')
+  await migrateUrl(clean.url, { set: 'crm' }); assert.deepEqual(await crmJournal(clean.client), journal50)
+  const after49 = path.join(dir, 'after0049.dump'); utility('pg_dump', ['-Fc', '--no-owner', '--dbname', clean.url, '-f', after49])
+  const restored50 = await create(); utility('pg_restore', ['--no-owner', '--exit-on-error', '--dbname', restored50.url, after49])
+  assert.deepEqual(await crmJournal(restored50.client), journal50)
+  assert.deepEqual(await offerSchema(restored50.client), { trigger: false, indexes: 1, frozen: 5 })
+  await assert.rejects(restored50.client.query("INSERT INTO crm.offers(company_id,name,config) VALUES($1,'after restore','{}')", [cleanCompany]), /offer_legacy_frozen/)
+  metrics.passed = ['CRM-003 0049 aborts atomically on an active offer-scoped run without cancelling it (journal 49, schema and runs unchanged, retry still aborts)', 'CRM-003 upgrade 49->50 preserves 49-prefix and legacy offer rows, freezes offer tables, drops offer guards, one active run per contact, idempotent rerun and dump/restore', 'backup/restore0038 with public dependency', 'one shared company and three existing member identities preserved', '0039->0042 valid opportunity backfill and legacy scope', 'backup/restore0042 then upgrade0043 without changing43-prefix or assigning existing offers', 'backup/restore44 then upgrade45 preserving44-prefix and old outbound', 'two connections may contain same WA id; local duplicate and identity moves rejected', 'backup/restore45 then upgrade46 preserving45-prefix and status-only tenant FK', 'backup/restore46 then upgrade47 retaining private flow ownership and exact prefix', 'backup/restore48 and upgrade49 preserves prefix and limits legacy and scoped pixels to Purchase', '49-entry journal idempotence', 'unique indexes and scope/FK triggers', 'post0046 dump/restore with pending receipt', 'RPO tail-loss demonstrated without automatic production restore']
   fs.writeFileSync(path.join(process.env.CRM_REPORT_DIR, 'migration-restore.json'), JSON.stringify(metrics, null, 2))
 } finally {
   for (const client of clients) await client.end()
