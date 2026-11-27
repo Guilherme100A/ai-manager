@@ -2,11 +2,12 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-export const TREE = '4ca23fc779974f3772dcf5e6aeb6f0604fde0e0c'
+export const TREE = 'b6082fd032570621878736058edf9158214733c4'
 // Historical immutable release accepted only as the currently installed source.
 // New artifacts must match TREE exactly; never accept arbitrary historical trees.
 export const INSTALLED_CRM_JOURNALS = new Map([
-  [TREE, 49],
+  [TREE, 50],
+  ['4ca23fc779974f3772dcf5e6aeb6f0604fde0e0c', 49],
   ['fcf5007316b6cb214e1a63d85532b28984997cde', 49],
   ['f9b91ba97ba578ec44b6c0f5bc33404f4004f795', 49],
   ['8d43f8aa65e4907c3af76975360199b64c38f5d8', 49],
@@ -99,10 +100,10 @@ export function validateManifest(m) {
   requireThat(m.image === `crm-shared-offers:${m.release}` && /^sha256:[a-f0-9]{64}$/.test(m.image_id), 'Invalid image identity')
   requireThat(m.platform === 'linux/amd64' && m.runtime === 'node:22-alpine', 'Release must use Alpine/musl dependencies')
   for (const k of ['images_sha256', 'spa_sha256']) requireThat(/^[a-f0-9]{64}$/.test(m[k]), 'Missing artifact checksum')
-  requireThat(Array.isArray(m.migrations) && m.migrations.length === 49, 'Full CRM migration contract required')
+  requireThat(Array.isArray(m.migrations) && m.migrations.length === 50, 'Full CRM migration contract required')
   m.migrations.forEach((x, i) => requireThat(x.idx === i && /^[a-f0-9]{64}$/.test(x.hash) && Number.isSafeInteger(x.when) && typeof x.tag === 'string', 'Invalid migration contract'))
-  requireThat(new Set(m.migrations.map(x => x.when)).size === 49 && new Set(m.migrations.map(x => x.tag)).size === 49, 'Duplicate migrations')
-  requireThat(m.migrations.slice(39).map(x => x.tag).join(',') === '0039_shared_offers,0040_offer_delivery_recovery,0041_offer_block_push,0042_offer_tenant_scope,0043_business_areas,0044_chat_wa_identity,0045_pending_message_status,0046_workspace_flow_sharing,0047_workspace_meta,0048_pixel_allowed_events', 'Unexpected migrations')
+  requireThat(new Set(m.migrations.map(x => x.when)).size === 50 && new Set(m.migrations.map(x => x.tag)).size === 50, 'Duplicate migrations')
+  requireThat(m.migrations.slice(39).map(x => x.tag).join(',') === '0039_shared_offers,0040_offer_delivery_recovery,0041_offer_block_push,0042_offer_tenant_scope,0043_business_areas,0044_chat_wa_identity,0045_pending_message_status,0046_workspace_flow_sharing,0047_workspace_meta,0048_pixel_allowed_events,0049_retire_offers', 'Unexpected migrations')
   return m
 }
 export function specFor(m, storage) {

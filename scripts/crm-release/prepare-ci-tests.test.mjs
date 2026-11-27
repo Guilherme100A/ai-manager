@@ -40,13 +40,14 @@ for (const initial of [undefined, '', 'other-fixture']) for (const cleanupFails 
   assert.equal(env.SHARED_OFFERS_COMPANY_ID, initial)
   assert.equal(Object.hasOwn(env, 'SHARED_OFFERS_COMPANY_ID'), initial !== undefined)
 })
-function report() { return { numTotalTests: 57, numPassedTests: 57, numFailedTests: 0, numPendingTests: 0, numTodoTests: 0, numFailedTestSuites: 0, testResults: [['shared-offers.test.ts', 16], [adaptedFile, 39], ['operational-ci.test.ts', 2]].map(([name, n]) => ({ name: '/ci/' + name, status: 'passed', assertionResults: Array.from({ length: n }, () => ({ status: 'passed' })) })) } }
+function report() { return { numTotalTests: 8, numPassedTests: 8, numFailedTests: 0, numPendingTests: 0, numTodoTests: 0, numFailedTestSuites: 0, testResults: [['crm003-regression.test.ts', 6], ['operational-ci.test.ts', 2]].map(([name, n]) => ({ name: '/ci/' + name, status: 'passed', assertionResults: Array.from({ length: n }, () => ({ status: 'passed' })) })) } }
 test('complete report accepted', () => assert.doesNotThrow(() => assertIntegrationComplete(report())))
 for (const [name, mutate] of [
-  ['real setup failure shape:18passed39pending0assertion failures', r => { r.numPassedTests = 18; r.numPendingTests = 39; r.numFailedTestSuites = 1; r.testResults[1].status = 'failed' }],
-  ['missing reviewer suite', r => r.testResults.splice(1, 1)],
-  ['reviewer assertion skipped despite forged totals', r => { r.testResults[1].assertionResults[0].status = 'skipped' }],
-  ['reviewer uncollected assertion', r => r.testResults[1].assertionResults.pop()],
+  ['real setup failure shape:18passed39pending0assertion failures', r => { r.numPassedTests = 2; r.numPendingTests = 5; r.numFailedTestSuites = 1; r.testResults[1].status = 'failed' }],
+  ['missing regression suite', r => r.testResults.splice(0, 1)],
+  ['regression assertion skipped despite forged totals', r => { r.testResults[1].assertionResults[0].status = 'skipped' }],
+  ['regression uncollected assertion', r => r.testResults[1].assertionResults.pop()],
   ['duplicate suite', r => { r.testResults[1] = r.testResults[0] }],
+  ['retired shared-offers suite instead of regression', r => { r.testResults[0].name = '/ci/shared-offers.test.ts' }],
   ['todo', r => { r.numTodoTests = 1 }],
 ]) test('report rejects ' + name, () => { const r = report(); mutate(r); assert.throws(() => assertIntegrationComplete(r)) })

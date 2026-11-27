@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/Guilherme100A/crm-copy.git",
   "base_sha": "acf78e2da49865afa06fe6a4cee77bcf0e888152",
-  "expected_tree": "4ca23fc779974f3772dcf5e6aeb6f0604fde0e0c",
+  "expected_tree": "b6082fd032570621878736058edf9158214733c4",
   "sanitization": {
     "excluded_files": [
       "scripts/elevenlabs-account-diagnose.ts",
@@ -28,7 +28,7 @@
     ],
     "reason": "Exclude unrelated operator scripts/private deployment context and audit-only harnesses; replace operational hosts in documentation and URL fixtures with reserved example.test hosts. Original local source preserved.",
     "baseline_tree": "539e4a6dac07e50188e418d0e1a3d669e5f6d687",
-    "final_tree": "4ca23fc779974f3772dcf5e6aeb6f0604fde0e0c"
+    "final_tree": "b6082fd032570621878736058edf9158214733c4"
   },
   "test_only_changes": [
     {
@@ -683,6 +683,121 @@
         "apps/web/src/i18n/es/facebook.json",
         "apps/web/src/i18n/pt-BR/facebook.json",
         "tests/acceptance/T005-R4/browser-discovery.mjs"
+      ]
+    },
+    {
+      "file": "27-remove-shared-offers-web-api.patch",
+      "description": "CRM-003 R1 P-B (crm-copy 9dc4088 over 6d2b093): removes the shared Offers web page/route/commercial dialog and the /api/offers API route; business areas gate via isBusinessAreasCompany. No migrations; tables untouched.",
+      "sha256": "76839c0ec976cd1bea6dc10c49f1012ddbf57ec632a135e5f536dfcc0c1bc4ac",
+      "bytes": 91900,
+      "files": [
+        "apps/api/src/middleware/business-area.ts",
+        "apps/api/src/routes/auth/shared-offers-profile.db.unit.test.ts",
+        "apps/api/src/routes/business-areas/index.ts",
+        "apps/api/src/routes/flow-runs/funnel.ts",
+        "apps/api/src/routes/flow-runs/index.ts",
+        "apps/api/src/routes/index.ts",
+        "apps/api/src/routes/offers/index.ts",
+        "apps/web/src/app/access.ts",
+        "apps/web/src/app/nav.ts",
+        "apps/web/src/features/business-areas/areas.tsx",
+        "apps/web/src/features/flow-editor/canvas/editor.tsx",
+        "apps/web/src/features/flows/commercial-dialog.tsx",
+        "apps/web/src/features/flows/flows-page.tsx",
+        "apps/web/src/features/offers/page.tsx",
+        "apps/web/src/features/offers/style.css",
+        "apps/web/src/i18n/en/shell.json",
+        "apps/web/src/i18n/es/shell.json",
+        "apps/web/src/i18n/pt-BR/shell.json",
+        "apps/web/src/lib/session.ts",
+        "apps/web/src/routeTree.gen.ts",
+        "apps/web/src/routes/offers.tsx"
+      ]
+    },
+    {
+      "file": "28-remove-shared-offers-mcp-catalog.patch",
+      "description": "CRM-003 R1 MCP (crm-copy 59cf8b6 over 6d2b093): removes Offers tools and docs from the MCP catalog; adds catalog-sem-ofertas unit test and T125/mcp-sem-ofertas acceptance test (replaces mcp-offers). No migrations.",
+      "sha256": "c27d806f1fc47e2ce45e418abc4d2a2af24d85aa2498b50162fbf6c874bff538",
+      "bytes": 60667,
+      "files": [
+        "docs/mcp-chip-pairing.md",
+        "docs/mcp-meta-workspaces.md",
+        "docs/mcp-open-conversation.md",
+        "docs/mcp-shared-offers.md",
+        "docs/shared-offers.md",
+        "packages/core/src/mcp/server.ts",
+        "packages/core/src/mcp/tools/business-areas.ts",
+        "packages/core/src/mcp/tools/catalog-sem-ofertas.unit.test.ts",
+        "packages/core/src/mcp/tools/conversations.ts",
+        "packages/core/src/mcp/tools/index.ts",
+        "packages/core/src/mcp/tools/meta-workspaces.ts",
+        "packages/core/src/mcp/tools/offers.ts",
+        "packages/core/src/mcp/tools/offers.unit.test.ts",
+        "packages/core/src/mcp/tools/shared.ts",
+        "tests/acceptance/T125/business-areas.test.ts",
+        "tests/acceptance/T125/mcp-offers.test.ts",
+        "tests/acceptance/T125/mcp-sem-ofertas.test.ts"
+      ]
+    },
+    {
+      "file": "29-remove-shared-offers-mcp-import-fix.patch",
+      "description": "CRM-003 R1 MCP follow-up (crm-copy 59cf8b6..8cd17d4, includes 2de9752): server.ts imports isBusinessAreasCompany from ../business-areas/policy. No migrations.",
+      "sha256": "34dabd5f0fc99dbaa64c415215ad4506183ff5e1fa893e4d0ebd2ee8e049cf42",
+      "bytes": 1095,
+      "files": [
+        "packages/core/src/mcp/server.ts"
+      ]
+    },
+    {
+      "file": "30-retire-shared-offers-runtime.patch",
+      "description": "CRM-003 R1 runtime (crm-copy 13b396e over 6d2b093): retires shared offers in core/db/worker; business-areas policy; migration 0049_retire_offers aborts on pending offer outbox/notifications, active offer-scoped runs, recent offer charges or duplicate active runs per contact; drops offer guards/indexes, recreates one active run per contact and freezes legacy offer tables read-only. No DROP TABLE, no data deletion.",
+      "sha256": "66961c8d361f594e7ebed13e4520b114c6bf8fefc3a244ed29f6980a449b15ac",
+      "bytes": 103290,
+      "files": [
+        "apps/worker/src/boot/production-worker.ts",
+        "apps/worker/src/boot/production.ts",
+        "apps/worker/src/jobs/meta-capi/index.ts",
+        "packages/core/src/auth/auth-service.ts",
+        "packages/core/src/business-areas/policy.ts",
+        "packages/core/src/business-areas/policy.unit.test.ts",
+        "packages/core/src/business-areas/service.ts",
+        "packages/core/src/chats/ingest/chat-ingest.ts",
+        "packages/core/src/flows/engine/control.ts",
+        "packages/core/src/flows/engine/offer-scope.db.unit.test.ts",
+        "packages/core/src/flows/engine/runner.ts",
+        "packages/core/src/flows/nodes/crm/handlers.ts",
+        "packages/core/src/flows/nodes/payment/index.ts",
+        "packages/core/src/flows/nodes/pixel/index.ts",
+        "packages/core/src/flows/triggers/triggers.ts",
+        "packages/core/src/index.ts",
+        "packages/core/src/meta-ads/mutations/service.ts",
+        "packages/core/src/meta-ads/sales-join/service.ts",
+        "packages/core/src/meta-capi/ad-lead.ts",
+        "packages/core/src/meta-capi/pixels.ts",
+        "packages/core/src/meta-capi/sales.ts",
+        "packages/core/src/offers/policy.ts",
+        "packages/core/src/offers/policy.unit.test.ts",
+        "packages/core/src/offers/service.ts",
+        "packages/core/src/payments/keys/service.ts",
+        "packages/core/src/payments/webhooks/service.ts",
+        "packages/core/src/support-access/support-access.db.unit.test.ts",
+        "packages/db/drizzle/crm/0049_retire_offers.sql",
+        "packages/db/drizzle/crm/meta/_journal.json",
+        "packages/db/src/retire-offers-migration.unit.test.ts",
+        "packages/db/src/schema/crm/flows.ts",
+        "packages/db/src/schema/crm/offers.ts"
+      ]
+    },
+    {
+      "file": "31-crm003-removal-regression-tests.patch",
+      "description": "CRM-003 R1 QA (crm-copy 2e4f7b9 over 6d2b093, Lince): T125/crm003-regression (6: 5 + A5 historic pixel/XPag edit/rotate/delete) seeded with historic offer data BEFORE 0049 via crm003-upgrade-system (real migrator, journal through 0048, then 0049 twice for idempotence), and crm003-browser (2 widths); local fake Spy upstream keeps list_spy_offers reachable. T125/business-areas adapted to retired offers (15 -> 10: offer-only cases removed or turned into absence assertions; area behaviour kept; per-area flow-run isolation asserted in flows start private). Test-only.",
+      "sha256": "02845395ca2dc9a0f2a63bd65480ad4a23eaff99b82dbb373c2ff6a4d826bcef",
+      "bytes": 58696,
+      "files": [
+        "tests/acceptance/T125/business-areas.test.ts",
+        "tests/acceptance/T125/crm003-browser.test.ts",
+        "tests/acceptance/T125/crm003-regression.test.ts",
+        "tests/acceptance/T125/crm003-upgrade-system.ts"
       ]
     }
   ],

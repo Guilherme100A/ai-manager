@@ -1,0 +1,22 @@
+diff --git a/packages/core/src/mcp/server.ts b/packages/core/src/mcp/server.ts
+index ae9115e0cab6302e0804ccfb8b9ac8170ae5e2be..84ad17c1532b754e26d5c1f7b782a898f7f30505 100644
+--- a/packages/core/src/mcp/server.ts
++++ b/packages/core/src/mcp/server.ts
+@@ -9,7 +9,7 @@ import { z } from 'zod'
+ import { CHAT_STATUSES, chats, connections, contacts, FLOW_STATUSES, flows, type Database } from '@crm/db'
+ import { registerAllApiTools } from './tools/index'
+ import type { McpApiContext } from './tools/shared'
+-import { isSharedOffersCompany } from '../offers/policy'
++import { isBusinessAreasCompany } from '../business-areas/policy'
+ import { BusinessAreasService, workspaceFlowFilter } from '../business-areas/service'
+ 
+ export const MCP_SERVER_INFO = { name: 'leonas-crm', version: '1.0.0' } as const
+@@ -161,7 +161,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
+     },
+   )
+ 
+-  if (ctx.api) registerAllApiTools(server, ctx.api, isSharedOffersCompany(companyId))
++  if (ctx.api) registerAllApiTools(server, ctx.api, isBusinessAreasCompany(companyId))
+   return server
+ }
+ 

@@ -28,7 +28,7 @@ it('real local read-only MCP initializes, lists flows, denies mutation and revok
     expect((await rpc('tools/list')).status).toBe(401)
   } finally { await t.c.delete('/api/mcp_credentials/' + made.body.mcp_credential.id) }
 })
-it('one administrator account supports three simultaneous browser sessions, shared chips and Offers; empty gate denies access', async () => {
+it('CRM-003: panel SSO opens the CRM in three sessions of one account without Offers (gate set and empty), chip visible to all, logout of one preserves the others', async () => {
   const panelDir = process.env.PANEL_SOURCE_DIR!, { createTempDatabase, createDb } = await import(panelDir + '/packages/db/src/index.ts'), { createApp } = await import(panelDir + '/apps/api/src/app.ts')
   const tmp = await createTempDatabase({ migrate: true, prefix: 'crm_ci_panel' }), db = createDb(tmp.url)
   const username = 'ci-' + randomBytes(5).toString('hex'), password = 'CI-' + randomBytes(10).toString('hex')
@@ -61,8 +61,10 @@ it('one administrator account supports three simultaneous browser sessions, shar
       const context = await browser.newContext(), page = await context.newPage()
       await page.goto(base + '/#/login'); await page.getByTestId('login-username').fill(username); await page.getByTestId('login-password').fill(password); await page.getByTestId('login-submit').click()
       const frame = page; await frame.getByTestId('nav-item-chats').waitFor()
+      // Offers are retired: with the legacy gate set or empty, no nav item and an authenticated 404 on the legacy API.
+      expect(await frame.getByTestId('nav-item-offers').count()).toBe(0)
+      expect((await page.request.get(base + '/crm/api/offers')).status()).toBe(404)
       if (enabled) {
-        await frame.getByTestId('nav-item-offers').click(); await frame.getByRole('heading', { name: 'Ofertas compartilhadas' }).waitFor()
         const contexts = [context]
         // Same panel username/password in three independent browsers, not three users.
         for (let i = 1; i < 3; i++) {
@@ -70,7 +72,7 @@ it('one administrator account supports three simultaneous browser sessions, shar
           contexts.push(other)
           const p = await other.newPage()
           await p.goto(base + '/#/login'); await p.getByTestId('login-username').fill(username); await p.getByTestId('login-password').fill(password); await p.getByTestId('login-submit').click()
-          const f = p; await f.getByTestId('nav-item-offers').click(); await f.getByRole('heading', { name: 'Ofertas compartilhadas' }).waitFor()
+          await p.getByTestId('nav-item-chats').waitFor(); expect(await p.getByTestId('nav-item-offers').count()).toBe(0)
           await p.screenshot({ path: join(process.env.CRM_REPORT_DIR!, `same-account-session-${i + 1}.png`), fullPage: true })
         }
         const profiles = await Promise.all(contexts.map(async c => { const r = await c.request.get(base + '/crm/api/auth/profile'); expect(r.status()).toBe(200); return r.json() }))
@@ -82,19 +84,17 @@ it('one administrator account supports three simultaneous browser sessions, shar
         const made = await context.request.post(base + '/crm/api/connections', { headers: writeHeaders, data: { name: 'Shared chip for one admin account' } }); expect(made.status(), await made.text()).toBe(201)
         const connection = (await made.json()).connection
         for (const c of contexts) {
-          const resources = await c.request.get(base + '/crm/api/offers/resources'); expect(resources.status()).toBe(200)
-          expect((await resources.json()).connections.map((x: any) => x.id)).toContain(connection.id)
-          expect((await c.request.get(base + '/crm/api/offers')).status()).toBe(200)
-          expect((await c.request.put(base + '/crm/api/offers/chips/' + connection.id, { headers: writeHeaders, data: { enabled: true } })).status()).toBe(200)
+          const listed = await c.request.get(base + '/crm/api/connections'); expect(listed.status(), await listed.text()).toBe(200)
+          expect(JSON.stringify(await listed.json())).toContain(connection.id)
+          expect((await c.request.get(base + '/crm/api/offers')).status()).toBe(404)
         }
         // Signing out one person must not revoke the other two sessions.
         expect((await contexts[1]!.request.post(base + '/crm/api/auth/logout', { headers: writeHeaders, data: {} })).status()).toBe(200)
-        expect((await contexts[1]!.request.get(base + '/crm/api/offers')).status()).toBe(401)
-        for (const c of [contexts[0]!, contexts[2]!]) expect((await c.request.get(base + '/crm/api/offers')).status()).toBe(200)
+        expect((await contexts[1]!.request.get(base + '/crm/api/auth/profile')).status()).toBe(401)
+        for (const c of [contexts[0]!, contexts[2]!]) expect((await c.request.get(base + '/crm/api/auth/profile')).status()).toBe(200)
         await contexts[1]!.close(); await contexts[2]!.close()
       }
-      else { expect(await frame.getByTestId('nav-item-offers').count()).toBe(0); expect((await page.request.get(base + '/crm/api/offers')).status()).toBe(404) }
-      await page.screenshot({ path: join(process.env.CRM_REPORT_DIR!, enabled ? 'sso-offers-enabled.png' : 'sso-gate-empty.png'), fullPage: true }); await context.close()
+      await page.screenshot({ path: join(process.env.CRM_REPORT_DIR!, enabled ? 'sso-gate-set-no-offers.png' : 'sso-gate-empty.png'), fullPage: true }); await context.close()
     }
   } finally { await browser.close(); server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())); await db.$client.end(); await tmp.drop(); process.env.SHARED_OFFERS_COMPANY_ID = '' }
 })

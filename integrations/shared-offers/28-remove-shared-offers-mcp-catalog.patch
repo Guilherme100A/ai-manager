@@ -1,0 +1,709 @@
+diff --git a/docs/mcp-chip-pairing.md b/docs/mcp-chip-pairing.md
+index f7fa30ab8417a60acbf414aa9861672ef97820bb..87ace15ff21cc50b6799bc4b94651a531e8bc932 100644
+--- a/docs/mcp-chip-pairing.md
++++ b/docs/mcp-chip-pairing.md
+@@ -69,7 +69,7 @@ restaurar automaticamente sessões/filas.
+ ## Integração e validação
+ 
+ O componente exporta `connectionsTools`; o integrador deve adicioná-lo ao
+-agregador `packages/core/src/mcp/tools/index.ts`, junto das ferramentas de Ofertas.
++agregador `packages/core/src/mcp/tools/index.ts`.
+ Esse arquivo e o manifesto final da distribuição pertencem à integração única.
+ O worker e o CRM precisam ser publicados no mesmo pacote compatível.
+ 
+diff --git a/docs/mcp-meta-workspaces.md b/docs/mcp-meta-workspaces.md
+index 7a351d3f88c32ca7d4a93789e4bf72e7205bc54a..94780b6897a34195f75c92f7a30b9b86d5ff2fd4 100644
+--- a/docs/mcp-meta-workspaces.md
++++ b/docs/mcp-meta-workspaces.md
+@@ -6,13 +6,13 @@ No mesmo login do CRM, Admin 1, Admin 2 e Admin 3 têm vínculos próprios de pe
+ 2. Consulte `get_workspace_meta_status`. `configured` verifica a presença da configuração do app. `https_callback` verifica o protocolo do retorno. Os dados desse status vêm do CRM.
+ 3. Rode `start_workspace_meta_oauth` com o workspace. Abra `oauth_url` em um navegador com a sessão do mesmo usuário do CRM e autorize no Facebook. O link é de uso único e expira em 15 minutos. Para reconectar um perfil do workspace, informe também seu `profile_id`.
+ 4. Consulte o status de novo, copie o ID do perfil recém autorizado e rode `list_workspace_meta_ad_accounts`. Essa consulta chega à Meta. Escolha a conta e use `link_workspace_meta_ad_account` com `profile_id` e `fb_account_id` no formato `act_...`.
+-5. Use o UUID CRM da conta em `list_workspace_meta_pixels`. Selecione o dataset dessa lista e rode `link_workspace_meta_pixel` com `ad_account_id` e o `pixel_id` numérico. Nas ofertas, use os UUIDs CRM devolvidos por cada vínculo.
++5. Use o UUID CRM da conta em `list_workspace_meta_pixels`. Selecione o dataset dessa lista e rode `link_workspace_meta_pixel` com `ad_account_id` e o `pixel_id` numérico.
+ 
+ A conexão requer app Meta configurado e autorização da conta para os ativos selecionados. No Compose, os campos são `CRM_META_APP_ID`, `CRM_META_APP_SECRET` e, quando necessário, `CRM_META_OAUTH_REDIRECT_URI`. Configure o segredo no ambiente protegido do servidor. O retorno precisa usar HTTPS, apontar para a rota publicada `/api/meta/oauth/callback` com o prefixo do CRM e coincidir com a URL registrada no app Meta. A autorização usa o navegador. Nenhuma ferramenta recebe senha, código OAuth ou token Facebook como argumento para criar esses vínculos.
+ 
+ O vínculo do pixel usa uma leitura de `/act_<id>/adspixels` para confirmar acesso ao ativo. O CRM guarda uma cópia cifrada da credencial OAuth. Se a Meta exigir outra credencial para a Conversions API, o editor do pixel aceita uma credencial própria. Depois de reautorizar o Facebook, `refresh_oauth_token: true` substitui a credencial do pixel pela do perfil. A consulta e o vínculo não validam entrega pela Conversions API. Automações globais de venda e Lead ficam desligadas para pixels dos workspaces.
+ 
+-Ofertas novas ou editadas em um workspace exigem conta e pixel desse workspace, com o pixel vinculado à conta selecionada. Fluxos privados podem usar o pixel do próprio workspace. Fluxos compartilhados usam o destino da oferta quando rodados por uma oferta. Cadastros anteriores ficam em Geral e os destinos históricos das ofertas são preservados. Uma BM declarada continua um identificador informado pelo usuário.
++Fluxos privados podem usar o pixel do próprio workspace. Cadastros anteriores ficam em Geral. Uma BM declarada continua um identificador informado pelo usuário.
+ 
+ Referências: [Marketing API](https://developers.facebook.com/docs/marketing-api/reference/v27.0/) e [pixels por conta de anúncio](https://developers.facebook.com/documentation/ads-commerce/marketing-api/reference/ad-account/adspixels.md).
+ 
+diff --git a/docs/mcp-open-conversation.md b/docs/mcp-open-conversation.md
+index 67bd00bf943965ab6c30a81afbc06299184b11f4..024e1b0a057e60d53e604ab67cb6527dcdf215af 100644
+--- a/docs/mcp-open-conversation.md
++++ b/docs/mcp-open-conversation.md
+@@ -24,8 +24,8 @@ mensagens. A transacao usa os indices unicos existentes; nao ha nova migration.
+ 
+ Um chat antigo desse contato em outro chip permanece naquela conexao. Nao ha
+ troca automatica, reabertura de resolvido, desbloqueio, alteracao de consentimento,
+-opt-out, nome de contato existente ou atribuicao a area/oferta. O chip segue
+-compartilhado; contexto de area deve ser explicitado na operacao de fluxo/oferta.
++opt-out, nome de contato existente ou atribuicao a area. O chip segue
++compartilhado; contexto de area deve ser explicitado na operacao de fluxo.
+ Conexoes de outra empresa, fora do escopo, desvinculadas ou em exclusao sao
+ recusadas antes de criar contato. Chip fechado pode ter chat preparado; isso nao
+ confirma conexao nem remove os bloqueios de envio existentes.
+@@ -38,4 +38,4 @@ automatico, e nenhum gateway, cobranca ou fluxo e chamado.
+ Enviar e uma operacao separada, que exige pedido explicito: `send_message` usa
+ `id=chat_id`, `text` e `client_message_id` estavel para evitar envio duplicado.
+ `trigger_flow` usa `chat_id` e mantem suas validacoes de fluxo, area e publicacao.
+-Esta ferramenta nao ativa rascunhos, ofertas ou automacoes para contornar regras.
++Esta ferramenta nao ativa rascunhos ou automacoes para contornar regras.
+diff --git a/docs/mcp-shared-offers.md b/docs/mcp-shared-offers.md
+deleted file mode 100644
+index 971cb70f6910face19bacb8424057e0d24dfd406..0000000000000000000000000000000000000000
+--- a/docs/mcp-shared-offers.md
++++ /dev/null
+@@ -1,15 +0,0 @@
+-# MCP de Ofertas compartilhadas
+-
+-O mesmo servidor MCP do CRM expõe Ofertas para a empresa habilitada no servidor. As três pessoas continuam usando a mesma conta administradora; o MCP não cria novos usuários. Cada cliente pode autorizar sua própria sessão OAuth no mesmo conector.
+-
+-Em Configurações → MCP, crie um conector OAuth chamado **Ofertas compartilhadas**. Use acesso de escrita para configurar ofertas ou leitura para consultas. Copie a URL específica `/api/mcp/<id>` para o cliente de IA e entre com a conta do painel via SSO. Tokens, senhas e chaves não devem ser incluídos em conversas ou URLs.
+-
+-Ferramentas de consulta: `list_offers`, `get_offer`, `get_offer_resources`, `get_offer_results` e `list_conversation_offer_opportunities`. As ofertas do CRM são diferentes das capturadas pela Sonda (`list_spy_offers`).
+-
+-Ferramentas de configuração: `create_offer`, `update_offer` e `set_offer_connection_mode`. Consulte os recursos reais antes de criar e leia a oferta antes de editar. Uma oferta nova fica inativa quando `active` é omitido. A atualização exige a configuração completa e `active` explícito. Custos estão em centavos e exigem identificação; relatórios mantêm moedas distintas separadas.
+-
+-Ativar uma oferta ou a modalidade do chip muda o tratamento de novas mensagens: faça apenas por pedido explícito. Essas ferramentas não iniciam fluxos, não selecionam manualmente uma oferta para uma conversa, não pareiam chips e não enviam mensagens ou cobranças por si só.
+-
+-O catálogo respeita o nível da credencial e as permissões atuais do dono. Fora da empresa habilitada, com gate vazio/inválido ou sem vínculo do dono, as ferramentas de Ofertas não aparecem. Cada chamada continua passando pela API autenticada, com validação, isolamento da empresa e auditoria. Revogar o conector bloqueia o acesso; sair de uma sessão do navegador não revoga as outras pessoas.
+-
+-Para conferir a conexão: inicialize o MCP, execute `tools/list`, consulte `get_offer_resources` e `list_offers`. Não ative automações nem crie cobranças para testar acesso. A credencial de teste deve ser revogada ao final.
+diff --git a/docs/shared-offers.md b/docs/shared-offers.md
+deleted file mode 100644
+index 66953cd9916d1d58c4b703346ebcceefaa47fa18..0000000000000000000000000000000000000000
+--- a/docs/shared-offers.md
++++ /dev/null
+@@ -1,33 +0,0 @@
+-# Ofertas com chips compartilhados
+-
+-A modalidade é opt-in por conexão em **Ofertas → Ativar modalidade de ofertas por chip**. A lista de chips permitidos de cada oferta não implica exclusividade: diversas ofertas e responsáveis podem selecionar a mesma conexão. Recursos e responsáveis são validados na empresa ativa; filtros de responsável são apenas filtros de relatório.
+-
+-## Origem e contexto
+-
+-O vínculo do anúncio nativo (`source_id`) ou do link rastreável é configurado na oferta. Um código de clique precisa ter sido ligado exatamente ao contato; proximidade de tempo não resolve uma oferta. Se anúncio nativo e link estiverem presentes, ambos precisam resolver inequivocamente a mesma oferta, incluindo o caso em que o anúncio é desconhecido/inativo. Sem resolução, o chat permanece no atendimento, sem disparo arbitrário de oferta.
+-
+-A escolha manual fica na página Ofertas, na seção de conversa. É uma substituição explícita do contexto do chat e não confirma origem publicitária. Novas mensagens não trocam silenciosamente uma oferta com run ativo. Os gatilhos legados não iniciam runs nesse chip; o início de runs nesse modo exige uma oportunidade válida.
+-
+-A oportunidade congela responsável, produto, moeda, recursos, versão publicada, chip, evidência e identificadores de tracking daquele toque. Não consulta o último anúncio/clique global do contato para enviar eventos. `connection_flow` propaga o identificador da oportunidade. As identidades de destino são lidas sob trava durante a criação do snapshot; triggers impedem trocar dataset/página/WABA ou client_id de registros já referenciados. Para outra identidade, crie outro registro; rotação de segredos continua possível sem copiar segredos para snapshots. A exclusão de destinos referenciados também é bloqueada.
+-
+-## Aprovação e entrega
+-
+-O callback é autenticado pela integração e o processamento seleciona a cobrança também por integration_id. Moeda divergente e valor confirmado divergente de uma cobrança fechada de oferta são rejeitados. A confirmação registra a venda e o Purchase antes das decisões de listener/TTL: um callback tardio continua válido mesmo com o run antigo cancelado.
+-
+-Venda e tarefa da outbox são gravadas na mesma transação Postgres. O worker varre as tarefas persistidas e as entrega ao BullMQ; indisponibilidade de Redis não apaga a intenção de envio. Um reinício reencontra as pendências. O event_id de Purchase é `sale-<id>`; o bloco Pixel Purchase fica adiado para essa origem canônica, e o broadcast legado de vendas não processa vendas de ofertas/chips geridos. Os outros eventos do bloco Pixel entram na outbox com destino/evidência da oportunidade.
+-
+-`register_approved_sale` reutiliza a venda já confirmada da oportunidade. Sem cobrança, alcançar esse bloco é a condição explícita de aprovação e cria venda + outbox. Se existir cobrança ainda não confirmada, lança erro visível em vez de aprová-la artificialmente. Não usar esse bloco para confirmar apenas a criação de uma cobrança.
+-
+-Respostas 429/500/200 sem aceite continuam pendentes; retries mantêm ID e payload. Uma reserva de envio interrompida por crash pode ser retomada depois de 60 segundos com o mesmo ID. Só `sent` no log CAPI confirma aceite HTTP; não comprova correspondência, atribuição ou aprendizado pela Meta.
+-
+-## Concorrência e relatórios
+-
+-Runs novos com chat têm exclusividade por empresa/chat; runs sem chat mantêm exclusividade por contato. O início usa trava por contato para preservar o conflito com um run legado sem chat. Respostas, cancelamento, gatilhos, início manual, webhook e disparos em massa passam o chat quando disponível.
+-
+-Resultados agrupam por oferta/responsável histórico e moeda. Não somam BRL e MXN. Lucro estimado é calculado somente quando um custo por venda identificado foi declarado no snapshot. Não há rateio automático de gasto de conta compartilhada, nem taxa XPag inventada. Custos de mídia/operacionais podem continuar incompletos.
+-
+-## Migração (somente após autorização de publicação)
+-
+-A migração `0039_shared_offers.sql` é aditiva, exceto pela substituição do índice ativo por contato por índices parciais de chat e legado sem chat. Não cria ofertas, não ativa conexões e não modifica dados de produção. O boot habitual da API/worker aplica as migrações; nesta tarefa isso ocorreu somente nos bancos descartáveis dos testes. Não executar reset/seed em banco existente. Fazer backup e aplicar a versão aprovada do código/API/worker em conjunto, com posterior verificação publicada, apenas quando o usuário autorizar.
+-
+-Os ensaios locais usam apenas HTTP Meta/XPag fake e não autorizam envio real. O contrato WhatsApp com somente page_id continua não validado externamente.
+diff --git a/packages/core/src/mcp/server.ts b/packages/core/src/mcp/server.ts
+index 2fe91827b6e07c23b2acc04c407f5ba8c67eeb0c..ae9115e0cab6302e0804ccfb8b9ac8170ae5e2be 100644
+--- a/packages/core/src/mcp/server.ts
++++ b/packages/core/src/mcp/server.ts
+@@ -38,10 +38,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
+     : ctx.api.access === 'write'
+       ? 'CRM da empresa: contatos, conversas, fluxos (criar, editar, validar, simular, ativar), funil, vendas, pixels da Meta, integrações de pagamento (XPag) e métricas. Ações rodam com as permissões do usuário dono da credencial. Antes de editar um fluxo, leia-o com get_flow e consulte get_flow_block_catalog; valide antes de ativar.'
+       : 'Leitura do CRM da empresa: contatos, conversas, fluxos, funil, vendas, pixels, integrações de pagamento e métricas, com as permissões do usuário dono da credencial. Credencial só leitura: nada é alterado.'
+-  const offersInstruction = ctx.api && isSharedOffersCompany(companyId)
+-    ? ' Ofertas compartilhadas: consulte get_offer_resources e leia get_offer antes de configurar. Ofertas do CRM são diferentes da Sonda. Escrita depende da credencial e permissões. Ativar oferta ou modalidade de chip exige pedido explícito; não faça disparos ou cobranças para testar.'
+-    : ''
+-  const server = new McpServer(MCP_SERVER_INFO, { instructions: instructions + offersInstruction })
++  const server = new McpServer(MCP_SERVER_INFO, { instructions })
+ 
+   server.registerTool(
+     'list_contacts',
+diff --git a/packages/core/src/mcp/tools/business-areas.ts b/packages/core/src/mcp/tools/business-areas.ts
+index d393b72c782a1903f3a5b6bc5548dbe31417a208..1e2f17d6e67d1f6d787f2e8fd92a88e0c7e2f1b5 100644
+--- a/packages/core/src/mcp/tools/business-areas.ts
++++ b/packages/core/src/mcp/tools/business-areas.ts
+@@ -7,7 +7,7 @@ export const businessAreasTools = [
+     input: { flow_id: UUID, confirm: z.literal(true) },
+     run: async ({ flow_id }, api) => fromApi(await api.request('POST', `/api/flows/${flow_id}/share-workspace`, { body: {} })) }),
+   tool({ name: 'list_business_areas', title: 'Listar áreas Admin 1/2/3', perm: 'settings.products.view',
+-    description: 'Três áreas de negócio dentro da MESMA conta. Retorna IDs, nomes e BM declarada; não são identidades pessoais ou novos logins. Use business_area_id nas ferramentas de ofertas; os recursos são compartilhados.',
++    description: 'Três áreas de negócio dentro da MESMA conta. Retorna IDs, nomes e BM declarada; não são identidades pessoais ou novos logins. Use business_area_id nas ferramentas de fluxos; os recursos são compartilhados.',
+     run: async (_, api) => fromApi(await api.request('GET', '/api/business-areas')) }),
+   tool({ name: 'initialize_business_areas', title: 'Criar três áreas de negócio', perm: 'settings.products.edit', kind: 'write',
+     description: 'Cria Admin 1/2/3 sem mover cadastros existentes. Idempotente; não cria usuários, chips ou credenciais externas.',
+@@ -19,8 +19,4 @@ export const businessAreasTools = [
+   tool({ name: 'get_business_area_resource_catalog', title: 'Recursos disponíveis no workspace', perm: 'settings.products.edit', areaScoped: true,
+     description: 'Catálogo com os recursos da empresa e os fluxos disponíveis no workspace. Retorna IDs e nomes.',
+     run: async (_, api) => fromApi(await api.request('GET', '/api/business-areas/catalog')) }),
+-  tool({ name: 'adopt_offer_business_area', title: 'Atribuir oferta existente à área', perm: 'settings.products.edit', kind: 'write',
+-    description: 'Com confirmação explícita, move apenas uma oferta de Geral ao workspace escolhido. Os recursos continuam compartilhados. Operação atômica; recusa conflitos. Preserva destinos, status, execuções e snapshots históricos; não inicia fluxo nem envia mensagens.',
+-    input: { id: UUID, offer_id: UUID, confirm: z.literal(true) },
+-    run: async ({ id, ...body }, api) => fromApi(await api.request('POST', `/api/business-areas/${id}/adopt-offer`, { body })) }),
+ ]
+diff --git a/packages/core/src/mcp/tools/catalog-sem-ofertas.unit.test.ts b/packages/core/src/mcp/tools/catalog-sem-ofertas.unit.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..01b6ce449ea51d91b53cc5bb46ede3a4c3a68df9
+--- /dev/null
++++ b/packages/core/src/mcp/tools/catalog-sem-ofertas.unit.test.ts
+@@ -0,0 +1,92 @@
++import { Client } from '@modelcontextprotocol/sdk/client/index.js'
++import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import type { PermissionKey } from '@crm/shared'
++import type { Database } from '@crm/db'
++import { createMcpServer } from '../server'
++import type { McpApiRequest } from './shared'
++
++const COMPANY = '3f1b2c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d'
++const ID = '4f1b2c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d'
++const REMOVED = ['list_offers', 'get_offer', 'get_offer_resources', 'get_offer_results', 'create_offer', 'update_offer', 'set_offer_connection_mode', 'list_conversation_offer_opportunities', 'adopt_offer_business_area']
++const AREAS = ['list_business_areas', 'initialize_business_areas', 'configure_business_area', 'get_business_area_resource_catalog', 'share_workspace_flow']
++const ALL: PermissionKey[] = ['settings.products.view', 'settings.products.edit', 'chat.view', 'flows.view', 'flows.edit']
++const closers: (() => Promise<void>)[] = []
++afterEach(async () => { await Promise.all(closers.splice(0).map(close => close())); vi.unstubAllEnvs() })
++
++async function connect(opts: { gate?: boolean; admin?: boolean; access?: 'read' | 'write'; perms?: PermissionKey[] } = {}) {
++  const { gate = true, admin = true, access = 'write', perms = ALL } = opts
++  vi.stubEnv('SHARED_OFFERS_COMPANY_ID', gate ? COMPANY : '')
++  const calls: { method: string; path: string; req?: McpApiRequest }[] = []
++  const api = { request: async (method: string, path: string, req?: McpApiRequest) => { calls.push({ method, path, req }); return { status: 200, body: { ok: true } as unknown } } }
++  const server = createMcpServer({ db: {} as Database, companyId: COMPANY, api: { access, perms: new Set(perms), api: api as never, businessAreasAdmin: admin } })
++  const client = new Client({ name: 'client', version: '1' }), [a, b] = InMemoryTransport.createLinkedPair()
++  await Promise.all([server.connect(a), client.connect(b)])
++  closers.push(async () => { await client.close(); await server.close() })
++  return { client, calls, names: async () => (await client.listTools()).tools.map(t => t.name), call: (name: string, args: Record<string, unknown> = {}) => client.callTool({ name, arguments: args }) }
++}
++
++describe('catálogo MCP sem Ofertas', () => {
++  it.each([
++    ['empresa de áreas + dono, escrita', { gate: true, admin: true, access: 'write' as const }],
++    ['empresa de áreas + dono, leitura', { gate: true, admin: true, access: 'read' as const }],
++    ['empresa de áreas sem vínculo do dono', { gate: true, admin: false }],
++    ['empresa fora do gate', { gate: false, admin: false }],
++  ])('descoberta (tools/list) não anuncia nenhuma ferramenta de oferta: %s', async (_, opts) => {
++    const { names } = await connect(opts)
++    const found = await names()
++    expect(found.filter(n => REMOVED.includes(n))).toEqual([])
++    expect(found.filter(n => /offer/.test(n) && !n.includes('spy'))).toEqual([])
++    for (const keep of ['list_contacts', 'list_flows', 'list_conversations', 'get_conversation', 'list_spy_offers']) expect(found).toContain(keep)
++    if (!('access' in opts && opts.access === 'read')) expect(found).toContain('capture_spy_offer')
++  })
++
++  it('instruções e esquemas não citam Ofertas compartilhadas nem ferramentas removidas', async () => {
++    for (const access of ['write', 'read'] as const) {
++      const { client } = await connect({ access })
++      const text = (client.getInstructions() ?? '') + JSON.stringify((await client.listTools()).tools)
++      expect(client.getInstructions()).toBeTruthy()
++      for (const name of REMOVED) expect(text).not.toContain(name)
++      expect(text).not.toMatch(/Ofertas compartilhadas|ofertas de chip|modalidade de ofertas/i)
++      expect(text).not.toMatch(/ferramentas de ofertas/i)
++    }
++  })
++
++  it('MCP de áreas continua só para a empresa de áreas com o dono vinculado', async () => {
++    expect((await (await connect({ gate: true, admin: true })).names())).toEqual(expect.arrayContaining(AREAS))
++    for (const opts of [{ gate: true, admin: false }, { gate: false, admin: true }, { gate: false, admin: false }]) {
++      const names = await (await connect(opts)).names()
++      expect(names.filter(n => AREAS.includes(n) && n !== 'share_workspace_flow')).toEqual([])
++    }
++    const { client } = await connect()
++    const flows = (await client.listTools()).tools.find(t => t.name === 'get_flow')!
++    expect(Object.keys(flows.inputSchema.properties ?? {})).toContain('business_area_id')
++  })
++
++  it.each(REMOVED)('chamar %s diretamente falha sem tocar a API', async name => {
++    const { call, calls } = await connect()
++    const outcome = await call(name, { id: ID, offer_id: ID, confirm: true, connection_id: ID, enabled: true, conversation_id: ID }).then(r => r.isError === true, () => true)
++    expect(outcome).toBe(true)
++    expect(calls).toHaveLength(0)
++  })
++
++  it('fluxo normal sem Ofertas: conversas, áreas e Sonda chamam a API autenticada', async () => {
++    const { call, calls } = await connect()
++    expect((await call('get_conversation', { id: ID })).isError).toBeFalsy()
++    expect((await call('list_business_areas')).isError).toBeFalsy()
++    expect((await call('initialize_business_areas')).isError).toBeFalsy()
++    expect((await call('get_business_area_resource_catalog')).isError).toBeFalsy()
++    expect((await call('list_spy_offers')).isError).toBeFalsy()
++    expect(calls.map(c => [c.method, c.path])).toEqual(expect.arrayContaining([
++      ['GET', `/api/chats/${ID}`], ['GET', '/api/business-areas'], ['POST', '/api/business-areas/initialize'], ['GET', '/api/business-areas/catalog'],
++    ]))
++    expect(calls.some(c => c.path.includes('/api/offers') || c.path.includes('/offers') && !c.path.includes('spy-bridge'))).toBe(false)
++  })
++
++  it('credencial de leitura continua sem escrita e sem ofertas', async () => {
++    const { names, call, calls } = await connect({ access: 'read' })
++    expect(await names()).not.toContain('initialize_business_areas')
++    expect((await call('initialize_business_areas')).isError).toBe(true)
++    expect(calls).toHaveLength(0)
++  })
++})
+diff --git a/packages/core/src/mcp/tools/conversations.ts b/packages/core/src/mcp/tools/conversations.ts
+index e21fae99a453d17153a165856b290e9cd693a253..e765abb98506899b889a1a11af8c1cdd0e005a57 100644
+--- a/packages/core/src/mcp/tools/conversations.ts
++++ b/packages/core/src/mcp/tools/conversations.ts
+@@ -52,7 +52,7 @@ export const conversationsTools: readonly ToolSpec<ZodRawShape>[] = [
+     name: 'open_conversation',
+     title: 'Abrir conversa por numero e chip',
+     description: 'Cria ou reutiliza contato pelo telefone normalizado e conversa exclusivamente no connection_id informado da empresa. ' +
+-      'Nao exige mensagem previa, nao envia mensagens, nao muda conexoes de chats antigos e nao inicia nem ativa fluxos/ofertas. ' +
++      'Nao exige mensagem previa, nao envia mensagens, nao muda conexoes de chats antigos e nao inicia nem ativa fluxos. ' +
+       'Repetir nao duplica contato ou conversa. Retorna chat_id, connection_id, contact_id, phone_e164 e flags created/contact_created. ' +
+       'Exige escrita, chat.view, contacts.edit e acesso ao chip. name so e usado para um contato novo, sem alterar consentimento de contato existente. ' +
+       'Depois, somente se solicitado, use send_message com id=chat_id e client_message_id estavel, ou trigger_flow com chat_id. As validacoes dessas ferramentas continuam valendo.',
+diff --git a/packages/core/src/mcp/tools/index.ts b/packages/core/src/mcp/tools/index.ts
+index a173394b8d8b0e3fc787eb40fb2be7a4e868f187..820047c6d0d8e1adece5c46f2d6d881be3102d06 100644
+--- a/packages/core/src/mcp/tools/index.ts
++++ b/packages/core/src/mcp/tools/index.ts
+@@ -10,14 +10,13 @@ import { paymentsTools } from './payments'
+ import { pixelsTools } from './pixels'
+ import { businessAreasTools } from './business-areas'
+ import { metaWorkspaceTools } from './meta-workspaces'
+-import { offersTools } from './offers'
+ import { connectionsTools } from './connections'
+ import { registerApiTools, type McpApiContext } from './shared'
+ 
+ export const MCP_API_TOOLS = [...conversationsTools.map(t=>({...t,areaScoped:t.name==='get_conversation_flow_runs'})), ...flowsTools.map(t => ({ ...t, areaScoped: true })), ...spyTools, ...audioTools, ...mediaTools, ...insightsTools.map(t => ({ ...t, areaScoped: t.name === 'get_ad_metrics' })), ...pixelsTools.map(t => ({ ...t, areaScoped: true })), ...paymentsTools.map(t => ({ ...t, areaScoped: true })), ...connectionsTools] as const
+ 
+-export function registerAllApiTools(server: McpServer, ctx: McpApiContext, sharedOffers = false): string[] {
+-  return registerApiTools(server, ctx, sharedOffers ? [...MCP_API_TOOLS, ...offersTools.map(t => ({ ...t, areaScoped: true })), ...(ctx.businessAreasAdmin ? [...businessAreasTools, ...metaWorkspaceTools] : [])] : MCP_API_TOOLS)
++export function registerAllApiTools(server: McpServer, ctx: McpApiContext, areas = false): string[] {
++  return registerApiTools(server, ctx, areas && ctx.businessAreasAdmin ? [...MCP_API_TOOLS, ...businessAreasTools, ...metaWorkspaceTools] : MCP_API_TOOLS)
+ }
+ 
+ export type { HttpMethod, McpApi, McpApiContext, McpApiRequest, McpApiResponse } from './shared'
+diff --git a/packages/core/src/mcp/tools/meta-workspaces.ts b/packages/core/src/mcp/tools/meta-workspaces.ts
+index 8cfadf66b95160dcee2169098cd29a95e27aabf9..2988b0e6cf95836cf889dc4be9b3f238eb6a7b81 100644
+--- a/packages/core/src/mcp/tools/meta-workspaces.ts
++++ b/packages/core/src/mcp/tools/meta-workspaces.ts
+@@ -27,7 +27,7 @@ export const metaWorkspaceTools = [
+   }),
+   tool({
+     name: 'link_workspace_meta_ad_account', title: 'Vincular conta de anúncio ao workspace', perm: 'facebook.profiles', kind: 'write', idempotent: true, openWorld: true,
+-    description: 'Confere o acesso na Meta e vincula explicitamente a conta escolhida. Retorna o UUID CRM para usar ao consultar pixels e configurar ofertas.',
++    description: 'Confere o acesso na Meta e vincula explicitamente a conta escolhida. Retorna o UUID CRM para usar ao consultar pixels.',
+     input: { ...workspace, ...profile, fb_account_id: z.string().regex(/^act_\d{1,32}$/) },
+     run: async ({ business_area_id, ...body }, api) => fromApi(await api.request('POST', '/api/meta/workspace/ad-accounts', { businessAreaId: business_area_id, body })),
+   }),
+diff --git a/packages/core/src/mcp/tools/offers.ts b/packages/core/src/mcp/tools/offers.ts
+deleted file mode 100644
+index 3fe35b83cf9402a26ddd7dca13f20d851d0034d0..0000000000000000000000000000000000000000
+--- a/packages/core/src/mcp/tools/offers.ts
++++ /dev/null
+@@ -1,55 +0,0 @@
+-// Reuse the authenticated API: tenant gate, permissions, validation and audit remain authoritative.
+-import { z } from 'zod'
+-import { compact, fromApi, tool, UUID, type ToolSpec } from './shared'
+-import type { ZodRawShape } from 'zod'
+-
+-const VIEW = 'settings.products.view' as const
+-const EDIT = 'settings.products.edit' as const
+-const config = z.object({
+-  owner_user_id: UUID.describe('Responsável cadastrado na empresa; use get_offer_resources.'),
+-  product_id: UUID,
+-  currency: z.string().regex(/^[A-Z]{3}$/).describe('Moeda ISO do produto, por exemplo BRL.'),
+-  flow_id: UUID.describe('Fluxo ativo com versão publicada.'),
+-  connection_ids: z.array(UUID).min(1).describe('Chips permitidos; o mesmo chip pode atender diversas ofertas.'),
+-  integration_id: UUID.describe('Integração XPag cadastrada, sem informar segredos.'),
+-  ad_account_id: UUID,
+-  pixel_id: UUID,
+-  origins: z.array(z.object({ type: z.enum(['source_id', 'link']), value: z.string().trim().min(1).max(200) })),
+-  cost_cents: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable().optional(),
+-  cost_label: z.string().optional().describe('Identificação obrigatória quando informar custo.'),
+-}).strict()
+-const offer = {
+-  name: z.string().trim().min(1).max(120),
+-  active: z.boolean().optional().describe('Ativação explícita. Omitido cria ou mantém a oferta inativa nesta gravação.'),
+-  config,
+-}
+-
+-export const offersTools: readonly ToolSpec<ZodRawShape>[] = [
+-  tool({ name: 'list_offers', title: 'Listar ofertas compartilhadas', perm: VIEW,
+-    description: 'Ofertas comerciais do CRM da empresa habilitada, com configuração e versão. Não são ofertas capturadas pela Sonda.',
+-    run: async (_, api) => fromApi(await api.request('GET', '/api/offers')) }),
+-  tool({ name: 'get_offer', title: 'Consultar oferta compartilhada', perm: VIEW,
+-    description: 'Leia a configuração atual antes de editar uma oferta. Retorna apenas oferta desta empresa.', input: { id: UUID },
+-    run: async ({ id }, api) => fromApi(await api.request('GET', `/api/offers/${id}`)) }),
+-  tool({ name: 'get_offer_resources', title: 'Consultar recursos de Ofertas', perm: VIEW,
+-    description: 'IDs reais de responsáveis, produtos, fluxos publicados, chips, integrações XPag, contas, pixels e links da empresa. Sem tokens ou senhas. Use estes IDs ao configurar ofertas.',
+-    run: async (_, api) => fromApi(await api.request('GET', '/api/offers/resources')) }),
+-  tool({ name: 'get_offer_results', title: 'Consultar resultados de Ofertas', perm: VIEW,
+-    description: 'Vendas, receita e lucro estimado por oferta, responsável histórico e moeda. Custos incompletos continuam indicados; não soma moedas distintas.',
+-    input: { owner_user_id: UUID.optional(), offer_id: UUID.optional() },
+-    run: async ({ owner_user_id, offer_id }, api) => fromApi(await api.request('GET', '/api/offers/results', { query: compact({ owner: owner_user_id, offer: offer_id }) })) }),
+-  tool({ name: 'create_offer', title: 'Criar oferta compartilhada', perm: EDIT, kind: 'write',
+-    description: 'Cria uma oferta comercial. Consulte get_offer_resources antes. Inativa por padrão; active=true habilita sua resolução em chips já geridos. Não inicia execução ou envia mensagem nesta chamada.', input: offer,
+-    run: async (args, api) => fromApi(await api.request('POST', '/api/offers', { body: { ...args, active: args.active ?? false } })) }),
+-  tool({ name: 'update_offer', title: 'Atualizar oferta compartilhada', perm: EDIT, kind: 'write',
+-    description: 'Substitui a configuração inteira e incrementa a versão. Leia get_offer antes e informe todos os recursos, origens e active explicitamente. Não modifica snapshots de oportunidades anteriores.',
+-    input: { id: UUID, ...offer, active: z.boolean() },
+-    run: async ({ id, ...args }, api) => fromApi(await api.request('PUT', `/api/offers/${id}`, { body: args })) }),
+-  tool({ name: 'set_offer_connection_mode', title: 'Configurar modalidade de ofertas do chip', perm: EDIT, kind: 'write',
+-    description: 'Ativa ou desativa a modalidade de ofertas em um chip desta empresa. Ativar altera o tratamento de novas mensagens e suprime gatilhos legados; exige pedido explícito. Não pareia, reinicia ou envia mensagem pelo chip.',
+-    input: { connection_id: UUID, enabled: z.boolean() },
+-    run: async ({ connection_id, enabled }, api) => fromApi(await api.request('PUT', `/api/offers/chips/${connection_id}`, { body: { enabled } })) }),
+-  tool({ name: 'list_conversation_offer_opportunities', title: 'Consultar ofertas da conversa', perm: 'chat.view',
+-    description: 'Histórico de oportunidades e evidências congeladas desta conversa. Consulta apenas; não seleciona oferta nem inicia fluxo.', input: { conversation_id: UUID },
+-    run: async ({ conversation_id }, api) => fromApi(await api.request('GET', `/api/chats/${conversation_id}/offers`)) }),
+-]
+diff --git a/packages/core/src/mcp/tools/offers.unit.test.ts b/packages/core/src/mcp/tools/offers.unit.test.ts
+deleted file mode 100644
+index 4e23a0277c6aeac41a11fb245b56cdee3896d9f1..0000000000000000000000000000000000000000
+--- a/packages/core/src/mcp/tools/offers.unit.test.ts
++++ /dev/null
+@@ -1,93 +0,0 @@
+-import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
+-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+-import { afterEach, describe, expect, it, vi } from 'vitest'
+-import type { PermissionKey } from '@crm/shared'
+-import type { Database } from '@crm/db'
+-import { createMcpServer } from '../server'
+-import { offersTools } from './offers'
+-import { registerApiTools, type McpApiRequest } from './shared'
+-
+-const ID = '3f1b2c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d'
+-const OTHER = '4f1b2c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d'
+-const config = { owner_user_id: ID, product_id: ID, currency: 'BRL', flow_id: ID, connection_ids: [ID], integration_id: ID, ad_account_id: ID, pixel_id: ID, origins: [{ type: 'source_id', value: 'AD-A' }] }
+-const closers: (() => Promise<void>)[] = []
+-afterEach(async () => { await Promise.all(closers.splice(0).map(close => close())); vi.unstubAllEnvs() })
+-async function connect(access: 'read' | 'write' = 'write', perms: PermissionKey[] = ['settings.products.view', 'settings.products.edit', 'chat.view'], reply = { status: 200, body: { ok: true } as unknown }) {
+-  const calls: { method: string; path: string; req?: McpApiRequest }[] = []
+-  const server = new McpServer({ name: 'test', version: '1' })
+-  const names = registerApiTools(server, { access, perms: new Set(perms), api: { request: async (method, path, req) => { calls.push({ method, path, req }); return reply } } }, offersTools)
+-  const client = await link(server)
+-  return { client, calls, names, call: (name: string, args: Record<string, unknown> = {}) => client.callTool({ name, arguments: args }) }
+-}
+-async function link(server: McpServer) {
+-  const client = new Client({ name: 'client', version: '1' }), [a, b] = InMemoryTransport.createLinkedPair()
+-  await Promise.all([server.connect(a), client.connect(b)])
+-  closers.push(async () => { await client.close(); await server.close() })
+-  return client
+-}
+-describe('shared Offers MCP', () => {
+-  it('maps all eight tools to authenticated routes with the exact body/query', async () => {
+-    const { call, calls } = await connect()
+-    await call('list_offers'); await call('get_offer', { id: ID }); await call('get_offer_resources')
+-    await call('get_offer_results', { owner_user_id: ID, offer_id: OTHER })
+-    await call('create_offer', { name: 'Oferta', config })
+-    await call('update_offer', { id: ID, name: 'Oferta nova', active: true, config })
+-    await call('set_offer_connection_mode', { connection_id: ID, enabled: false })
+-    await call('list_conversation_offer_opportunities', { conversation_id: ID })
+-    expect(calls.map(c => [c.method, c.path])).toEqual([
+-      ['GET', '/api/offers'], ['GET', `/api/offers/${ID}`], ['GET', '/api/offers/resources'], ['GET', '/api/offers/results'],
+-      ['POST', '/api/offers'], ['PUT', `/api/offers/${ID}`], ['PUT', `/api/offers/chips/${ID}`], ['GET', `/api/chats/${ID}/offers`],
+-    ])
+-    expect(calls[3]!.req).toEqual({ query: { owner: ID, offer: OTHER }, write: false })
+-    expect(calls[4]!.req).toEqual({ body: { name: 'Oferta', config, active: false }, write: true })
+-    expect(calls[5]!.req).toEqual({ body: { name: 'Oferta nova', config, active: true }, write: true })
+-    expect(calls[6]!.req).toEqual({ body: { enabled: false }, write: true })
+-    expect(calls.filter(c => c.req?.write).length).toBe(3)
+-  })
+-  it('read credentials expose five reads and cannot call writes', async () => {
+-    const { client, call, calls } = await connect('read')
+-    const tools = (await client.listTools()).tools
+-    expect(tools.map(t => t.name).sort()).toEqual(['get_offer', 'get_offer_resources', 'get_offer_results', 'list_conversation_offer_opportunities', 'list_offers'])
+-    expect(tools.every(t => t.annotations?.readOnlyHint === true)).toBe(true)
+-    expect((await call('set_offer_connection_mode', { connection_id: ID, enabled: true })).isError).toBe(true)
+-    expect(calls).toHaveLength(0)
+-  })
+-  it('permissions filter product reads, writes and conversation history separately', async () => {
+-    const { client } = await connect('write', ['chat.view'])
+-    expect((await client.listTools()).tools.map(t => t.name)).toEqual(['list_conversation_offer_opportunities'])
+-    const none = await connect('write', [])
+-    expect(none.names).toEqual([])
+-    expect(none.client.getServerCapabilities()?.tools).toBeUndefined()
+-    await expect(none.client.listTools()).rejects.toMatchObject({ code: -32601 })
+-  })
+-  it.each([
+-    ['get_offer', { id: '../other' }],
+-    ['create_offer', { name: 'O', config: { ...config, connection_ids: [] } }],
+-    ['create_offer', { name: 'O', config: { ...config, currency: 'brl' } }],
+-    ['create_offer', { name: 'O', config: { ...config, access_token: 'do-not-store' } }],
+-    ['update_offer', { id: ID, name: 'O', config }],
+-    ['set_offer_connection_mode', { connection_id: ID, enabled: 'true' }],
+-  ])('rejects invalid input for %s before calling the API', async (name, args) => {
+-    const { call, calls } = await connect()
+-    expect((await call(name as string, args as Record<string, unknown>)).isError).toBe(true)
+-    expect(calls).toHaveLength(0)
+-  })
+-  it('preserves API denial instead of presenting success', async () => {
+-    const { call } = await connect('write', ['settings.products.view'], { status: 404, body: { error: { code: 'NOT_FOUND', message: 'Recurso não encontrado' } } })
+-    const result = await call('list_offers')
+-    expect(result.isError).toBe(true)
+-    expect(JSON.parse((result.content as { text: string }[])[0]!.text)).toMatchObject({ status: 404, error: { code: 'NOT_FOUND' } })
+-  })
+-  it('actual server catalog hides Offers outside the pinned company, with empty/invalid gate or without an actor', async () => {
+-    const api = { access: 'write' as const, perms: new Set<PermissionKey>(['settings.products.view', 'settings.products.edit']), api: { request: async () => ({ status: 200, body: {} }) } }
+-    for (const gate of ['', 'invalid', OTHER, ID]) {
+-      vi.stubEnv('SHARED_OFFERS_COMPANY_ID', gate)
+-      const client = await link(createMcpServer({ db: {} as Database, companyId: ID, api }))
+-      expect((await client.listTools()).tools.some(t => t.name === 'list_offers')).toBe(gate === ID)
+-    }
+-    vi.stubEnv('SHARED_OFFERS_COMPANY_ID', ID)
+-    const client = await link(createMcpServer({ db: {} as Database, companyId: ID }))
+-    expect((await client.listTools()).tools.some(t => t.name === 'list_offers')).toBe(false)
+-  })
+-})
+diff --git a/packages/core/src/mcp/tools/shared.ts b/packages/core/src/mcp/tools/shared.ts
+index a5d8ac3352103641db9cab33acbfebf1a4e392c4..f58b1c4bbbaf5785a0591fd1734cfd4d693acd46 100644
+--- a/packages/core/src/mcp/tools/shared.ts
++++ b/packages/core/src/mcp/tools/shared.ts
+@@ -84,7 +84,7 @@ export function registerApiTools(server: McpServer, ctx: McpApiContext, tools: r
+       // Defesa extra: ferramenta de leitura nunca grava, mesmo que a rota aceite.
+       request: (method, path, req) => ctx.api.request(method, path, { ...req, ...(businessAreaId ? { businessAreaId } : {}), write: kind !== 'read' && (req?.write ?? true) }),
+     })
+-    const inputSchema = t.areaScoped && ctx.businessAreasAdmin ? { ...t.input, business_area_id: UUID.optional().describe('Workspace Admin 1/2/3 obtido com list_business_areas. Omitir usa Geral para ofertas e fluxos.') } : t.input ?? {}
++    const inputSchema = t.areaScoped && ctx.businessAreasAdmin ? { ...t.input, business_area_id: UUID.optional().describe('Workspace Admin 1/2/3 obtido com list_business_areas. Omitir usa Geral para fluxos.') } : t.input ?? {}
+     server.registerTool(t.name, { title: t.title, description: t.description, inputSchema, annotations }, ((args: Record<string, unknown>) => {
+       if (t.areaScoped && args?.business_area_id && !ctx.businessAreasAdmin) return fail({ error: 'business_area_forbidden' })
+       const input = { ...args }, area = t.areaScoped ? input.business_area_id as string | undefined : undefined
+diff --git a/tests/acceptance/T125/business-areas.test.ts b/tests/acceptance/T125/business-areas.test.ts
+index ce4069911a9f781aed85605d06caf23c9833bce8..c81e0eef526408a6ee2d0376d0f5096294fe6030 100644
+--- a/tests/acceptance/T125/business-areas.test.ts
++++ b/tests/acceptance/T125/business-areas.test.ts
+@@ -29,6 +29,12 @@ async function tool(token: string, name: string, args: any = {}) {
+   if (typeof data === 'string') { try { data=JSON.parse(data) } catch { /* SDK errors can be plain text. */ } }
+   return { error: !!(body.error || result?.isError), data }
+ }
++async function toolNames(token: string): Promise<string[]> {
++  const response = await sys.app.request('/api/mcp', { method: 'POST', headers: {
++    authorization: 'Bearer ' + token, 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-06-18',
++  }, body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method: 'tools/list', params: {} }) })
++  return ((await response.json() as any).result.tools as { name: string }[]).map(x => x.name)
++}
+ beforeAll(async () => {
+   sys = await startSystem({ metaRedirectUri: 'https://panel.t125.test/crm/api/meta/oauth/callback' }); t = await tenant(sys); foreign = await tenant(sys)
+   process.env.SHARED_OFFERS_COMPANY_ID = t.companyId
+@@ -184,13 +190,10 @@ it('keeps offers separate while two workspaces use shared operational resources
+ it('MCP carries an explicit area on each call without leaking state to the next caller, and retains read/write permissions', async () => {
+   expect((await tool(reader, 'list_business_areas')).data.items).toHaveLength(3)
+   expect((await tool(reader, 'initialize_business_areas')).error).toBe(true)
+-  const a = await tool(reader, 'list_offers', { business_area_id: areas[0].id })
+-  const b = await tool(reader, 'list_offers', { business_area_id: areas[1].id })
+-  expect(a.error).toBe(false); expect(b.error).toBe(false)
+-  expect(a.data.items.map((o: any) => o.id)).toEqual([bundles[0].offerId])
+-  expect(b.data.items.map((o: any) => o.id)).toEqual([bundles[1].offerId])
+-  expect((await tool(reader, 'list_offers')).data.items.map((o: any) => o.id)).toEqual([oldOffer.id])
+-  expect((await tool(reader, 'get_offer', { id: bundles[1].offerId, business_area_id: areas[0].id })).data.status).toBe(404)
++  const listed = await toolNames(reader)
++  expect(listed).toEqual(expect.arrayContaining(['list_business_areas', 'get_business_area_resource_catalog', 'share_workspace_flow']))
++  for (const removed of ['list_offers', 'get_offer', 'create_offer', 'adopt_offer_business_area']) expect(listed).not.toContain(removed)
++  expect((await tool(reader, 'list_offers', { business_area_id: areas[0].id })).error).toBe(true)
+   const flow = await tool(writer, 'create_flow', { name: 'Area MCP flow', business_area_id: areas[0].id })
+   expect(flow.error, JSON.stringify(flow.data)).toBe(false)
+   expect(await sys.q("select area_id,shared_with_workspaces from crm.business_area_resources where kind='flow' and resource_id=$1", [flow.data.flow.id])).toEqual([{ area_id: areas[0].id, shared_with_workspaces: false }])
+@@ -284,7 +287,7 @@ it('another admin of the SAME company cannot discover area tools or read area da
+   expect((await tool(made.body.token,'list_business_areas')).error).toBe(true)
+   expect((await tool(made.body.token,'get_business_area_resource_catalog')).error).toBe(true)
+   expect((await tool(made.body.token,'list_flows')).data.flows).toEqual([])
+-  expect((await tool(made.body.token,'get_offer',{id:bundles[0].offerId})).error).toBe(true)
++  expect((await tool(made.body.token,'adopt_offer_business_area',{id:areas[0].id,offer_id:bundles[0].offerId,confirm:true})).error).toBe(true)
+   const profile=(await call('GET','/api/auth/profile',undefined,undefined,account)).body
+   expect(profile.companies.find((c:any)=>c.id===t.companyId)).toMatchObject({business_areas_admin:false,business_areas_enabled:true})
+   await sys.q('update crm.users set last_company_id=$1 where id=$2',[t.companyId,user])
+diff --git a/tests/acceptance/T125/mcp-offers.test.ts b/tests/acceptance/T125/mcp-offers.test.ts
+deleted file mode 100644
+index 571ad8e2bc7bf9d657e28a366aead96142726fe1..0000000000000000000000000000000000000000
+--- a/tests/acceptance/T125/mcp-offers.test.ts
++++ /dev/null
+@@ -1,122 +0,0 @@
+-// Disposable PostgreSQL/Redis and fake providers, executed on CI only.
+-import { randomUUID } from 'node:crypto'
+-import { afterAll, beforeAll, expect, it } from 'vitest'
+-import { connectMeta, salesPixel, startSystem, tenant, type System, type Tenant } from './setup'
+-let sys: System, t: Tenant, other: Tenant, writer: string, reader: string, credentialId: string, config: Record<string, unknown>, offer: any
+-const priorGate = process.env.SHARED_OFFERS_COMPANY_ID
+-let sequence = 0
+-async function rpc(token: string, method: string, params: Record<string, unknown> = {}) {
+-  const response = await sys.app.request('/api/mcp', { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-06-18' }, body: JSON.stringify({ jsonrpc: '2.0', id: ++sequence, method, params }) })
+-  return { status: response.status, body: await response.json() as any }
+-}
+-async function invoke(token: string, name: string, args: Record<string, unknown> = {}) {
+-  const response = await rpc(token, 'tools/call', { name, arguments: args })
+-  const result = response.body.result
+-  let data: any = result?.content?.[0]?.text ?? null
+-  if (typeof data === 'string') { try { data = JSON.parse(data) } catch { /* Protocol validation errors may be plain text. */ } }
+-  return { ...response, error: Boolean(response.body.error || result?.isError), data }
+-}
+-const names = async (token: string) => (await rpc(token, 'tools/list')).body.result.tools.map((tool: any) => tool.name)
+-beforeAll(async () => {
+-  sys = await startSystem(); t = await tenant(sys); other = await tenant(sys)
+-  process.env.SHARED_OFFERS_COMPANY_ID = t.companyId
+-  const account = (await connectMeta(sys, t, 1))[0]!.localId, pixel = await salesPixel(sys, t)
+-  const product = await t.c.post('/api/products', { name: 'MCP product', currency: 'BRL', price_min_cents: 100, price_max_cents: 100, price_fallback_cents: 100 })
+-  expect(product.status).toBe(201)
+-  const integration = await t.c.post('/api/payment-integrations', { label: 'MCP fake XPag', gateway: 'xpag', client_id: 'fake-mcp-offers', client_secret: 'synthetic-never-contact-provider' })
+-  expect(integration.status).toBe(201)
+-  // Resource fixture only: no run is ever started by these tests.
+-  const [flow] = await sys.q("insert into crm.flows(company_id,name,status,published_version) values($1,'MCP fixture published flow','active',1) returning id", [t.companyId])
+-  const userId = (await t.c.get('/api/auth/profile')).body.user.id
+-  config = { owner_user_id: userId, product_id: product.body.product.id, currency: 'BRL', flow_id: flow.id, connection_ids: [t.connectionId], integration_id: integration.body.integration.id, ad_account_id: account, pixel_id: pixel.id, origins: [] }
+-  const write = await t.c.post('/api/mcp_credentials', { name: 'MCP Offers writer', access: 'write' })
+-  const read = await t.c.post('/api/mcp_credentials', { name: 'MCP Offers reader', access: 'read' })
+-  expect(write.status).toBe(201); expect(read.status).toBe(201)
+-  writer = write.body.token; reader = read.body.token; credentialId = write.body.mcp_credential.id
+-}, 180_000)
+-afterAll(async () => {
+-  if (priorGate === undefined) delete process.env.SHARED_OFFERS_COMPANY_ID
+-  else process.env.SHARED_OFFERS_COMPANY_ID = priorGate
+-  await sys?.close()
+-}, 120_000)
+-
+-it('connects through MCP and lists permitted resources without secrets', async () => {
+-  expect((await rpc(reader, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'offers-test', version: '1' } })).status).toBe(200)
+-  expect(await names(reader)).toContain('list_offers')
+-  expect(await names(reader)).not.toContain('create_offer')
+-  const resources = await invoke(reader, 'get_offer_resources')
+-  expect(resources.error).toBe(false)
+-  expect(resources.data.connections.map((x: any) => x.id)).toContain(t.connectionId)
+-  expect(JSON.stringify(resources.data)).not.toContain('synthetic-never-contact-provider')
+-  expect(Object.keys(resources.data.integrations[0]).sort()).toEqual(['id', 'name'])
+-  // Three independent callers can use the same credential concurrently.
+-  const simultaneous = await Promise.all([invoke(reader, 'get_offer_resources'), invoke(reader, 'list_offers'), invoke(reader, 'get_offer_results')])
+-  expect(simultaneous.every(result => result.status === 200 && !result.error)).toBe(true)
+-})
+-it('creates an inactive offer, reads it and updates with an explicit active flag through the real API', async () => {
+-  const created = await invoke(writer, 'create_offer', { name: 'MCP offer', config })
+-  expect(created.error, JSON.stringify(created.data)).toBe(false)
+-  offer = created.data.offer
+-  expect(offer).toMatchObject({ active: false, company_id: t.companyId, version: 1 })
+-  expect((await invoke(reader, 'get_offer', { id: offer.id })).data.offer).toEqual(offer)
+-  const updated = await invoke(writer, 'update_offer', { id: offer.id, name: 'MCP edited', active: false, config })
+-  expect(updated.error, JSON.stringify(updated.data)).toBe(false)
+-  expect(updated.data.offer).toMatchObject({ id: offer.id, name: 'MCP edited', active: false, version: 2 })
+-  expect((await invoke(reader, 'list_offers')).data.items.map((x: any) => x.id)).toContain(offer.id)
+-  const audits = await sys.q("select detail from crm.audit_logs where company_id=$1 and action in ('offers.create','offers.update')", [t.companyId])
+-  expect(audits.some((x: any) => x.detail?.mcp_credential_id === credentialId)).toBe(true)
+-})
+-it('read token cannot change a chip or create offers', async () => {
+-  expect((await invoke(reader, 'create_offer', { name: 'forbidden', config })).error).toBe(true)
+-  expect((await invoke(reader, 'set_offer_connection_mode', { connection_id: t.connectionId, enabled: true })).error).toBe(true)
+-  expect((await sys.q('select * from crm.offer_connections where company_id=$1', [t.companyId]))).toHaveLength(0)
+-})
+-it('manages the same chip explicitly without starting a flow or payment', async () => {
+-  expect((await invoke(writer, 'set_offer_connection_mode', { connection_id: t.connectionId, enabled: true })).error).toBe(false)
+-  expect((await invoke(reader, 'get_offer_resources')).data.managed_connections).toContain(t.connectionId)
+-  expect((await invoke(writer, 'set_offer_connection_mode', { connection_id: t.connectionId, enabled: false })).error).toBe(false)
+-  expect((await invoke(reader, 'get_offer_resources')).data.managed_connections).not.toContain(t.connectionId)
+-  expect((await sys.q('select id from crm.flow_runs where company_id=$1', [t.companyId]))).toHaveLength(0)
+-  expect((await sys.q('select id from crm.payment_charges where company_id=$1', [t.companyId]))).toHaveLength(0)
+-})
+-it('rejects foreign resources and unavailable offers while keeping results empty', async () => {
+-  const denied = await invoke(writer, 'create_offer', { name: 'foreign', config: { ...config, connection_ids: [other.connectionId] } })
+-  expect(denied.error).toBe(true); expect(denied.data.status).toBe(422)
+-  const missing = await invoke(reader, 'get_offer', { id: randomUUID() })
+-  expect(missing.error).toBe(true); expect(missing.data.status).toBe(404)
+-  const [foreignOffer] = await sys.q("insert into crm.offers(company_id,name,active,config) values($1,'Foreign row fixture',false,$2::jsonb) returning id", [other.companyId, JSON.stringify(config)])
+-  const foreignRead = await invoke(reader, 'get_offer', { id: foreignOffer.id })
+-  expect(foreignRead.error).toBe(true); expect(foreignRead.data.status).toBe(404)
+-  expect((await invoke(reader, 'list_offers')).data.items.some((item: any) => item.id === foreignOffer.id)).toBe(false)
+-  expect((await invoke(reader, 'get_offer_results', { owner_user_id: config.owner_user_id, offer_id: offer.id })).data.items).toEqual([])
+-})
+-it('hides tools from another company and enforces the gate again after catalog discovery', async () => {
+-  const foreign = await other.c.post('/api/mcp_credentials', { name: 'Foreign MCP', access: 'write' })
+-  expect(await names(foreign.body.token)).not.toContain('list_offers')
+-  expect((await invoke(foreign.body.token, 'get_offer', { id: offer.id })).error).toBe(true)
+-  for (const gate of ['', 'invalid', other.companyId]) {
+-    process.env.SHARED_OFFERS_COMPANY_ID = gate
+-    expect(await names(writer)).not.toContain('list_offers')
+-    expect((await invoke(writer, 'list_offers')).error).toBe(true)
+-    expect((await t.c.get('/api/offers/' + offer.id)).status).toBe(404)
+-  }
+-  process.env.SHARED_OFFERS_COMPANY_ID = t.companyId
+-})
+-it('rechecks owner permissions and membership for every MCP call', async () => {
+-  const userId = config.owner_user_id
+-  await sys.q("update crm.company_members set role='member',permission_keys=ARRAY[]::text[] where company_id=$1 and user_id=$2", [t.companyId, userId])
+-  expect(await names(writer)).not.toContain('create_offer')
+-  expect((await invoke(writer, 'create_offer', { name: 'forbidden role', config })).error).toBe(true)
+-  await sys.q("update crm.company_members set role='owner' where company_id=$1 and user_id=$2", [t.companyId, userId])
+-  expect(await names(writer)).toContain('create_offer')
+-  await sys.q('delete from crm.company_members where company_id=$1 and user_id=$2', [t.companyId, userId])
+-  expect(await names(writer)).not.toContain('list_offers')
+-  expect((await invoke(writer, 'list_offers')).error).toBe(true)
+-})
+-it('revoked MCP credentials are refused immediately', async () => {
+-  // A separate reader retains its owner; writer lost membership in the preceding case.
+-  const made = await other.c.post('/api/mcp_credentials', { name: 'revocation', access: 'read' })
+-  expect((await rpc(made.body.token, 'tools/list')).status).toBe(200)
+-  expect((await other.c.delete('/api/mcp_credentials/' + made.body.mcp_credential.id)).status).toBe(200)
+-  expect((await rpc(made.body.token, 'tools/list')).status).toBe(401)
+-})
+diff --git a/tests/acceptance/T125/mcp-sem-ofertas.test.ts b/tests/acceptance/T125/mcp-sem-ofertas.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..bbe957cbc9da1e0cd001d3290676e26f322774d3
+--- /dev/null
++++ b/tests/acceptance/T125/mcp-sem-ofertas.test.ts
+@@ -0,0 +1,61 @@
++// Disposable PostgreSQL/Redis and fake providers, executed on CI only.
++// CRM-003: Ofertas saíram do catálogo MCP. Garante ausência na descoberta e na chamada; o resto do MCP segue funcionando.
++import { afterAll, beforeAll, expect, it } from 'vitest'
++import { startSystem, tenant, type System, type Tenant } from './setup'
++let sys: System, t: Tenant, other: Tenant, writer: string, reader: string
++const priorGate = process.env.SHARED_OFFERS_COMPANY_ID
++let sequence = 0
++const REMOVED = ['list_offers', 'get_offer', 'get_offer_resources', 'get_offer_results', 'create_offer', 'update_offer', 'set_offer_connection_mode', 'list_conversation_offer_opportunities', 'adopt_offer_business_area']
++async function rpc(token: string, method: string, params: Record<string, unknown> = {}) {
++  const response = await sys.app.request('/api/mcp', { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-06-18' }, body: JSON.stringify({ jsonrpc: '2.0', id: ++sequence, method, params }) })
++  return { status: response.status, body: await response.json() as any }
++}
++async function invoke(token: string, name: string, args: Record<string, unknown> = {}) {
++  const response = await rpc(token, 'tools/call', { name, arguments: args })
++  return { ...response, error: Boolean(response.body.error || response.body.result?.isError) }
++}
++const names = async (token: string): Promise<string[]> => (await rpc(token, 'tools/list')).body.result.tools.map((tool: any) => tool.name)
++beforeAll(async () => {
++  sys = await startSystem(); t = await tenant(sys); other = await tenant(sys)
++  process.env.SHARED_OFFERS_COMPANY_ID = t.companyId
++  const write = await t.c.post('/api/mcp_credentials', { name: 'MCP writer', access: 'write' })
++  const read = await t.c.post('/api/mcp_credentials', { name: 'MCP reader', access: 'read' })
++  expect(write.status).toBe(201); expect(read.status).toBe(201)
++  writer = write.body.token; reader = read.body.token
++}, 180_000)
++afterAll(async () => {
++  if (priorGate === undefined) delete process.env.SHARED_OFFERS_COMPANY_ID
++  else process.env.SHARED_OFFERS_COMPANY_ID = priorGate
++  await sys?.close()
++}, 120_000)
++
++it('discovery never lists Offers tools, for any credential, company or gate value', async () => {
++  const foreign = (await other.c.post('/api/mcp_credentials', { name: 'Foreign MCP', access: 'write' })).body.token
++  for (const gate of [t.companyId, '', 'invalid', other.companyId]) {
++    process.env.SHARED_OFFERS_COMPANY_ID = gate
++    for (const token of [writer, reader, foreign]) expect((await names(token)).filter(n => REMOVED.includes(n))).toEqual([])
++  }
++  process.env.SHARED_OFFERS_COMPANY_ID = t.companyId
++})
++it('calling a removed Offers tool fails and does not change data', async () => {
++  const before = await sys.q('select id from crm.offers where company_id=$1', [t.companyId])
++  for (const name of REMOVED) {
++    expect((await invoke(writer, name, { id: '00000000-0000-4000-8000-000000000000', offer_id: '00000000-0000-4000-8000-000000000000', name: 'x', config: {}, confirm: true, enabled: true })).error, name).toBe(true)
++  }
++  expect(await sys.q('select id from crm.offers where company_id=$1', [t.companyId])).toEqual(before)
++})
++it('the remaining MCP works without Offers: protocol, reads, writes and permissions', async () => {
++  expect((await rpc(reader, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'no-offers-test', version: '1' } })).status).toBe(200)
++  const read = await names(reader), write = await names(writer)
++  expect(read).toEqual(expect.arrayContaining(['list_flows', 'list_conversations', 'list_connections']))
++  expect(write).toEqual(expect.arrayContaining(['list_flows', 'create_flow']))
++  expect(read).not.toContain('create_flow')
++  expect((await invoke(reader, 'list_conversations')).error).toBe(false)
++  expect((await invoke(reader, 'create_flow', { name: 'forbidden' })).error).toBe(true)
++})
++it('revoked MCP credentials are refused immediately', async () => {
++  const made = await other.c.post('/api/mcp_credentials', { name: 'revocation', access: 'read' })
++  expect((await rpc(made.body.token, 'tools/list')).status).toBe(200)
++  expect((await other.c.delete('/api/mcp_credentials/' + made.body.mcp_credential.id)).status).toBe(200)
++  expect((await rpc(made.body.token, 'tools/list')).status).toBe(401)
++})

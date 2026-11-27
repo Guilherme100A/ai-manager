@@ -1,0 +1,1654 @@
+diff --git a/apps/worker/src/boot/production-worker.ts b/apps/worker/src/boot/production-worker.ts
+index c91dde35f590f1ddc0b210a1719d56ac39fb41ce..6d916c7ce3287f1e717cfa139dc2bb23ce46029f 100644
+--- a/apps/worker/src/boot/production-worker.ts
++++ b/apps/worker/src/boot/production-worker.ts
+@@ -2,7 +2,7 @@
+ // config → crypto (`CREDENTIALS_KEY`) → migrations → WaGateway (WA_GATEWAY=rpc|fake) → módulos configurados →
+ // startWorker → `flow_run.updated` → agendador da varredura dos webhooks de entrada.
+ import { join } from 'node:path'
+-import { claimOfferEvents, offerEnqueueFailed, dispatchOfferNotifications, META_CAPI_QUEUE, FsExportFileStore } from '@crm/core'
++import { FsExportFileStore } from '@crm/core'
+ import { createDb, runMigrations, type Database } from '@crm/db'
+ import { ensureDefaultAiPrices } from '@crm/db'
+ import { createLogger, FsBlobStore, initCredentialsCrypto, redisConnection, type Logger } from '@crm/node-kit'
+@@ -68,7 +68,6 @@ export async function startProductionWorker(opts: StartProductionWorkerOptions =
+     ...opts.overrides,
+   })
+ 
+-  let offerTimer: ReturnType<typeof setInterval> | undefined
+   let offRunEvents = () => undefined as void
+   const handleSignals = opts.handleSignals ?? true
+   const app = await startWorker({
+@@ -79,7 +78,6 @@ export async function startProductionWorker(opts: StartProductionWorkerOptions =
+     handleSignals,
+     exitProcess: handleSignals,
+     onStop: async () => {
+-      if (offerTimer) clearInterval(offerTimer)
+       offRunEvents()
+       production.dispose()
+       await wa.close()
+@@ -87,20 +85,6 @@ export async function startProductionWorker(opts: StartProductionWorkerOptions =
+       if (ownsDb) await db.$client.end()
+     },
+   })
+-  let scanning=false
+-  const scanOffers=async()=>{
+-    if(scanning) return; scanning=true
+-    try {
+-      const queue=app.queues.get(META_CAPI_QUEUE)
+-      if(queue) for(const row of await claimOfferEvents(db)) {
+-        try {await queue.add(META_CAPI_QUEUE,{kind:'offer',outboxId:row.id},{jobId:'offer-'+row.id+'-'+row.dispatch_seq,attempts:1,removeOnComplete:true,removeOnFail:1000})}
+-        catch {await offerEnqueueFailed(db,row.id,row.dispatch_seq)}
+-      }
+-      await dispatchOfferNotifications(db,production.publisher,production.offerSaleEffects)
+-    } catch { logger.warn({},'offer outbox dispatch failed; persisted tasks will retry') } finally {scanning=false}
+-  }
+-  offerTimer=setInterval(()=>void scanOffers(),1000)
+-  await scanOffers()
+   offRunEvents = attachFlowRunEvents(app.workers, { db, publisher: production.publisher, logger })
+   // T81/T127: varredura repetível dos requests de webhook `pending` cujo enqueue falhou (fila do próprio worker).
+   const inboundQueue = app.queues.get(INBOUND_WEBHOOKS_QUEUE)
+diff --git a/apps/worker/src/boot/production.ts b/apps/worker/src/boot/production.ts
+index 11ac223c75b09e51e0e71c19e47c13f96c76a51e..8ff0e1661d01a6abaa3a009f0c1be60e4f0ffe4c 100644
+--- a/apps/worker/src/boot/production.ts
++++ b/apps/worker/src/boot/production.ts
+@@ -152,7 +152,6 @@ export interface WorkerProductionDeps {
+ }
+ 
+ export interface WorkerProduction {
+-  offerSaleEffects(company:string,type:string,data:unknown):Promise<void>
+   publisher: RealtimePublisher
+   chatSend: ChatSendService
+   keys: AiKeysService
+@@ -327,13 +326,5 @@ export function configureWorkerProduction(deps: WorkerProductionDeps): WorkerPro
+     },
+   })
+ 
+-  const offerSaleEffects=async(company:string,type:string,data:unknown)=>{
+-    const event=data as {sale_id:string;sale?:{status?:string;note_issuer_id?:string|null;utmify_integration_id?:string|null}}
+-    if(type==='sale.recorded' && event.sale?.status==='approved') {
+-      if(event.sale.note_issuer_id) await invoiceEnqueue({companyId:company,saleId:event.sale_id,generation:1},{jobId:invoiceJobId(event.sale_id,1)})
+-      if(event.sale.utmify_integration_id) await enqueueUtmifySale(utmifyEnqueue,company,event.sale_id,'approved')
+-    } else if(type==='sale.updated' && event.sale?.status==='refunded' && event.sale.utmify_integration_id) await enqueueUtmifySale(utmifyEnqueue,company,event.sale_id,'refunded')
+-    // CAPI is intentionally absent: offer Purchase already has its canonical durable outbox.
+-  }
+-  return { publisher, chatSend, keys, llm, fakeLlm, guard, offerSaleEffects, dispose: offAttendance }
++  return { publisher, chatSend, keys, llm, fakeLlm, guard, dispose: offAttendance }
+ }
+diff --git a/apps/worker/src/jobs/meta-capi/index.ts b/apps/worker/src/jobs/meta-capi/index.ts
+index 7d15ac7127ac7d69ed7151595836e960de469a4c..664e73f8a5e0e8b78d20c42c6f3d5f8f507871fa 100644
+--- a/apps/worker/src/jobs/meta-capi/index.ts
++++ b/apps/worker/src/jobs/meta-capi/index.ts
+@@ -10,7 +10,6 @@
+ // T126: venda ainda não visível (job antes do commit de quem a gravou) tenta de novo em poucos segundos.
+ import {
+   CapiService,
+-  deliverOfferEvent,
+   META_CAPI_QUEUE,
+   adLeadJobId,
+   defineQueue,
+@@ -64,7 +63,8 @@ export function createMetaCapiProcessor(deps: { deps: () => MetaCapiDeps }): Pro
+     if (!db) throw new Error('meta-capi: dependências não configuradas (configureMetaCapi({ db }))')
+     const capi = new CapiService({ ...opts, db })
+     const data = job.data
+-    if ('kind' in data && data.kind === 'offer') { await deliverOfferEvent(db,capi,(data as unknown as {outboxId:string}).outboxId); return [] }
++    // Job 'offer' enfileirado pela versão anterior: o outbox de ofertas foi congelado; descartar sem enviar (nunca reenviar).
++    if ((data as { kind?: unknown }).kind === 'offer') return []
+     const out = isEventJob(data) ? await sendEventJob({ capi }, data) : isAdLeadJob(data) ? await sendAdLeadToPixels({ db, capi }, data) : await sendSaleToPixels({ db, capi }, data)
+     const retry = out.filter((o) => o.result.status === 'failed' || o.result.status === 'uncertain')
+     if (retry.length)
+@@ -86,7 +86,7 @@ export function metaCapiEnqueuer(queue = defineQueue<MetaCapiJobData>(META_CAPI_
+  */
+ export function adLeadInboundListener(enqueue: CapiAdLeadEnqueue, logger?: { warn(obj: object, msg?: string): void }) {
+   return async (e: CrmInboundEvent): Promise<void> => {
+-    if (e.offer_managed || !e.ad_source) return
++    if (!e.ad_source) return
+     try {
+       await enqueue({ kind: 'ad_lead', companyId: e.company_id, contactId: e.contact_id, at: new Date().toISOString(), via: e.ad_source }, { jobId: adLeadJobId(e.contact_id) })
+     } catch (err) {
+diff --git a/packages/core/src/auth/auth-service.ts b/packages/core/src/auth/auth-service.ts
+index 063f148988af0464f7ca8e62c894d057ebba3bd1..91aa5f02a1a155c56f02baaac79a8338839f79a6 100644
+--- a/packages/core/src/auth/auth-service.ts
++++ b/packages/core/src/auth/auth-service.ts
+@@ -10,7 +10,7 @@ import { listActiveSupportGrants, SUPPORT_GRANT_PERMISSIONS } from '../support-a
+ import { AuthError, isUniqueViolation } from './errors'
+ import { AVATAR_MAX_BYTES, detectImageMime, isAvatarMime } from './image'
+ import { DEFAULT_COMPANY_NAME, normalizeEmail, normalizeLocale, normalizeReferralCode, normalizeWhatsapp } from './normalize'
+-import { withCompanyCapabilities } from '../offers/policy'
++import { withCompanyCapabilities } from '../business-areas/policy'
+ import { BusinessAreasService } from '../business-areas/service'
+ 
+ export const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000
+@@ -25,7 +25,7 @@ export interface CompanySummary {
+   slug: string
+   role: MemberRole
+   /** Server capability, included by listCompanies in login, SSO and profile responses. Not an ACL. */
+-  shared_offers?: boolean
++  business_areas?: boolean
+   business_areas_admin?: boolean
+   business_areas_enabled?: boolean
+   /** T91: permissões efetivas do usuário nesta empresa (as que o servidor aplica). */
+@@ -195,7 +195,7 @@ export class AuthService {
+       effective_permissions: [...effectivePermissions({ role: c.role, permissionKeys, systemRole })].sort(),
+     }))
+     const capabilities = withCompanyCapabilities([...list, ...(await this.supportGrantCompanies(userId, new Set(list.map((c) => c.id))))])
+-    return Promise.all(capabilities.map(async c => c.shared_offers ? { ...c, business_areas_admin:c.role==='owner', business_areas_enabled:await new BusinessAreasService(this.db).enabled(c.id) } : c))
++    return Promise.all(capabilities.map(async c => c.business_areas ? { ...c, business_areas_admin:c.role==='owner', business_areas_enabled:await new BusinessAreasService(this.db).enabled(c.id) } : c))
+   }
+ 
+   /** T32: empresas em que o usuário `support` tem concessão ativa (sem vínculo), para o perfil e a troca de empresa. */
+diff --git a/packages/core/src/business-areas/policy.ts b/packages/core/src/business-areas/policy.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..6ea3d2857cc129e648388bba10d511198192721a
+--- /dev/null
++++ b/packages/core/src/business-areas/policy.ts
+@@ -0,0 +1,21 @@
++/**
++ * Opt-in de servidor da área de negócio isolada. Nome, claims de login e headers do cliente nunca autorizam o recurso.
++ * `BUSINESS_AREAS_COMPANY_ID` é o nome canônico; `SHARED_OFFERS_COMPANY_ID` continua aceito para que o env de produção
++ * já publicado funcione sem alteração.
++ */
++const UUID_RE = /^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i
++
++export function businessAreasCompany(env: Record<string, string | undefined> = process.env): string | null {
++  const id = env.BUSINESS_AREAS_COMPANY_ID || env.SHARED_OFFERS_COMPANY_ID
++  return id && UUID_RE.test(id) ? id.toLowerCase() : null
++}
++export function isBusinessAreasCompany(company: string, env: Record<string, string | undefined> = process.env): boolean {
++  return businessAreasCompany(env) === company.toLowerCase()
++}
++/** Decora os resumos de empresa produzidos pelo servidor, antes de qualquer cache da resposta de auth. */
++export function withCompanyCapabilities<T extends { id: string }>(companies: T[]): (T & { business_areas: boolean })[] {
++  return companies.map((company) => ({ ...company, business_areas: isBusinessAreasCompany(company.id) }))
++}
++export function requireBusinessAreasCompany(company: string): void {
++  if (!isBusinessAreasCompany(company)) throw new Error('Business areas unavailable for this company')
++}
+diff --git a/packages/core/src/business-areas/policy.unit.test.ts b/packages/core/src/business-areas/policy.unit.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..8224525698118ffccbb68ea365fea57f1cb4e9ff
+--- /dev/null
++++ b/packages/core/src/business-areas/policy.unit.test.ts
+@@ -0,0 +1,32 @@
++import { describe, expect, it } from 'vitest'
++import { businessAreasCompany, isBusinessAreasCompany, requireBusinessAreasCompany, withCompanyCapabilities } from './policy'
++
++const A = '11111111-1111-4111-8111-111111111111'
++const B = '22222222-2222-4222-8222-222222222222'
++
++describe('business-areas/policy', () => {
++  it('aceita o env canônico e o env de produção legado', () => {
++    expect(businessAreasCompany({ BUSINESS_AREAS_COMPANY_ID: A })).toBe(A)
++    expect(businessAreasCompany({ SHARED_OFFERS_COMPANY_ID: A.toUpperCase() })).toBe(A)
++    expect(businessAreasCompany({ BUSINESS_AREAS_COMPANY_ID: A, SHARED_OFFERS_COMPANY_ID: B })).toBe(A)
++  })
++  it('ignora valor ausente ou malformado', () => {
++    expect(businessAreasCompany({})).toBeNull()
++    expect(businessAreasCompany({ SHARED_OFFERS_COMPANY_ID: 'nao-e-uuid' })).toBeNull()
++    expect(isBusinessAreasCompany(A, {})).toBe(false)
++  })
++  it('isola por empresa e decora o resumo', () => {
++    const prev = process.env.BUSINESS_AREAS_COMPANY_ID
++    process.env.BUSINESS_AREAS_COMPANY_ID = A
++    try {
++      expect(isBusinessAreasCompany(A)).toBe(true)
++      expect(isBusinessAreasCompany(B)).toBe(false)
++      expect(withCompanyCapabilities([{ id: A }, { id: B }])).toEqual([{ id: A, business_areas: true }, { id: B, business_areas: false }])
++      expect(() => requireBusinessAreasCompany(B)).toThrow()
++      expect(() => requireBusinessAreasCompany(A)).not.toThrow()
++    } finally {
++      if (prev === undefined) delete process.env.BUSINESS_AREAS_COMPANY_ID
++      else process.env.BUSINESS_AREAS_COMPANY_ID = prev
++    }
++  })
++})
+diff --git a/packages/core/src/business-areas/service.ts b/packages/core/src/business-areas/service.ts
+index aada4931342feda9fad33584cdad3fe41dda60b3..d96a85a91c3a4ad5dd74b656bea632e11ad3f20c 100644
+--- a/packages/core/src/business-areas/service.ts
++++ b/packages/core/src/business-areas/service.ts
+@@ -1,6 +1,6 @@
+ import { sql, type SQL, type SQLWrapper } from 'drizzle-orm'
+ import type { Database } from '@crm/db'
+-import { isSharedOffersCompany, requireSharedOffersCompany } from '../offers/policy'
++import { isBusinessAreasCompany, requireBusinessAreasCompany } from './policy'
+ 
+ export const AREA_RESOURCE_TABLES = {
+   product: 'products', flow: 'flows', integration: 'payment_integrations',
+@@ -30,26 +30,26 @@ export function workspaceFlowFilter(company: string, area: string | null | undef
+ export class BusinessAreasService {
+   constructor(readonly db: Database) {}
+   async administrator(company: string, userId: string | null | undefined) {
+-    if (!userId || !isSharedOffersCompany(company)) return false
++    if (!userId || !isBusinessAreasCompany(company)) return false
+     // A company has exactly one owner. A different admin/member, even with all permissions, is not this account.
+     return (await rows(this.db, sql`select 1 from crm.company_members where company_id=${company} and user_id=${userId} and role='owner'`)).length === 1
+   }
+   async list(company: string) {
+-    requireSharedOffersCompany(company)
++    requireBusinessAreasCompany(company)
+     return rows<BusinessArea>(this.db, sql`select * from crm.business_areas where company_id=${company} order by slot`)
+   }
+   async enabled(company: string) {
+-    return isSharedOffersCompany(company) && (await this.list(company)).length > 0
++    return isBusinessAreasCompany(company) && (await this.list(company)).length > 0
+   }
+   async get(company: string, id: string) {
+-    requireSharedOffersCompany(company)
++    requireBusinessAreasCompany(company)
+     if (!uuid(id)) throw new BusinessAreaError('not_found', 'Área não encontrada')
+     const [area] = await rows<BusinessArea>(this.db, sql`select * from crm.business_areas where company_id=${company} and id=${id}`)
+     if (!area) throw new BusinessAreaError('not_found', 'Área não encontrada')
+     return area
+   }
+   async initialize(company: string) {
+-    requireSharedOffersCompany(company)
++    requireBusinessAreasCompany(company)
+     await this.db.execute(sql`insert into crm.business_areas(company_id,slot,name)
+       select ${company}::uuid,n,'Admin '||n from generate_series(1,3) n on conflict(company_id,slot) do nothing`)
+     return this.list(company)
+@@ -111,7 +111,7 @@ export class BusinessAreasService {
+   }
+ 
+   async catalog(company: string, area?: string | null) {
+-    requireSharedOffersCompany(company)
++    requireBusinessAreasCompany(company)
+     const result: Record<string, unknown> = {}
+     for (const [kind, table] of Object.entries(AREA_RESOURCE_TABLES)) {
+       const name = kind === 'integration' ? sql.raw('r.label') : kind === 'account' ? sql.raw('coalesce(r.name,r.fb_account_id)') : sql.raw('r.name')
+@@ -123,18 +123,4 @@ export class BusinessAreasService {
+     }
+     return result
+   }
+-  async adoptOffer(company: string, area: string, offerId: string) {
+-    return this.db.transaction(async tx => {
+-      const db = tx as unknown as Database, svc = new BusinessAreasService(db)
+-      await db.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`business-areas:${company}`},0))`)
+-      area = (await svc.get(company, area)).id
+-      if (!uuid(offerId)) throw new BusinessAreaError('not_found', 'Oferta não encontrada')
+-      const [offer] = await rows<{ business_area_id: string | null; flow_id: string }>(db, sql`select business_area_id,config->>'flow_id' as flow_id from crm.offers where company_id=${company} and id=${offerId} for update`)
+-      if (!offer) throw new BusinessAreaError('not_found', 'Oferta não encontrada')
+-      if (offer.business_area_id && offer.business_area_id !== area) throw new BusinessAreaError('conflict', 'Oferta já atribuída a outra área')
+-      if (!offer.business_area_id && !await svc.flowAllowed(company, area, offer.flow_id)) throw new BusinessAreaError('conflict', 'O fluxo da oferta não está disponível no workspace de destino')
+-      await db.execute(sql`update crm.offers set business_area_id=${area},version=version+1,updated_at=now() where company_id=${company} and id=${offerId} and business_area_id is null`)
+-      return { offer_id: offerId, business_area_id: area }
+-    })
+-  }
+ }
+diff --git a/packages/core/src/chats/ingest/chat-ingest.ts b/packages/core/src/chats/ingest/chat-ingest.ts
+index 308f8ab3a328848269ae2cfc5efe0984794e6ce8..b32a1d0cd9566917a1fe664393f280cf253eacc0 100644
+--- a/packages/core/src/chats/ingest/chat-ingest.ts
++++ b/packages/core/src/chats/ingest/chat-ingest.ts
+@@ -1,4 +1,3 @@
+-import { OffersService } from '../../offers/service'
+ // Ingestão dos eventos WhatsApp (WaEvent v1) em contatos, chats e mensagens do CRM (SPEC T33; 03-chats).
+ // Idempotente por empresa/conexao/wa_message_id; chips da mesma empresa podem observar a mesma mensagem.
+ // Mensagens de grupo, status e canais são ignoradas (SPEC 3.8). Opt-out por palavra-chave bloqueia na hora (1.4 nº 3).
+@@ -47,8 +46,6 @@ export interface CrmInboundEvent {
+   chat_created: boolean
+   chat_reopened: boolean
+   /** A mensagem veio de anúncio: `ctwa` (clique para WhatsApp) ou `link` (link rastreável, 1ª ligação do clique). */
+-  offer_managed?: boolean
+-  offer_evidence?: { source_id?: string | null; ctwa_clid?: string | null; click_id?: string | null }
+   ad_source?: 'ctwa' | 'link' | null
+ }
+ 
+@@ -145,12 +142,10 @@ export class ChatIngest {
+     const at = new Date(m.timestamp)
+     // Link rastreável: o código sai do texto gravado (e do que fluxos/agentes leem) e o clique é ligado ao contato.
+     let body = m.text ?? null
+-    let exactClickId: string | null = null
+     let adSource: 'ctwa' | 'link' | null = null
+     if (live && body) {
+       const tracked = await new TrackedLinksService({ db: this.db, now: this.now }).matchInbound(companyId, contact.id, body)
+       if (tracked) {
+-        exactClickId = tracked.clickId
+         body = tracked.cleaned
+         if (tracked.firstMatch) adSource = 'link'
+       }
+@@ -262,8 +257,6 @@ export class ChatIngest {
+           from_me: false,
+           chat_created: r.chatCreated,
+           chat_reopened: r.reopened,
+-          offer_managed: await new OffersService(this.db).managed(companyId,conn.connectionId),
+-          offer_evidence: {source_id:m.ad?.source_id,ctwa_clid:m.ad?.ctwa_clid,click_id:exactClickId},
+           ...(adSource ? { ad_source: adSource } : {}),
+         })
+       }
+diff --git a/packages/core/src/flows/engine/control.ts b/packages/core/src/flows/engine/control.ts
+index 97afc260241a225d75c79999bbde363bbf74195b..d79b79b9bec05d6bfd075f3586ae975389818c1c 100644
+--- a/packages/core/src/flows/engine/control.ts
++++ b/packages/core/src/flows/engine/control.ts
+@@ -2,7 +2,6 @@
+ // prazo (`fireTimer`), cancela e pausa/retoma fluxos. Toda transição trava o run (FOR NO KEY UPDATE, igual ao
+ // `flow-step` da T25): resposta e timer simultâneos → só um avança; o outro vira no-op.
+ // Retomar = run `running` no nó destino do handle, `seq + 1` e novo `flow-step { runId, expectedSeq }`.
+-import { isSharedOffersCompany } from '../../offers/policy'
+ import { and, eq, inArray, sql } from 'drizzle-orm'
+ import { flowRuns, flowVersions, flows, type Database } from '@crm/db'
+ import type { Logger } from '@crm/node-kit'
+@@ -126,7 +125,7 @@ export class FlowControl {
+     const [run] = await this.db
+       .select({ id: flowRuns.id })
+       .from(flowRuns)
+-      .where(and(eq(flowRuns.companyId, ctx.companyId), eq(flowRuns.contactId, contactId), ctx.chatId && isSharedOffersCompany(ctx.companyId) ? sql`(${flowRuns.chatId} = ${ctx.chatId} or not ${flowRuns.offerScoped})` : undefined, eq(flowRuns.status, 'waiting')))
++      .where(and(eq(flowRuns.companyId, ctx.companyId), eq(flowRuns.contactId, contactId), eq(flowRuns.status, 'waiting')))
+       .limit(1)
+     if (!run) return { advanced: false, reason: 'not_found' }
+     return this.resolveReply(run.id, inbound)
+@@ -169,7 +168,7 @@ export class FlowControl {
+     const runs = await this.db
+       .select({ id: flowRuns.id })
+       .from(flowRuns)
+-      .where(and(eq(flowRuns.companyId, ctx.companyId), eq(flowRuns.contactId, contactId), ctx.chatId && isSharedOffersCompany(ctx.companyId) ? sql`(${flowRuns.chatId} = ${ctx.chatId} or not ${flowRuns.offerScoped})` : undefined, inArray(flowRuns.status, [...CANCELLABLE_RUN_STATUSES])))
++      .where(and(eq(flowRuns.companyId, ctx.companyId), eq(flowRuns.contactId, contactId), inArray(flowRuns.status, [...CANCELLABLE_RUN_STATUSES])))
+     let cancelled = 0
+     for (const r of runs) if ((await this.cancel(r.id)).cancelled) cancelled++
+     return { cancelled }
+diff --git a/packages/core/src/flows/engine/offer-scope.db.unit.test.ts b/packages/core/src/flows/engine/offer-scope.db.unit.test.ts
+deleted file mode 100644
+index 6f406ec6cb03e3a1d1d3bae2b8f0a75a581ce939..0000000000000000000000000000000000000000
+--- a/packages/core/src/flows/engine/offer-scope.db.unit.test.ts
++++ /dev/null
+@@ -1,83 +0,0 @@
+-import { randomUUID } from 'node:crypto'
+-import { afterAll, beforeAll, expect, it } from 'vitest'
+-import { companies, contacts, connections, chats, createDb, type Database } from '@crm/db'
+-import { createTempDatabase, type TempDatabase } from '@crm/db/testing'
+-import { sql } from 'drizzle-orm'
+-import { FlowStore } from '../store/store'
+-import { FlowEngine } from './runner'
+-
+-let tmp: TempDatabase, db: Database
+-const originalGate = process.env.SHARED_OFFERS_COMPANY_ID
+-beforeAll(async () => {
+-  tmp = await createTempDatabase({ migrate: true })
+-  db = createDb(tmp.url, { max: 10 })
+-})
+-afterAll(async () => {
+-  if (originalGate === undefined) delete process.env.SHARED_OFFERS_COMPANY_ID
+-  else process.env.SHARED_OFFERS_COMPANY_ID = originalGate
+-  await db?.$client.end()
+-  await tmp?.drop()
+-})
+-
+-async function fixture() {
+-  const [company] = await db.insert(companies).values({ name: 'Scope fixture', slug: randomUUID() }).returning()
+-  process.env.SHARED_OFFERS_COMPANY_ID = company!.id
+-  const [contact] = await db.insert(contacts).values({ companyId: company!.id, name: 'Scope contact' }).returning()
+-  const conversationIds: string[] = []
+-  for (let i = 0; i < 3; i++) {
+-    const [connection] = await db.insert(connections).values({ companyId: company!.id, sessionId: randomUUID(), name: `Chip ${i}` }).returning()
+-    const [chat] = await db.insert(chats).values({ companyId: company!.id, contactId: contact!.id, connectionId: connection!.id }).returning()
+-    conversationIds.push(chat!.id)
+-  }
+-  const ctx = { companyId: company!.id }, store = new FlowStore(db)
+-  const flow = await store.createFlow(ctx, { name: 'Scope flow' })
+-  await store.fromDefinition(ctx, flow.id, {
+-    schema: 'crm.flow/v1', entry: 'start', nodes: [{ id: 'start', type: 'start', name: 'Start', position: { x: 0, y: 0 }, actions: [] }],
+-    edges: [], variables: [], refs: {},
+-  })
+-  await store.publish(ctx, flow.id)
+-  const offer = (await db.execute(sql`insert into crm.offers(company_id,name,config) values(${ctx.companyId},'Scope offer','{}') returning id`)).rows[0]!
+-  const ops: string[] = []
+-  for (const chat of conversationIds.slice(0, 2)) {
+-    const op = (await db.execute(sql`insert into crm.offer_opportunities(company_id,offer_id,contact_id,chat_id,snapshot,evidence)
+-      values(${ctx.companyId},${offer.id},${contact!.id},${chat},'{}','{}') returning id`)).rows[0]!
+-    ops.push(String(op.id))
+-  }
+-  // No enqueue: no worker can consume or finish the active runs under test.
+-  const engine = new FlowEngine({ db, wa: {} as never })
+-  const common = { flowId: flow.id, contactId: contact!.id }
+-  const startOffer = (index = 0) => engine.startRun(ctx, { ...common, chatId: conversationIds[index], trigger: { opportunity_id: ops[index] } })
+-  const startLegacy = (withChat: boolean) => engine.startRun(ctx, { ...common, ...(withChat ? { chatId: conversationIds[2] } : {}) })
+-  const active = async () => (await db.execute(sql`select id,offer_scoped,chat_id from crm.flow_runs where company_id=${ctx.companyId} and status in ('running','waiting')`)).rows
+-  return { startOffer, startLegacy, active }
+-}
+-
+-for (const withChat of [true, false]) {
+-  it(`offer then legacy (${withChat ? 'chat' : 'no chat'}): second start conflicts by contact`, async () => {
+-    const f = await fixture()
+-    await f.startOffer()
+-    await expect(f.startLegacy(withChat)).rejects.toMatchObject({ code: 'run_active' })
+-    expect(await f.active()).toHaveLength(1)
+-  })
+-  it(`legacy (${withChat ? 'chat' : 'no chat'}) then offer: second start conflicts`, async () => {
+-    const f = await fixture()
+-    await f.startLegacy(withChat)
+-    await expect(f.startOffer()).rejects.toMatchObject({ code: 'run_active' })
+-    expect(await f.active()).toHaveLength(1)
+-  })
+-  it(`concurrent legacy (${withChat ? 'chat' : 'no chat'}) and offer: exactly one running`, async () => {
+-    for (let attempt = 0; attempt < 5; attempt++) {
+-      const f = await fixture()
+-      const result = await Promise.allSettled([f.startOffer(), f.startLegacy(withChat)])
+-      expect(result.filter(r => r.status === 'fulfilled')).toHaveLength(1)
+-      expect(result.filter(r => r.status === 'rejected')).toHaveLength(1)
+-      expect(await f.active()).toHaveLength(1)
+-    }
+-  })
+-}
+-it('two offers in different chats can start concurrently; another in the same chat conflicts', async () => {
+-  const f = await fixture()
+-  await Promise.all([f.startOffer(0), f.startOffer(1)])
+-  expect(await f.active()).toHaveLength(2)
+-  await expect(f.startOffer(0)).rejects.toMatchObject({ code: 'run_active' })
+-})
+diff --git a/packages/core/src/flows/engine/runner.ts b/packages/core/src/flows/engine/runner.ts
+index f7e227e3aa07249f9c6623a23ddcffc2fd50d245..311aa98569132c966aee353a189cd2fefccc3bbe 100644
+--- a/packages/core/src/flows/engine/runner.ts
++++ b/packages/core/src/flows/engine/runner.ts
+@@ -1,5 +1,3 @@
+-import { isSharedOffersCompany } from '../../offers/policy'
+-import { OffersService, offerRows } from '../../offers/service'
+ // Motor de fluxos (T25): executa a versão publicada de um fluxo para um contato, de forma idempotente sobre BullMQ.
+ // - Estado do run em `flow_runs`; o job `flow-step { runId, expectedSeq }` trava o run (FOR NO KEY UPDATE) e só
+ //   executa se `seq === expectedSeq` e o run está `running`: entregas duplicadas viram no-op.
+@@ -51,7 +49,7 @@ export function sendRetryWindow(err: unknown): keyof typeof SEND_RETRY_DELAY_MS
+   return m ? (m[1] as 'minute' | 'hour') : null
+ }
+ 
+-export type FlowEngineErrorCode = 'not_found' | 'flow_not_published' | 'flow_not_active' | 'contact_not_found' | 'run_active' | 'offer_required'
++export type FlowEngineErrorCode = 'not_found' | 'flow_not_published' | 'flow_not_active' | 'contact_not_found' | 'run_active'
+ 
+ export class FlowEngineError extends Error {
+   constructor(
+@@ -287,33 +285,13 @@ export class FlowEngine {
+       .limit(1)
+     if (!contact) throw new FlowEngineError('contact_not_found', 'Contato não encontrado')
+     if(input.chatId && !(await this.db.select({id:chats.id}).from(chats).where(and(eq(chats.id,input.chatId),eq(chats.companyId,ctx.companyId),eq(chats.contactId,input.contactId)))).length) throw new FlowEngineError('contact_not_found','Chat incompatível com o contato/empresa')
+-    if(input.chatId) {
+-      const [chat]=await offerRows<{connection_id:string}>(this.db,sql`select connection_id from crm.chats where id=${input.chatId} and company_id=${ctx.companyId}`)
+-      if(chat && await new OffersService(this.db).managed(ctx.companyId,chat.connection_id)) {
+-        const op=String(input.trigger?.opportunity_id??'')
+-        const valid=await offerRows(this.db,sql`select 1 from crm.offer_opportunities where id::text=${op} and company_id=${ctx.companyId} and chat_id=${input.chatId} and contact_id=${input.contactId}`)
+-        if(!valid.length) throw new FlowEngineError('offer_required','Selecione uma oferta para esta conversa')
+-      }
+-    }
+-    if (input.trigger?.opportunity_id && !isSharedOffersCompany(ctx.companyId)) throw new FlowEngineError('offer_required')
+     const definition = version.definition as unknown as FlowDefinition
+     const trigger = await initialTrigger(this.db, ctx.companyId, input.contactId, input.chatId, input.trigger)
+     let runId: string
+     try {
+       const row = await this.db.transaction(async tx=>{
+         await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${ctx.companyId}),hashtext(${input.contactId}))`)
+-        // The NEW run determines the conflict scope. An ordinary run owns the
+-        // contact even when its chat is filled; only a validated opportunity may
+-        // coexist with another offer in a different conversation.
+-        let offerScoped = false
+-        if (trigger?.opportunity_id) {
+-          const valid = await offerRows(tx as unknown as Database, sql`select 1 from crm.offer_opportunities
+-            where id::text=${String(trigger.opportunity_id)} and company_id=${ctx.companyId}
+-            and chat_id=${input.chatId ?? null}::uuid and contact_id=${input.contactId}`)
+-          if (!isSharedOffersCompany(ctx.companyId) || !valid.length) throw new FlowEngineError('offer_required')
+-          offerScoped = true
+-        }
+-        const conflicting=await tx.select({id:flowRuns.id}).from(flowRuns).where(and(eq(flowRuns.companyId,ctx.companyId),eq(flowRuns.contactId,input.contactId),sql`${flowRuns.status} in ('running','waiting')`,offerScoped?sql`(${flowRuns.chatId}=${input.chatId} or not ${flowRuns.offerScoped})`:undefined))
++        const conflicting=await tx.select({id:flowRuns.id}).from(flowRuns).where(and(eq(flowRuns.companyId,ctx.companyId),eq(flowRuns.contactId,input.contactId),sql`${flowRuns.status} in ('running','waiting')`))
+         if(conflicting.length) throw new FlowEngineError('run_active','Conversa já está em um fluxo')
+         const [row] = await tx.insert(flowRuns)
+         .values({
+@@ -323,7 +301,6 @@ export class FlowEngine {
+           version: version.version,
+           contactId: input.contactId,
+           chatId: input.chatId ?? null,
+-          offerScoped,
+           status: 'running',
+           currentNodeKey: definition.entry,
+           seq: 0,
+@@ -335,7 +312,7 @@ export class FlowEngine {
+       })
+       runId = row.id
+     } catch (err) {
+-      if ((isUniqueViolation(err, 'flow_runs_active_contact_uq') || isUniqueViolation(err, 'flow_runs_active_chat_uq'))) throw new FlowEngineError('run_active', 'O contato já está em um fluxo')
++      if (isUniqueViolation(err, 'flow_runs_active_contact_uq')) throw new FlowEngineError('run_active', 'O contato já está em um fluxo')
+       throw err
+     }
+     await this.opts.enqueue?.({ runId, expectedSeq: 0 })
+@@ -352,7 +329,6 @@ export class FlowEngine {
+     const result = await this.db.transaction(async (tx): Promise<StepResult> => {
+       const [run] = await tx.select().from(flowRuns).where(sql`${flowRuns.id}::text = ${runId}`).for('no key update').limit(1)
+       if (!run) return { executed: false, reason: 'not_found' }
+-      if (run.offerScoped && !isSharedOffersCompany(run.companyId)) throw new Error('Shared offers disabled for company; run paused')
+       if (run.status !== 'running') return { executed: false, reason: 'not_running' }
+       if (run.seq !== expectedSeq) return { executed: false, reason: 'stale' }
+       companyId = run.companyId
+diff --git a/packages/core/src/flows/nodes/crm/handlers.ts b/packages/core/src/flows/nodes/crm/handlers.ts
+index 09d5988941320a8698ef48598dd8841ee4bd4dd4..58b4506cdaf3a83f30425850bb6fab47690383ac 100644
+--- a/packages/core/src/flows/nodes/crm/handlers.ts
++++ b/packages/core/src/flows/nodes/crm/handlers.ts
+@@ -1,4 +1,3 @@
+-import { opportunityForRun, recordExplicitOfferSale, queueOfferBlockPush } from '../../../offers/service'
+ // Handlers dos nós de CRM (T63): etiquetas, controle do chat, departamento, kanban, manipulador, venda aprovada e
+ // agente de IA. Reaproveitam os serviços dos módulos (contatos T26, ciclo de vida do chat T48, kanban T50, vendas
+ // T34) com ator de sistema; efeitos externos únicos (venda, push) passam por `ctx.once` (retry do passo não repete).
+@@ -224,15 +223,14 @@ export function crmHandlers(deps: CrmDeps = {}): Record<'tags' | 'chat_controlle
+     approved_sale: {
+       async execute(ctx) {
+         const db = dbOf(ctx)
+-        const offer = await opportunityForRun(db, ctx.companyId, ctx.runId)
+         const c = configOf(ctx, 'register_approved_sale')
+         const render = await renderer(ctx)
+         const publicId = String(c.product_public_id ?? '').trim()
+-        const [product] = offer ? await db.select().from(products).where(and(eq(products.companyId,ctx.companyId),eq(products.id,offer.snapshot.product_id))) : UUID_RE.test(publicId) ? await db.select().from(products).where(and(eq(products.companyId, ctx.companyId), eq(products.publicId, publicId))) : []
++        const [product] = UUID_RE.test(publicId) ? await db.select().from(products).where(and(eq(products.companyId, ctx.companyId), eq(products.publicId, publicId))) : []
+         if (!product) throw new CrmNodeError('product_not_found', 'produto não encontrado')
+         const amount = saleAmountCents(render(typeof c.amount_template === 'string' && c.amount_template ? c.amount_template : '{comprovante.valor}'), product)
+         const currencyRaw = render(typeof c.currency_template === 'string' && c.currency_template ? c.currency_template : '{comprovante.currency}').trim().toUpperCase()
+-        const currency = offer?.snapshot.currency ?? (/^[A-Z]{3}$/.test(currencyRaw) ? currencyRaw : product.currency)
++        const currency = (/^[A-Z]{3}$/.test(currencyRaw) ? currencyRaw : product.currency)
+         let customer = render(typeof c.customer_name_template === 'string' && c.customer_name_template ? c.customer_name_template : '{comprovante.nome_pagador}').trim()
+         let connectionId: string | null = null
+         if (ctx.chatId) {
+@@ -241,8 +239,7 @@ export function crmHandlers(deps: CrmDeps = {}): Record<'tags' | 'chat_controlle
+         }
+         if (!customer && ctx.contactId) customer = ((await db.select({ name: contacts.name }).from(contacts).where(eq(contacts.id, ctx.contactId)))[0]?.name ?? '').trim()
+ 
+-        // Ofertas reutilizam a venda confirmada e persistem o push por chave do passo; legado conserva ctx.once.
+-        const result = offer ? await recordExplicitOfferSale(db,offer,amount.cents,ctx.idempotencyKey('approved_sale')) : await ctx.once('approved_sale', async () => {
++        const result = await ctx.once('approved_sale', async () => {
+           const { sale, created } = await new SalesService({ db, ...(deps.publisher ? { publisher: deps.publisher as never } : {}) }).record({
+             companyId: ctx.companyId,
+             source: 'flow',
+@@ -262,12 +259,11 @@ export function crmHandlers(deps: CrmDeps = {}): Record<'tags' | 'chat_controlle
+ 
+         const titleT = typeof c.push_title_template === 'string' ? c.push_title_template : ''
+         const bodyT = typeof c.push_body_template === 'string' ? c.push_body_template : ''
+-        if ((offer || result.created) && (titleT.trim() || bodyT.trim())) {
++        if (result.created && (titleT.trim() || bodyT.trim())) {
+           const saleVars: Record<string, string> = { 'produto.nome': product.name, 'venda.valor': formatMoney(amount.cents), 'venda.moeda': currency, 'venda.cliente': customer }
+           const fill = (t: string) => render(t.replace(/\{\s*(produto\.nome|venda\.valor|venda\.moeda|venda\.cliente)\s*\}/g, (_m, k: string) => saleVars[k] ?? ''))
+           const push={ title: fill(titleT), body: fill(bodyT), url: null, kind: 'approved_sale' as const, sale_id: result.saleId }
+-          if(offer) await queueOfferBlockPush(db,ctx.companyId,result.saleId,ctx.idempotencyKey('approved_sale_push'),push)
+-          else await ctx.once('approved_sale_push', async () => {
++          await ctx.once('approved_sale_push', async () => {
+             await publish(deps, ctx.companyId, 'notification.created', push)
+             return true
+           })
+diff --git a/packages/core/src/flows/nodes/payment/index.ts b/packages/core/src/flows/nodes/payment/index.ts
+index 15a65f228de7b9273c93f0780436b741a310a34d..2964786f9e473ff759242e7ccd62696d63fded39 100644
+--- a/packages/core/src/flows/nodes/payment/index.ts
++++ b/packages/core/src/flows/nodes/payment/index.ts
+@@ -1,4 +1,3 @@
+-import { opportunityForRun, OffersService } from '../../../offers/service'
+ // Nó Pagamento (T111; 19 §3.8, §5.5; 06 §3.5): `create_payment_charge` cria a cobrança no gateway da integração
+ // (T109/T110) e expõe `{gateway.transaction_id|checkout_url|payment_code|qr_url|value|error}`.
+ // - Saídas: `output:charge_created`, `output:payment_approved` e `failure` (o "Erro" do produto).
+@@ -7,7 +6,7 @@ import { opportunityForRun, OffersService } from '../../../offers/service'
+ // - Sem essa aresta: o run espera no nó (`wait.kind = 'payment'`) até o webhook (`resolvePayment`) ou o fim do TTL.
+ // - Valor com vírgula/ponto e variáveis; "chave sem valor" (`open_amount`) cria sem valor e usa o pago no webhook.
+ // - Grava só pela transação do passo (`ctx.repo.db`); a cobrança acontece uma vez por passo (`ctx.once`).
+-import { and, eq, sql } from 'drizzle-orm'
++import { and, eq } from 'drizzle-orm'
+ import { flowNodes, paymentCharges, type Database } from '@crm/db'
+ import { handle, PAYMENT_OUTPUTS } from '@crm/shared'
+ import { parseMoney } from '../../../meta-capi/hashing'
+@@ -91,12 +90,7 @@ export function paymentHandler(deps: PaymentNodeDeps = {}): NodeHandler {
+       }
+       try {
+         const gatewayId = str(c.gateway).trim()
+-        const opportunity = await opportunityForRun(db, ctx.companyId, ctx.runId)
+-        if (!opportunity && ctx.chatId) {
+-          const [chat]=(await db.execute(sql`select connection_id from crm.chats where id=${ctx.chatId} and company_id=${ctx.companyId}`)).rows as {connection_id:string}[]
+-          if(chat && await new OffersService(db).managed(ctx.companyId,chat.connection_id)) throw new PaymentNodeError('offer_unresolved','Escolha explicitamente uma oferta')
+-        }
+-        const integrationId = opportunity?.snapshot.integration_id ?? str(c.payment_integration_id).trim()
++        const integrationId = str(c.payment_integration_id).trim()
+         if (!integrationId) throw new PaymentNodeError('integration_missing', 'selecione a integração de pagamento')
+         const integrations = deps.paymentIntegrations ?? new PaymentIntegrationsService({ db })
+         let gateway: PaymentGateway
+@@ -116,7 +110,7 @@ export function paymentHandler(deps: PaymentNodeDeps = {}): NodeHandler {
+           return v || undefined
+         }
+         const req: ChargeRequest = {
+-          currency: opportunity?.snapshot.currency ?? (str(c.currency).trim() || 'BRL').toUpperCase(),
++          currency: (str(c.currency).trim() || 'BRL').toUpperCase(),
+           method: str(c.method).trim().toUpperCase() || 'PIX',
+           amount_cents: amountCents,
+           name: render('name'),
+@@ -142,7 +136,6 @@ export function paymentHandler(deps: PaymentNodeDeps = {}): NodeHandler {
+             .insert(paymentCharges)
+             .values({
+               companyId: ctx.companyId,
+-              opportunityId: opportunity?.id ?? null,
+               integrationId,
+               gateway: gateway.id as never,
+               flowRunId: ctx.runId,
+diff --git a/packages/core/src/flows/nodes/pixel/index.ts b/packages/core/src/flows/nodes/pixel/index.ts
+index 6f3f5dec1ab1f91f9ede50ad4a956573c3453c77..8c89ddbc8c92286a3f6c980819b5329418dd5981 100644
+--- a/packages/core/src/flows/nodes/pixel/index.ts
++++ b/packages/core/src/flows/nodes/pixel/index.ts
+@@ -1,4 +1,3 @@
+-import { opportunityForRun, OffersService } from '../../../offers/service'
+ // Nó Pixel (T104; 06 §3.5; 11 §5.4): `send_pixel_event` manda `Compra` (Purchase), `Lead` e (revisão 3) os eventos
+ // padrão InitiateCheckout, AddToCart, CompleteRegistration, Contact, Schedule e Subscribe pela Conversions API. O modo
+ // (chat ou business_messaging, com fallback) é decidido pelo CapiService a partir do pixel e do contato.
+@@ -11,7 +10,6 @@ import { opportunityForRun, OffersService } from '../../../offers/service'
+ // `registerPixelNodes` troca o stub do grupo `pixel` em `nodes/index.ts`; `configurePixelNodes` define as deps do processo.
+ import type { Database } from '@crm/db'
+ import { sql } from 'drizzle-orm'
+-import { parseMoney } from '../../../meta-capi/hashing'
+ import { eventJobId, type CapiEventEnqueue } from '../../../meta-capi/ad-lead'
+ import { CAPI_EVENT_DISABLED, CAPI_EVENT_NAMES, CapiService, type CapiEventName, type CapiSendResult, type CapiServiceOptions } from '../../../meta-capi/service'
+ import type { NodeContext, NodeHandler, NodeOutcome } from '../../engine/context'
+@@ -59,14 +57,6 @@ export function pixelHandler(deps: PixelNodeDeps = {}): NodeHandler {
+       const db = ctx.repo.db as Database | null
+       if (ctx.repo.dryRun || !db) return ok
+       try {
+-        const offer = await opportunityForRun(db, ctx.companyId, ctx.runId)
+-        if (offer) {
+-          const c=configOf(ctx), eventName=pixelEventName(c.event_type)
+-          if(eventName==='Purchase') {ctx.setVar('pixel',{status:'deferred',reason:'offer_outbox_canonical'});return ok}
+-          const amount=parseMoney(typeof c.item_value==='string'?ctx.render(c.item_value):c.item_value as number)
+-          const queued = await new OffersService(db).queueEvent(offer,eventName,ctx.idempotencyKey('pixel'),amount==null?undefined:Math.round(amount*100))
+-          ctx.setVar('pixel',{status:queued?'queued':'skipped',event:eventName,event_id:ctx.idempotencyKey('pixel')});return ok
+-        }
+         const c = configOf(ctx)
+         const pixelConfigId = String(c.pixel_config_id ?? '').trim()
+         if (!pixelConfigId) throw new PixelNodeError('pixel_not_configured', 'selecione o pixel')
+diff --git a/packages/core/src/flows/triggers/triggers.ts b/packages/core/src/flows/triggers/triggers.ts
+index 9a00ee304a4dc859b6ed06678d99f5986894d531..86f20811a1b24c05bac2253a40c6062e35734e2d 100644
+--- a/packages/core/src/flows/triggers/triggers.ts
++++ b/packages/core/src/flows/triggers/triggers.ts
+@@ -1,5 +1,3 @@
+-import { isSharedOffersCompany } from '../../offers/policy'
+-import { OffersService } from '../../offers/service'
+ // Gatilhos de início de fluxo (T61; 06 §3.8, SPEC 10.2 nº 5): decide, para cada mensagem nova do contato
+ // (`crm.inbound`, T33), se um fluxo começa. Ordem:
+ //   1. idempotência por mensagem (`flow_trigger_events`): a mesma entrega duas vezes não cria dois runs;
+@@ -131,7 +129,7 @@ export class FlowTriggers {
+     if (!chat) return { outcome: 'none' }
+     const config = await this.config(input.companyId, chat.connectionId)
+     if (!config?.finishedAttendanceFlowId) return { outcome: 'none' }
+-    if (await this.hasActiveRun(input.companyId, chat.contactId,chat.id)) return { outcome: 'active_run' }
++    if (await this.hasActiveRun(input.companyId, chat.contactId)) return { outcome: 'active_run' }
+     const started = await this.start(input.companyId, config.finishedAttendanceFlowId, chat.contactId, chat.id, { type: 'finished_attendance' })
+     return { outcome: 'none', flow_id: config.finishedAttendanceFlowId, run_id: started.runId, ...(started.error ? { error: started.error } : {}) }
+   }
+@@ -140,15 +138,6 @@ export class FlowTriggers {
+ 
+   private async decide(e: CrmInboundEvent): Promise<FlowTriggerResult> {
+     const companyId = e.company_id
+-    if (e.offer_managed) {
+-      if (await this.hasActiveRun(companyId,e.contact_id,e.chat_id)) return {outcome:'active_run'}
+-      if (!e.offer_evidence?.source_id && !e.offer_evidence?.click_id) return {outcome:'none'}
+-      const resolved = await new OffersService(this.db).createOpportunity(companyId,e.chat_id,{...e.offer_evidence,message_id:e.message_id})
+-      if (!resolved.opportunity) return {outcome:'none'}
+-      const op=resolved.opportunity
+-      const started=await this.opts.engine.startRun({companyId},{versionId:op.snapshot.version_id,contactId:e.contact_id,chatId:e.chat_id,trigger:{opportunity_id:op.id,type:'offer'}})
+-      return {outcome:'none',flow_id:op.snapshot.flow_id,run_id:started.runId}
+-    }
+     if (await this.isRunReply(e)) return { outcome: 'run_reply' }
+ 
+     const config = await this.config(companyId, e.connection_id)
+@@ -175,7 +164,7 @@ export class FlowTriggers {
+ 
+     const auto = config ? await this.automatic(e, config) : null
+     if (!auto) return { outcome: 'none', out_of_hours: outOfHours.result }
+-    if (await this.hasActiveRun(companyId, e.contact_id,e.chat_id)) return { outcome: 'active_run', flow_id: auto.flowId, out_of_hours: outOfHours.result }
++    if (await this.hasActiveRun(companyId, e.contact_id)) return { outcome: 'active_run', flow_id: auto.flowId, out_of_hours: outOfHours.result }
+     const started = await this.start(companyId, auto.flowId, e.contact_id, e.chat_id, { type: auto.type, message_id: e.message_id })
+     return { outcome: auto.type, flow_id: auto.flowId, run_id: started.runId, out_of_hours: outOfHours.result, ...(started.error ? { error: started.error } : {}) }
+   }
+@@ -189,7 +178,6 @@ export class FlowTriggers {
+         and(
+           eq(flowRuns.companyId, e.company_id),
+           eq(flowRuns.contactId, e.contact_id),
+-          isSharedOffersCompany(e.company_id) ? sql`(${flowRuns.chatId}=${e.chat_id} or not ${flowRuns.offerScoped})` : undefined,
+           or(
+             and(eq(flowRuns.status, 'waiting'), sql`coalesce(${flowRuns.wait}->>'kind', 'reply') = 'reply'`),
+             sql`${flowRuns.vars}->'reply'->>'message_id' = ${e.message_id}`,
+@@ -225,11 +213,11 @@ export class FlowTriggers {
+     return !state?.paused
+   }
+ 
+-  private async hasActiveRun(companyId: string, contactId: string, chatId?:string): Promise<boolean> {
++  private async hasActiveRun(companyId: string, contactId: string): Promise<boolean> {
+     const [run] = await this.db
+       .select({ id: flowRuns.id })
+       .from(flowRuns)
+-      .where(and(eq(flowRuns.companyId, companyId), eq(flowRuns.contactId, contactId), chatId && isSharedOffersCompany(companyId) ? sql`(${flowRuns.chatId}=${chatId} or not ${flowRuns.offerScoped})` : undefined, inArray(flowRuns.status, [...ACTIVE_FLOW_RUN_STATUSES])))
++      .where(and(eq(flowRuns.companyId, companyId), eq(flowRuns.contactId, contactId), inArray(flowRuns.status, [...ACTIVE_FLOW_RUN_STATUSES])))
+       .limit(1)
+     return Boolean(run)
+   }
+diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts
+index ff7956be579b8f66110c5c87377d631ba87d21f3..dc689e06179ecacef842a012bbaee72ccfcb1647 100644
+--- a/packages/core/src/index.ts
++++ b/packages/core/src/index.ts
+@@ -88,5 +88,4 @@ export * from './mcp-oauth/index'
+ export * from './flow-copilot'
+ 
+ export * from './business-areas/service'
+-export * from './offers/service'
+-export * from './offers/policy'
++export * from './business-areas/policy'
+diff --git a/packages/core/src/meta-ads/mutations/service.ts b/packages/core/src/meta-ads/mutations/service.ts
+index 0e30cb488050a6d5c03b624e87a962d66a32aa08..682ca8be3d36ee1d970c29cd2e8c3ed2ef475301 100644
+--- a/packages/core/src/meta-ads/mutations/service.ts
++++ b/packages/core/src/meta-ads/mutations/service.ts
+@@ -10,7 +10,7 @@ import { metaAdAccounts, type Database } from '@crm/db'
+ import type { Redis } from 'ioredis'
+ import { MetaGraphError } from '../client/graph'
+ import { metaAreaFilter, type MetaProfilesService } from '../profiles/service'
+-import { isSharedOffersCompany } from '../../offers/policy'
++import { isBusinessAreasCompany } from '../../business-areas/policy'
+ import { DEFAULT_RATE_LIMIT_WAIT_MS, isRateLimitError } from '../structure/account'
+ import type { MetaBundleService } from '../structure/service'
+ 
+@@ -119,7 +119,7 @@ export class MetaMutationsService {
+     const token = await this.opts.profiles.accessToken(companyId, account.profileId, area)
+     try {
+       const graph = this.opts.profiles.graph(token)
+-      if (isSharedOffersCompany(companyId)) {
++      if (isBusinessAreasCompany(companyId)) {
+         const entity = await graph.get<{ account_id?: string }>(entityId, { fields: 'account_id' })
+         if (entity.account_id !== account.fbAccountId.replace(/^act_/, ''))
+           throw new MetaMutationError('not_found', 'Entidade não pertence à conta de anúncio selecionada')
+diff --git a/packages/core/src/meta-ads/sales-join/service.ts b/packages/core/src/meta-ads/sales-join/service.ts
+index 83f65c17352f1845bd031e7fd79501e1f3d76051..e20bf32352fdf94d2fc908efd96609d7a2fb0203 100644
+--- a/packages/core/src/meta-ads/sales-join/service.ts
++++ b/packages/core/src/meta-ads/sales-join/service.ts
+@@ -35,7 +35,6 @@ export class InternalSalesError extends Error {
+ 
+ export interface InternalSalesQuery {
+   companyId: string
+-  businessAreaId?: string
+   /** `YYYY-MM-DD` no fuso da empresa (inclusive). */
+   since: string
+   until: string
+@@ -48,7 +47,7 @@ export interface InternalSalesQuery {
+ }
+ 
+ /** Contrato da opção `internalSales` do `MetaBundleService` (T101): preenche as linhas e devolve avisos. */
+-type SalesPeriod = { since: string; until: string; displayCurrency: string; businessAreaId?: string }
++type SalesPeriod = { since: string; until: string; displayCurrency: string }
+ export interface SalesJoin {
+   apply(
+     companyId: string,
+@@ -110,10 +109,6 @@ export class InternalSalesService implements SalesJoin {
+           gte(sales.soldAt, lo),
+           lt(sales.soldAt, hi),
+           inArray(sales.sourceId, ids),
+-          q.businessAreaId ? sql`exists (
+-            select 1 from crm.offer_opportunities o where o.company_id=${sales.companyId} and o.id=${sales.opportunityId}
+-              and o.snapshot->>'business_area_id'=${q.businessAreaId}
+-          )` : undefined,
+           q.confidence === 'probable' ? eq(sales.attributionConfidence, 'probable') : inArray(sales.attributionConfidence, ['confirmed_native', 'confirmed_link']),
+         ),
+       )
+@@ -134,7 +129,6 @@ export class InternalSalesService implements SalesJoin {
+   ): Promise<JoinResult> {
+     const aggregates = await this.aggregates({
+       companyId,
+-      ...(period.businessAreaId ? { businessAreaId: period.businessAreaId } : {}),
+       ...(period.confidence ? { confidence: period.confidence } : {}),
+       since: period.since,
+       until: period.until,
+diff --git a/packages/core/src/meta-capi/ad-lead.ts b/packages/core/src/meta-capi/ad-lead.ts
+index 6be6871ef4f93525fcc7273006ef5388b3be9eca..aa3d138ceb5aad7e4a33d4e09308563556fb3227 100644
+--- a/packages/core/src/meta-capi/ad-lead.ts
++++ b/packages/core/src/meta-capi/ad-lead.ts
+@@ -18,7 +18,7 @@ export interface MetaCapiAdLeadJobData {
+   via?: 'ctwa' | 'link'
+ }
+ 
+-export type MetaCapiJobData = {kind:'offer';outboxId:string} | MetaCapiSaleJobData | MetaCapiAdLeadJobData | MetaCapiEventJobData
++export type MetaCapiJobData = MetaCapiSaleJobData | MetaCapiAdLeadJobData | MetaCapiEventJobData
+ 
+ export const isAdLeadJob = (d: MetaCapiJobData): d is MetaCapiAdLeadJobData => (d as { kind?: unknown }).kind === 'ad_lead'
+ export const adLeadEventId = (contactId: string) => `ad-lead-${contactId}`
+diff --git a/packages/core/src/meta-capi/pixels.ts b/packages/core/src/meta-capi/pixels.ts
+index 0fd3924b9281b99fdf2288b94938be8e565bf321..52e5b4f066fdfeeafd2351fadd9d43c4138c6e34 100644
+--- a/packages/core/src/meta-capi/pixels.ts
++++ b/packages/core/src/meta-capi/pixels.ts
+@@ -1,4 +1,3 @@
+-import { isOfferDestinationLocked } from '../offers/service'
+ // Configurações de pixel (T104; 11 §3.3, §5.4): CRUD por empresa com o token CAPI cifrado. A listagem e o GET
+ // devolvem só os campos mascarados; o token em claro só sai com `include_access_token=true` (a rota exige
+ // `facebook.pixel`).
+@@ -154,16 +153,13 @@ export class PixelConfigService {
+         updatedAt: this.now(),
+       })
+       .where(eq(pixelConfigs.id, cur.id))
+-      .returning().catch(error=>{
+-        if(isOfferDestinationLocked(error)) throw new PixelConfigError('validation','Destino referenciado por oferta: crie um novo registro de pixel para outra identidade. A rotação de token continua permitida.')
+-        throw error
+-      })
++      .returning()
+     return this.dto(row!, false)
+   }
+ 
+   async remove(companyId: string, id: string, area: string | null = null): Promise<void> {
+     const cur = await this.row(companyId, id, area)
+-    await this.opts.db.delete(pixelConfigs).where(eq(pixelConfigs.id, cur.id)).catch(error=>{if(isOfferDestinationLocked(error)) throw new PixelConfigError('validation','Pixel referenciado por oferta: preserve este registro e crie um novo registro.');throw error})
++    await this.opts.db.delete(pixelConfigs).where(eq(pixelConfigs.id, cur.id))
+   }
+ 
+   /** Token decifrado (uso interno do CapiService). */
+diff --git a/packages/core/src/meta-capi/sales.ts b/packages/core/src/meta-capi/sales.ts
+index 18a53da0a03ccb37138efe7d4111a7b5706c2651..1b7531468d59bc6578747371fe65ec3177584064 100644
+--- a/packages/core/src/meta-capi/sales.ts
++++ b/packages/core/src/meta-capi/sales.ts
+@@ -1,4 +1,3 @@
+-import { OffersService } from '../offers/service'
+ // Envio automático de vendas à Conversions API (T104): cada `sale.recorded` vira um job `meta-capi` que manda um
+ // `Purchase` (`event_id = sale-<saleId>`, `action_source: system_generated`) para os pixels da empresa com
+ // `auto_send_sales`. O decorator `capiSalePublisher` envolve o publisher do realtime (o mesmo que o SalesService
+@@ -81,8 +80,8 @@ export async function sendSaleToPixels(deps: { db: Database; capi: Pick<CapiServ
+     .where(and(eq(sales.companyId, data.companyId), eq(sales.id, data.saleId)))
+     .limit(1)
+   if (!sale) throw new SaleNotVisibleError(data.saleId)
+-  if(sale.connectionId && await new OffersService(deps.db).managed(data.companyId,sale.connectionId)) return []
+-  if (sale.opportunityId) return [] // Offer outbox is the sole Purchase publisher.
++  // Venda histórica do antigo fluxo de ofertas: o Purchase já foi tratado pelo outbox legado; nunca reenviar.
++  if (sale.opportunityId) return []
+   if (sale.status !== 'approved') return []
+   const pixels = await deps.db
+     .select({ id: pixelConfigs.id })
+diff --git a/packages/core/src/offers/policy.ts b/packages/core/src/offers/policy.ts
+deleted file mode 100644
+index 3e16601617ccb91dacde648cf3cc890106af32e4..0000000000000000000000000000000000000000
+--- a/packages/core/src/offers/policy.ts
++++ /dev/null
+@@ -1,15 +0,0 @@
+-/** Server-only opt-in. Names, login claims and client headers never authorize this feature. */
+-export function sharedOffersCompany(env: Record<string,string|undefined> = process.env): string | null {
+- const id=env.SHARED_OFFERS_COMPANY_ID;
+- return id && /^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(id) ? id.toLowerCase() : null
+-}
+-export function isSharedOffersCompany(company: string, env: Record<string,string|undefined> = process.env): boolean {
+- return sharedOffersCompany(env) === company.toLowerCase()
+-}
+-/** Decorate server-produced company summaries consistently, before any auth response is cached. */
+-export function withCompanyCapabilities<T extends { id: string }>(companies: T[]): (T & { shared_offers: boolean })[] {
+- return companies.map(company => ({ ...company, shared_offers: isSharedOffersCompany(company.id) }))
+-}
+-export function requireSharedOffersCompany(company: string) {
+- if (!isSharedOffersCompany(company)) throw new Error('Shared offers unavailable for this company')
+-}
+diff --git a/packages/core/src/offers/policy.unit.test.ts b/packages/core/src/offers/policy.unit.test.ts
+deleted file mode 100644
+index ae6a18e497e28ce72db511d1266be105855a164d..0000000000000000000000000000000000000000
+--- a/packages/core/src/offers/policy.unit.test.ts
++++ /dev/null
+@@ -1,7 +0,0 @@
+-import { describe,it,expect } from 'vitest'
+-import { sharedOffersCompany,isSharedOffersCompany } from './policy'
+-describe('server-only shared offers policy',()=>{
+- const id='11111111-1111-4111-8111-111111111111'
+- it('fails closed without a single explicit UUID',()=>{for(const value of [undefined,'','admin','*',id+','+id,' '+id]) expect(sharedOffersCompany({SHARED_OFFERS_COMPANY_ID:value})).toBeNull()})
+- it('authorizes only the configured UUID',()=>{expect(isSharedOffersCompany(id,{SHARED_OFFERS_COMPANY_ID:id})).toBe(true);expect(isSharedOffersCompany('22222222-2222-4222-8222-222222222222',{SHARED_OFFERS_COMPANY_ID:id})).toBe(false)})
+-})
+diff --git a/packages/core/src/offers/service.ts b/packages/core/src/offers/service.ts
+deleted file mode 100644
+index eb0cba4dde9d066749c856da3c3a2dc4acf9bc93..0000000000000000000000000000000000000000
+--- a/packages/core/src/offers/service.ts
++++ /dev/null
+@@ -1,513 +0,0 @@
+-import { BusinessAreasService, workspaceFlowFilter } from '../business-areas/service'
+-import { isSharedOffersCompany, requireSharedOffersCompany, sharedOffersCompany } from './policy'
+-import { sql, type SQL } from 'drizzle-orm'
+-import type { Database } from '@crm/db'
+-import { CapiService, type CapiSendInput, type CapiEventName } from '../meta-capi/service'
+-import type { CapiUserInput } from '../meta-capi/hashing'
+-import { SalesService } from '../sales/service'
+-import type { RealtimePublisher } from '../realtime/publisher'
+-
+-export interface OfferConfig {
+-  owner_user_id: string
+-  product_id: string
+-  currency: string
+-  flow_id: string
+-  connection_ids: string[]
+-  integration_id: string
+-  ad_account_id: string
+-  pixel_id: string
+-  origins: { type: 'source_id' | 'link'; value: string }[]
+-  cost_cents?: number | null
+-  cost_label?: string
+-}
+-export interface OfferRow {
+-  business_area_id?: string | null
+-  id: string
+-  company_id: string
+-  name: string
+-  active: boolean
+-  version: number
+-  config: OfferConfig
+-}
+-export interface Opportunity {
+-  id: string
+-  company_id: string
+-  offer_id: string
+-  contact_id: string
+-  chat_id: string
+-  snapshot: OfferConfig & {
+-    version: number
+-    name: string
+-    version_id: string
+-    user: CapiUserInput
+-    connection_id: string
+-    pixel_dataset_id: string
+-    payment_client_id: string
+-  }
+-  evidence: Record<string, unknown>
+-}
+-export class OfferError extends Error {}
+-export function isOfferDestinationLocked(error: unknown): boolean {
+-  for (let e=error,depth=0; e && depth<6; depth++) {
+-    if (e instanceof Error && /offer_destination_locked:/.test(e.message)) return true
+-    e = typeof e==='object' && e!==null && 'cause' in e ? e.cause : null
+-  }
+-  return false
+-}
+-export async function offerRows<T>(db: Database, query: SQL): Promise<T[]> {
+-  return (await db.execute(query)).rows as T[]
+-}
+-const uuid = (s: unknown): s is string => typeof s === 'string' && /^[a-f\d]{8}(-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(s)
+-const json = (v: unknown) => JSON.stringify(v)
+-
+-export class OffersService {
+-  constructor(readonly db: Database) {}
+-  async get(company: string, id: string, area?: string | null) {
+-    requireSharedOffersCompany(company)
+-    return (await offerRows<OfferRow>(this.db, sql`select * from crm.offers where company_id=${company} and id=${id} ${area !== undefined ? sql`and business_area_id is not distinct from ${area}::uuid` : sql``} limit 1`))[0] ?? null
+-  }
+-  list(company: string, area?: string | null) {
+-    requireSharedOffersCompany(company)
+-    return offerRows<OfferRow>(this.db, sql`select * from crm.offers where company_id=${company} ${area !== undefined ? sql`and business_area_id is not distinct from ${area}::uuid` : sql``} order by created_at`)
+-  }
+-  async resources(company: string, area?: string | null) {
+-    requireSharedOffersCompany(company)
+-    const result: Record<string, unknown> = {}
+-    for (const [key, query] of Object.entries({
+-      chats: sql`select c.id,coalesce(p.name,p.phone_e164,'Contato') || ' ? ' || n.name as name from crm.chats c join crm.contacts p on p.id=c.contact_id join crm.connections n on n.id=c.connection_id where c.company_id=${company} order by c.updated_at desc limit 200`,
+-      members: sql`select u.id,u.name from crm.users u join crm.company_members m on m.user_id=u.id where m.company_id=${company}`,
+-      products: sql`select id,name,currency from crm.products where company_id=${company}`,
+-      flows: sql`select f.id,f.name,f.status,f.published_version from crm.flows f where company_id=${company} and status<>'archived'
+-        ${area !== undefined ? sql`and ${workspaceFlowFilter(company, area, sql`f.id`)}` : sql``}`,
+-      connections: sql`select id,name from crm.connections where company_id=${company}`,
+-      integrations: sql`select id,label as name from crm.payment_integrations where company_id=${company} and gateway='xpag'`,
+-      accounts: sql`select id,coalesce(name,fb_account_id) as name,currency from crm.meta_ad_accounts where company_id=${company} and business_area_id is not distinct from ${area ?? null}::uuid`,
+-      pixels: sql`select id,name,meta_ad_account_id from crm.pixel_configs where company_id=${company} and business_area_id is not distinct from ${area ?? null}::uuid`,
+-      links: sql`select id,name from crm.tracked_links where company_id=${company}`,
+-    }))
+-      result[key] = (await this.db.execute(query)).rows
+-    result.managed_connections = (
+-      await offerRows<{ connection_id: string }>(
+-        this.db,
+-        sql`select connection_id from crm.offer_connections where company_id=${company}`,
+-      )
+-    ).map((x) => x.connection_id)
+-    if (area !== undefined) result.business_area = area ? await new BusinessAreasService(this.db).get(company,area) : null
+-    return result
+-  }
+-  async save(company: string, input: { name: string; active?: boolean; config: OfferConfig }, id?: string, area?: string | null) {
+-    requireSharedOffersCompany(company)
+-    if (id && area !== undefined && !await this.get(company,id,area)) throw new OfferError('Oferta não pertence à área selecionada')
+-    if (area) await new BusinessAreasService(this.db).get(company,area)
+-    const c = input.config
+-    if (!input.name?.trim() || input.name.length > 120 || !c || !/^[A-Z]{3}$/.test(c.currency))
+-      throw new OfferError('Nome e moeda válidos são obrigatórios')
+-    for (const key of [
+-      'owner_user_id',
+-      'product_id',
+-      'flow_id',
+-      'integration_id',
+-      'ad_account_id',
+-      'pixel_id',
+-    ] as const)
+-      if (!uuid(c[key])) throw new OfferError(`Recurso inválido: ${key}`)
+-    if (!Array.isArray(c.connection_ids) || !c.connection_ids.length || c.connection_ids.some((x) => !uuid(x)))
+-      throw new OfferError('Selecione pelo menos um chip')
+-    if (
+-      !Array.isArray(c.origins) ||
+-      c.origins.some((x) => !['source_id', 'link'].includes(x.type) || !x.value?.trim() || x.value.length > 200)
+-    )
+-      throw new OfferError('Origem inválida')
+-    if (c.cost_cents != null && (!Number.isSafeInteger(c.cost_cents) || c.cost_cents < 0 || !c.cost_label?.trim()))
+-      throw new OfferError('Identifique o custo informado (centavos, não negativo)')
+-    const resources = (await this.resources(company,area)) as Record<string, { id: string; currency?: string; meta_ad_account_id?: string | null; status?: string; published_version?: number | null }[]>
+-    for (const [key, group] of [
+-      ['owner_user_id', 'members'],
+-      ['product_id', 'products'],
+-      ['flow_id', 'flows'],
+-      ['integration_id', 'integrations'],
+-      ['ad_account_id', 'accounts'],
+-      ['pixel_id', 'pixels'],
+-    ] as const)
+-      if (!resources[group]!.some((x) => x.id === c[key]))
+-        throw new OfferError(`Recurso não pertence à empresa ou não está disponível: ${key}`)
+-    if (resources.products!.find((x) => x.id === c.product_id)?.currency !== c.currency)
+-      throw new OfferError('Moeda incompatível com produto')
+-    const selectedFlow = resources.flows!.find(x => x.id === c.flow_id)
+-    if (input.active === true && (selectedFlow?.status !== 'active' || selectedFlow.published_version == null))
+-      throw new OfferError('Publique e ative o fluxo antes de habilitar entradas comerciais')
+-    if (area && resources.pixels!.find(x => x.id === c.pixel_id)?.meta_ad_account_id !== c.ad_account_id)
+-      throw new OfferError('O pixel precisa estar vinculado à conta de anúncio escolhida')
+-    for (const conn of c.connection_ids)
+-      if (!resources.connections!.some((x) => x.id === conn)) throw new OfferError('Chip de outra empresa')
+-    for (const origin of c.origins)
+-      if (origin.type === 'link' && !resources.links!.some((x) => x.id === origin.value))
+-        throw new OfferError('Link de outra empresa')
+-    // Whitelist: never persist arbitrary client fields or secrets.
+-    const config: OfferConfig = {
+-      owner_user_id: c.owner_user_id,
+-      product_id: c.product_id,
+-      currency: c.currency,
+-      flow_id: c.flow_id,
+-      connection_ids: [...new Set(c.connection_ids)],
+-      integration_id: c.integration_id,
+-      ad_account_id: c.ad_account_id,
+-      pixel_id: c.pixel_id,
+-      origins: c.origins.map((x) => ({ type: x.type, value: x.value.trim() })),
+-      cost_cents: c.cost_cents ?? null,
+-      cost_label: c.cost_label?.trim(),
+-    }
+-    const rows = id
+-      ? await offerRows<OfferRow>(
+-          this.db,
+-          sql`update crm.offers set name=${input.name.trim()},active=${input.active === true},config=${json(config)}::jsonb,version=version+1,updated_at=now() where company_id=${company} and id=${id} returning *`,
+-        )
+-      : await offerRows<OfferRow>(
+-          this.db,
+-          sql`insert into crm.offers(company_id,name,active,config,business_area_id) values(${company},${input.name.trim()},${input.active === true},${json(config)}::jsonb,${area ?? null}) returning *`,
+-        )
+-    if (!rows[0]) throw new OfferError('Oferta não encontrada')
+-    return rows[0]
+-  }
+-  async manageConnection(company: string, connection: string, enabled: boolean) {
+-    requireSharedOffersCompany(company)
+-    if (
+-      !uuid(connection) ||
+-      !(await offerRows(this.db, sql`select id from crm.connections where company_id=${company} and id=${connection}`))
+-        .length
+-    )
+-      throw new OfferError('Chip não encontrado')
+-    if (enabled)
+-      await this.db.execute(
+-        sql`insert into crm.offer_connections values(${company},${connection}) on conflict do nothing`,
+-      )
+-    else
+-      await this.db.execute(
+-        sql`delete from crm.offer_connections where company_id=${company} and connection_id=${connection}`,
+-      )
+-  }
+-  async managed(company: string, connection: string) {
+-    if (!isSharedOffersCompany(company)) return false
+-    return Boolean(
+-      (
+-        await offerRows(
+-          this.db,
+-          sql`select 1 from crm.offer_connections where company_id=${company} and connection_id=${connection}`,
+-        )
+-      ).length,
+-    )
+-  }
+-  async createOpportunity(
+-    company: string,
+-    chatId: string,
+-    evidence: { source_id?: string | null; ctwa_clid?: string | null; click_id?: string | null; message_id?: string },
+-    manualOffer?: string,
+-  ) {
+-    return this.db.transaction(async (tx) =>
+-      new OffersService(tx as unknown as Database).resolveOpportunity(company, chatId, evidence, manualOffer),
+-    )
+-  }
+-  private async resolveOpportunity(
+-    company: string,
+-    chatId: string,
+-    evidence: { source_id?: string | null; ctwa_clid?: string | null; click_id?: string | null; message_id?: string },
+-    manualOffer?: string,
+-  ) {
+-    const [chat] = await offerRows<{ contact_id: string; connection_id: string }>(
+-      this.db,
+-      sql`select contact_id,connection_id from crm.chats where company_id=${company} and id=${chatId}`,
+-    )
+-    if (!chat || !(await this.managed(company, chat.connection_id)))
+-      throw new OfferError('Ative a modalidade de ofertas neste chip')
+-    let click: { link_id: string; fbc: string; fbp: string; client_ip: string; user_agent: string } | undefined
+-    if (evidence.click_id && !manualOffer)
+-      [click] = await offerRows<typeof click & object>(
+-        this.db,
+-        sql`select link_id,fbc,fbp,client_ip,user_agent from crm.tracked_link_clicks where company_id=${company} and id=${evidence.click_id} and contact_id=${chat.contact_id} and match_confidence='exact'`,
+-      )
+-    const candidates = (await this.list(company)).filter(
+-      (o) =>
+-        o.active &&
+-        o.config.connection_ids.includes(chat.connection_id) &&
+-        (manualOffer
+-          ? o.id === manualOffer
+-          : o.config.origins.some((r) =>
+-              r.type === 'source_id'
+-                ? Boolean(evidence.source_id && r.value === evidence.source_id)
+-                : Boolean(click && r.value === click.link_id),
+-            )),
+-    )
+-    // Native source and exact link must independently resolve to the SAME offer. Unknown/inactive native IDs conflict too.
+-    if (!manualOffer && evidence.source_id && click) {
+-      const native = candidates.filter((o) =>
+-        o.config.origins.some((r) => r.type === 'source_id' && r.value === evidence.source_id),
+-      )
+-      const linked = candidates.filter((o) =>
+-        o.config.origins.some((r) => r.type === 'link' && r.value === click!.link_id),
+-      )
+-      if (native.length !== 1 || linked.length !== 1 || native[0]!.id !== linked[0]!.id)
+-        return { state: 'conflict', opportunity: null } as const
+-    }
+-    if (candidates.length !== 1)
+-      return { state: candidates.length ? 'conflict' : 'unresolved', opportunity: null } as const
+-    const offer = candidates[0]!
+-    // Lock identities through snapshot commit. A concurrent in-place edit must see the reference before updating.
+-    const [pixel] = await offerRows<{ pixel_id: string; default_country: string }>(
+-      this.db,
+-      sql`select pixel_id,default_country from crm.pixel_configs where company_id=${company} and id=${offer.config.pixel_id} for share`,
+-    )
+-    const [payment] = await offerRows<{ client_id: string }>(
+-      this.db,
+-      sql`select client_id from crm.payment_integrations where company_id=${company} and id=${offer.config.integration_id} for share`,
+-    )
+-    if (!pixel || !payment) throw new OfferError('Destino da oferta indisponível')
+-    const [version] = await offerRows<{ id: string }>(
+-      this.db,
+-      sql`select v.id from crm.flow_versions v join crm.flows f on f.id=v.flow_id and f.published_version=v.version where f.company_id=${company} and f.id=${offer.config.flow_id} and f.status='active'`,
+-    )
+-    if (!version) throw new OfferError('Fluxo não publicado/ativo')
+-    // Only basic identity comes from the contact. Click identifiers are restricted to THIS inbound evidence.
+-    const [contact] = await offerRows<{ phone: string; email: string; name: string }>(
+-      this.db,
+-      sql`select phone_e164 as phone,email,name from crm.contacts where company_id=${company} and id=${chat.contact_id}`,
+-    )
+-    const user: CapiUserInput = {
+-      phone: contact?.phone,
+-      email: contact?.email,
+-      externalId: chat.contact_id,
+-      firstName: contact?.name?.split(' ')[0],
+-      ctwaClid: manualOffer ? null : (evidence.ctwa_clid ?? null),
+-      ...(!manualOffer && click
+-        ? { fbc: click.fbc, fbp: click.fbp, clientIpAddress: click.client_ip, clientUserAgent: click.user_agent }
+-        : {}),
+-    }
+-    const proof = manualOffer ? { type: 'manual' } : { type: evidence.source_id ? 'native' : 'exact_link', ...evidence }
+-    user.defaultCountry = pixel.default_country
+-    const snapshot = {
+-      ...offer.config,
+-      business_area_id: offer.business_area_id,
+-      business_area_name: offer.business_area_id ? (await new BusinessAreasService(this.db).get(company,offer.business_area_id)).name : null,
+-      bm_id: offer.business_area_id ? (await new BusinessAreasService(this.db).get(company,offer.business_area_id)).bm_id : null,
+-      version: offer.version,
+-      name: offer.name,
+-      version_id: version.id,
+-      user,
+-      connection_id: chat.connection_id,
+-      pixel_dataset_id: pixel.pixel_id,
+-      payment_client_id: payment.client_id,
+-    }
+-    const [op] = await offerRows<Opportunity>(
+-      this.db,
+-      sql`insert into crm.offer_opportunities(company_id,offer_id,contact_id,chat_id,snapshot,evidence,message_id) values(${company},${offer.id},${chat.contact_id},${chatId},${json(snapshot)}::jsonb,${json(proof)}::jsonb,${evidence.message_id ?? null}) on conflict(company_id,message_id) do update set message_id=excluded.message_id returning *`,
+-    )
+-    await this.queueEvent(op!, 'Lead', `offer-lead-${op!.id}`)
+-    return { state: 'resolved', opportunity: op! } as const
+-  }
+-  async queueEvent(
+-    op: Opportunity,
+-    eventName: CapiEventName,
+-    eventId: string,
+-    amount?: number,
+-    eventTime = new Date(),
+-  ) {
+-    requireSharedOffersCompany(op.company_id)
+-    if (eventName !== 'Purchase') {
+-      const [allowed] = await offerRows<{ enabled: boolean }>(this.db, sql`
+-        select ${eventName} = any(allowed_events) as enabled from crm.pixel_configs
+-        where company_id=${op.company_id} and id=${op.snapshot.pixel_id}
+-      `)
+-      if (!allowed?.enabled) return false
+-    }
+-    const payload: CapiSendInput = {
+-      companyId: op.company_id,
+-      pixelConfigId: op.snapshot.pixel_id,
+-      eventName,
+-      eventId,
+-      eventTime,
+-      value: amount == null ? undefined : amount / 100,
+-      currency: op.snapshot.currency,
+-      user: op.snapshot.user,
+-      actionSource: eventName === 'Purchase' ? 'system_generated' : 'chat',
+-      source: 'sale',
+-      sourceId: op.id,
+-    }
+-    await this.db.execute(
+-      sql`insert into crm.offer_event_outbox(company_id,opportunity_id,event_id,payload) values(${op.company_id},${op.id},${eventId},${json(payload)}::jsonb) on conflict(event_id) do nothing`,
+-    )
+-    return true
+-  }
+-  async report(company: string, owner?: string, offer?: string, area?: string | null) {
+-    requireSharedOffersCompany(company)
+-    return offerRows(
+-      this.db,
+-      sql`select o.offer_id,o.snapshot->>'name' as offer_name,o.snapshot->>'owner_user_id' as owner_user_id,s.currency,count(*)::int as sales,sum(s.amount_cents)::text as revenue_cents,
+-      bool_and(o.snapshot->>'cost_cents' is not null) as costs_complete,
+-      case when bool_and(o.snapshot->>'cost_cents' is not null) then sum(s.amount_cents-(o.snapshot->>'cost_cents')::bigint)::text else null end as estimated_profit_cents
+-      from crm.sales s join crm.offer_opportunities o on o.id=s.opportunity_id and o.company_id=s.company_id
+-      where s.company_id=${company} and s.status='approved' ${area !== undefined ? sql`and o.snapshot->>'business_area_id' is not distinct from ${area}` : sql``} ${owner ? sql`and o.snapshot->>'owner_user_id'=${owner}` : sql``} ${offer ? sql`and o.offer_id=${offer}` : sql``}
+-      group by o.offer_id,o.snapshot->>'name',o.snapshot->>'owner_user_id',s.currency`,
+-    )
+-  }
+-}
+-
+-export async function opportunityForRun(db: Database, company: string, run: string) {
+-  const op = (
+-    await offerRows<Opportunity>(
+-      db,
+-      sql`select o.* from crm.offer_opportunities o join crm.flow_runs r on r.trigger->>'opportunity_id'=o.id::text and r.company_id=o.company_id where r.id=${run} and o.company_id=${company}`,
+-    )
+-  )[0]
+-  if (op) requireSharedOffersCompany(company)
+-  return op
+-}
+-
+-/** An approved_sale block is an explicit approval condition only when no provider charge is pending. */
+-export async function recordExplicitOfferSale(db: Database, op: Opportunity, amount: number, key: string) {
+-  const [sale] = await offerRows<{ id: string }>(
+-    db,
+-    sql`select id from crm.sales where company_id=${op.company_id} and opportunity_id=${op.id} and status='approved' limit 1`,
+-  )
+-  if (sale) return { saleId: sale.id, created: false }
+-  if (
+-    (
+-      await offerRows(
+-        db,
+-        sql`select 1 from crm.payment_charges where company_id=${op.company_id} and opportunity_id=${op.id} limit 1`,
+-      )
+-    ).length
+-  )
+-    throw new OfferError('Pagamento não confirmado: register_approved_sale não pode aprovar a cobrança')
+-  if (!Number.isSafeInteger(amount) || amount <= 0) throw new OfferError('Valor aprovado inválido')
+-  const [created] = await offerRows<{ id: string }>(
+-    db,
+-    sql`insert into crm.sales(company_id,contact_id,connection_id,product_id,opportunity_id,amount_cents,currency,status,source,external_id)
+- values(${op.company_id},${op.contact_id},${op.snapshot.connection_id},${op.snapshot.product_id},${op.id},${amount},${op.snapshot.currency},'approved','flow',${key}) on conflict(company_id,source,external_id) where external_id is not null do update set status='approved' returning id`,
+-  )
+-  await new OffersService(db).queueEvent(op, 'Purchase', `sale-${created!.id}`, amount)
+-  await queueOfferSaleNotification(db,op.company_id,created!.id,'sale.recorded')
+-  return { saleId: created!.id, created: true }
+-}
+-
+-/** Called inside the charge transaction, before listener/TTL checks: late callbacks still book the sale. */
+-export async function refundOfferPayment(db: Database, company: string, chargeId: string) {
+-  // Only the sale for this charge, not every sale of the opportunity. Retain Purchase/outbox history unchanged.
+-  const changed=await offerRows<{id:string;previous_status:string}>(db,sql`with changed as (
+-    select s.id,s.status as previous_status from crm.sales s join crm.payment_charges c
+-    on c.opportunity_id=s.opportunity_id and c.company_id=s.company_id
+-    where c.id=${chargeId} and c.company_id=${company} and s.source='flow' and s.external_id=${`offer-charge-${chargeId}`} and s.status <> 'refunded'
+-  ) update crm.sales s set status='refunded',updated_at=now()
+-    from changed where s.id=changed.id returning s.id,changed.previous_status`)
+-  for(const sale of changed) await queueOfferSaleNotification(db,company,sale.id,'sale.updated',sale.previous_status)
+-}
+-
+-export async function recordOfferPayment(
+-  db: Database,
+-  company: string,
+-  chargeId: string,
+-  amount: number | null,
+-  paidAt: Date,
+-) {
+-  const [op] = await offerRows<Opportunity>(
+-    db,
+-    sql`select o.* from crm.offer_opportunities o join crm.payment_charges c on c.opportunity_id=o.id and c.company_id=o.company_id where c.id=${chargeId} and c.company_id=${company} and c.status='approved'`,
+-  )
+-  if (!op) return null
+-  if (!Number.isSafeInteger(amount) || amount! <= 0) throw new OfferError('Valor confirmado inválido')
+-  const [sale] = await offerRows<{ id: string }>(
+-    db,
+-    sql`insert into crm.sales(company_id,contact_id,connection_id,product_id,opportunity_id,amount_cents,currency,status,source,external_id,sold_at)
+-    values(${company},${op.contact_id},${op.snapshot.connection_id},${op.snapshot.product_id},${op.id},${amount},${op.snapshot.currency},'approved','flow',${`offer-charge-${chargeId}`},${paidAt.toISOString()})
+-    on conflict(company_id,source,external_id) where external_id is not null do update set status='approved' returning id`,
+-  )
+-  await new OffersService(db).queueEvent(op, 'Purchase', `sale-${sale!.id}`, amount!, paidAt)
+-  await queueOfferSaleNotification(db,company,sale!.id,'sale.recorded')
+-  return sale!.id
+-}
+-
+-export async function deliverOfferEvent(db: Database, capi: CapiService, id: string) {
+-  const [row] = await offerRows<{ payload: CapiSendInput; status: string; next_attempt_at: Date }>(
+-    db,
+-    sql`select payload,status,next_attempt_at from crm.offer_event_outbox where id=${id}`,
+-  )
+-  if (!row || row.status !== 'pending') return
+-  if (!isSharedOffersCompany(row.payload.companyId)) {
+-    await db.execute(sql`update crm.offer_event_outbox set lease_until=null,last_error='shared offers disabled for company; delivery paused',updated_at=now() where id=${id} and status='pending'`)
+-    return
+-  }
+-  if (new Date(row.next_attempt_at).getTime()>Date.now()) return // Old/duplicate queued jobs must obey persisted backoff too.
+-  let retryable=true
+-  try {
+-  // Recover a process crash after reserving the log. Two HTTP timeout windows have elapsed; keep the SAME event ID.
+-  await db.execute(
+-    sql`update crm.capi_event_log set status='uncertain',error='offer delivery interrupted before acknowledgement' where company_id=${row.payload.companyId} and pixel_config_id=${row.payload.pixelConfigId} and event_id=${row.payload.eventId} and status='pending' and updated_at < now()-interval '60 seconds'`,
+-  )
+-  const result = await capi.send({ ...row.payload, eventTime: new Date(row.payload.eventTime!) })
+-  if(result.status==='failed') retryable=result.retryable===true
+-  if (result.status === 'sent' || result.status === 'discarded')
+-    await db.execute(
+-      sql`update crm.offer_event_outbox set status=${result.status},attempts=attempts+1,last_error=null,lease_until=null,updated_at=now() where id=${id}`,
+-    )
+-  else {
+-    // A duplicate can be a concurrent pending delivery, not a confirmation of acceptance.
+-    await db.execute(
+-      sql`update crm.offer_event_outbox set last_error=${result.status === 'duplicate' ? 'delivery in progress' : result.error},updated_at=now() where id=${id} and status='pending'`,
+-    )
+-    const accepted = await offerRows(
+-      db,
+-      sql`select 1 from crm.capi_event_log where company_id=${row.payload.companyId} and pixel_config_id=${row.payload.pixelConfigId} and event_id=${row.payload.eventId} and status='sent'`,
+-    )
+-    if (accepted.length)
+-      await db.execute(sql`update crm.offer_event_outbox set status='sent',last_error=null,lease_until=null where id=${id}`)
+-    else throw new Error('offer delivery not accepted')
+-  }
+-  } catch(error) {
+-    // Persist record-level backoff, including thrown errors. Credential rejection is slow-retried, never discarded.
+-    await db.execute(sql`update crm.offer_event_outbox set attempts=attempts+1,lease_until=null,
+-      next_attempt_at=now()+make_interval(secs=>least(${retryable?300:21600}::double precision,${retryable?3:300}::double precision*power(2,least(attempts,10)))),
+-      last_error=coalesce(last_error,'delivery interrupted; retry scheduled'),updated_at=now() where id=${id} and status='pending'`)
+-    throw error
+-  }
+-}
+-
+-export async function claimOfferEvents(db:Database) {
+-  return offerRows<{id:string;dispatch_seq:number}>(db,sql`with due as (
+-    select id from crm.offer_event_outbox where company_id=${sharedOffersCompany()}::uuid and status='pending' and next_attempt_at<=now() and (lease_until is null or lease_until<=now())
+-    order by next_attempt_at,created_at for update skip locked limit 100
+-  ) update crm.offer_event_outbox o set lease_until=now()+interval '120 seconds',dispatch_seq=dispatch_seq+1
+-    from due where o.id=due.id returning o.id,o.dispatch_seq`)
+-}
+-export async function offerEnqueueFailed(db:Database,id:string,seq:number) {
+-  await db.execute(sql`update crm.offer_event_outbox set lease_until=null,next_attempt_at=now()+interval '3 seconds',last_error='enqueue failed; retry scheduled' where id=${id} and dispatch_seq=${seq} and status='pending'`)
+-}
+-
+-async function queueOfferSaleNotification(db:Database,company:string,saleId:string,type:'sale.recorded'|'sale.updated',previous?:string) {
+-  const sale=await new SalesService({db}).get(company,saleId)
+-  const key=`${saleId}:${type}:${type==='sale.updated'?sale.status:'created'}`
+-  const data={sale_id:saleId,sale,...(type==='sale.updated'?{status:sale.status,previous_status:previous}:{})}
+-  await db.execute(sql`insert into crm.offer_sale_notifications(company_id,sale_id,event_key,event_type,data)
+-    values(${company},${saleId},${key},${type},${JSON.stringify(data)}::jsonb) on conflict(event_key) do nothing`)
+-}
+-
+-/** Only the executed block creates this intent, in its transaction. A callback never synthesizes configured pushes. */
+-export async function queueOfferBlockPush(db:Database,company:string,saleId:string,stepKey:string,data:{title:string;body:string;url:null;kind:'approved_sale';sale_id:string}) {
+-  await db.execute(sql`insert into crm.offer_sale_notifications(company_id,sale_id,event_key,event_type,data)
+-    select ${company},s.id,${`block-push:${stepKey}`},'notification.created',${JSON.stringify(data)}::jsonb
+-    from crm.sales s where s.company_id=${company} and s.id=${saleId}
+-    on conflict(event_key) do nothing`)
+-}
+-export async function dispatchOfferNotifications(db:Database,publisher:RealtimePublisher,effects:(company:string,type:string,data:unknown)=>Promise<void>) {
+-  const rows=await offerRows<{id:string;company_id:string;event_key:string;event_type:'sale.recorded'|'sale.updated'|'notification.created';data:never}>(db,sql`with due as (
+-    select n.id from crm.offer_sale_notifications n where n.company_id=${sharedOffersCompany()}::uuid and n.status='pending' and n.next_attempt_at<=now() and (n.lease_until is null or n.lease_until<=now())
+-      and not exists(select 1 from crm.offer_sale_notifications earlier where earlier.sale_id=n.sale_id and earlier.status='pending' and earlier.sequence<n.sequence)
+-    order by n.next_attempt_at,n.sequence for update skip locked limit 100
+-  ) update crm.offer_sale_notifications n set lease_until=now()+interval '120 seconds',attempts=attempts+1 from due where n.id=due.id returning n.*`)
+-  for(const row of rows) {
+-    try {
+-      await publisher.publishOnce(row.company_id,row.event_type,row.data,row.event_key)
+-      await effects(row.company_id,row.event_type,row.data)
+-      await db.execute(sql`update crm.offer_sale_notifications set status='sent',lease_until=null,last_error=null,updated_at=now() where id=${row.id}`)
+-    } catch {
+-      await db.execute(sql`update crm.offer_sale_notifications set lease_until=null,next_attempt_at=now()+make_interval(secs=>least(300::double precision,3*power(2,least(attempts,7)))),last_error='notification delivery failed; retry scheduled',updated_at=now() where id=${row.id}`)
+-    }
+-  }
+-}
+diff --git a/packages/core/src/payments/keys/service.ts b/packages/core/src/payments/keys/service.ts
+index 43e1ff6c8e77581ecf3baa1e844b05cc0b07e832..e868059404b64b0351b1690f4a0c56f9c5b68129 100644
+--- a/packages/core/src/payments/keys/service.ts
++++ b/packages/core/src/payments/keys/service.ts
+@@ -1,4 +1,3 @@
+-import { isOfferDestinationLocked } from '../../offers/service'
+ // Chaves de pagamento ao lead por empresa (T109; 19-integracoes.md §3.1, §5.2). Segredos (`client_secret`,
+ // `webhook_secret`) só cifrados; saem decifrados apenas para o adapter (`gatewayFor`/`testConnection`), nunca em DTO nem log.
+ import { randomBytes, randomUUID } from 'node:crypto'
+@@ -142,10 +141,7 @@ export class PaymentIntegrationsService {
+     }
+     if (Object.keys(patch).length) {
+       patch.updatedAt = this.now()
+-      await this.db.update(paymentIntegrations).set(patch).where(and(eq(paymentIntegrations.companyId, companyId), eq(paymentIntegrations.id, id))).catch(error=>{
+-        if(isOfferDestinationLocked(error)) throw invalid('client_id','Conta referenciada por oferta: crie um novo registro de integração para outro recebedor. A rotação de segredo continua permitida.')
+-        throw error
+-      })
++      await this.db.update(paymentIntegrations).set(patch).where(and(eq(paymentIntegrations.companyId, companyId), eq(paymentIntegrations.id, id)))
+     }
+     return this.get(companyId, id)
+   }
+@@ -167,7 +163,7 @@ export class PaymentIntegrationsService {
+     const usage = await this.usage(companyId, id)
+     if (usage.flows.length)
+       throw new PaymentIntegrationsError('conflict', 'A chave está em uso por blocos de Pagamento de fluxos ativos', { flows: usage.flows })
+-    await this.db.delete(paymentIntegrations).where(and(eq(paymentIntegrations.companyId, companyId), eq(paymentIntegrations.id, id))).catch(error=>{if(isOfferDestinationLocked(error)) throw new PaymentIntegrationsError('conflict','Integracao referenciada por oferta: preserve este registro e crie um novo registro.');throw error})
++    await this.db.delete(paymentIntegrations).where(and(eq(paymentIntegrations.companyId, companyId), eq(paymentIntegrations.id, id)))
+     return { deleted }
+   }
+ 
+diff --git a/packages/core/src/payments/webhooks/service.ts b/packages/core/src/payments/webhooks/service.ts
+index e17a4a97c15d1a37910ab943dae8d334023abfa8..f8cd2106aa4d2c630c29f47df65655551a9f95d7 100644
+--- a/packages/core/src/payments/webhooks/service.ts
++++ b/packages/core/src/payments/webhooks/service.ts
+@@ -1,4 +1,3 @@
+-import { recordOfferPayment, refundOfferPayment } from '../../offers/service'
+ import { createHash } from 'node:crypto'
+ import { paymentReceipt } from '../receipt'
+ // Webhooks de pagamento (T111; 19 §5.5): a API autentica e converte (`receive` → `parseWebhook` do adapter da
+@@ -145,17 +144,13 @@ export class PaymentWebhookService {
+           return { status: 'ignored', reason: 'unknown_charge' } as const // Proven foreign scope.
+         throw new PaymentChargeNotVisibleError() // Unknown or uncommitted: BullMQ retries the same scoped ID.
+       }
+-      // Refund is terminal. Also repair duplicate refunds from before sale synchronization was introduced.
+-      // The charge lock serializes approval/refund so neither order can resurrect a refunded payment.
+-      if (charge.opportunityId && (target === 'refunded' || charge.status === 'refunded'))
+-        await refundOfferPayment(tx as never, data.companyId, charge.id)
++      // Refund is terminal: the charge lock serializes approval/refund so neither order can resurrect a refunded payment.
+       if (charge.status === 'refunded' && target !== 'refunded') return { status: 'duplicate', charge_status: 'refunded' } as const
+-      if (target === 'approved' && (charge.flowRunId || charge.opportunityId)) {
++      if (target === 'approved' && charge.flowRunId) {
+         if (data.event.currency !== charge.currency) throw new PaymentWebhookValidationError('payment currency mismatch')
+         if (charge.amountCents !== null && data.event.amount_cents !== charge.amountCents) throw new PaymentWebhookValidationError('payment amount mismatch')
+         if (data.event.amount_cents === null || data.event.amount_cents <= 0) throw new PaymentWebhookValidationError('payment amount missing')
+       }
+-      if(charge.opportunityId && data.event.currency && data.event.currency!==charge.currency) throw new PaymentWebhookValidationError('offer payment currency mismatch')
+       const now = this.now()
+       const instructions = { ...(charge.instructions ?? {}) } as Record<string, unknown>
+       const listener = { ...((instructions.listener ?? {}) as ListenerInfo) }
+@@ -163,7 +158,6 @@ export class PaymentWebhookService {
+       // Não "desaprova": falha/expiração depois de aprovado não muda o status (estorno muda).
+       const keepApproved = charge.status === 'approved' && (target === 'failed' || target === 'expired')
+       const paidCents = data.event.amount_cents ?? charge.paidAmountCents ?? charge.amountCents
+-      if(charge.opportunityId && target==='approved' && charge.amountCents!=null && paidCents!==charge.amountCents) throw new PaymentWebhookValidationError('offer payment amount mismatch')
+       if (charge.status !== target && !keepApproved) {
+         await tx
+           .update(paymentCharges)
+@@ -177,7 +171,6 @@ export class PaymentWebhookService {
+         return { status: 'duplicate', charge_status: charge.status } as const
+       }
+       if (target !== 'approved') return { status: 'updated', charge_status: keepApproved ? charge.status : target, reason: 'not_approved' } as const
+-      if (charge.opportunityId) await recordOfferPayment(tx as never, data.companyId, charge.id, paidCents, data.event.paid_at ? new Date(data.event.paid_at) : now)
+       if (!charge.flowRunId || !listener.node_key || !this.opts.control) return { status: 'updated', charge_status: 'approved', reason: 'no_listener' } as const
+       if (!charge.listenerUntil || now.getTime() > charge.listenerUntil.getTime()) return { status: 'updated', charge_status: 'approved', reason: 'listener_expired' } as const
+ 
+diff --git a/packages/core/src/support-access/support-access.db.unit.test.ts b/packages/core/src/support-access/support-access.db.unit.test.ts
+index 4151945b7b7760c45296ce71359a5d7d0ce8db9d..a43513f4089d7411ab1cdfc2c019cc3871d8fa8f 100644
+--- a/packages/core/src/support-access/support-access.db.unit.test.ts
++++ b/packages/core/src/support-access/support-access.db.unit.test.ts
+@@ -216,7 +216,7 @@ describe('contexto de empresa, SSE e perfil do suporte', () => {
+         name: c.name,
+         slug: c.slug,
+         role: 'member',
+-        shared_offers: false,
++        business_areas: false,
+         effective_permissions: [...SUPPORT_GRANT_PERMISSIONS].sort(),
+         support_access: { grant_id: grant.id, expires_at: grant.expires_at },
+       },
+diff --git a/packages/db/drizzle/crm/0049_retire_offers.sql b/packages/db/drizzle/crm/0049_retire_offers.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..a98d8cfeef85dbc192ebaf21e73e0a39dc29bd35
+--- /dev/null
++++ b/packages/db/drizzle/crm/0049_retire_offers.sql
+@@ -0,0 +1,72 @@
++-- CRM-003: aposenta o fluxo de ofertas compartilhadas. Sem DROP de tabela, sem apagar histórico.
++-- 1) Aborta, com erro explicativo, se houver operação de oferta ativa que o código novo não sabe drenar.
++-- 2) Remove guards/índices específicos de oferta e libera o índice único de run ativo por contato.
++-- 3) Congela as tabelas legadas (INSERT/UPDATE recusados): nada é recobrado nem reenviado.
++DO $$
++DECLARE n bigint;
++BEGIN
++  SELECT count(*) INTO n FROM crm.offer_event_outbox WHERE status = 'pending';
++  IF n > 0 THEN
++    RAISE EXCEPTION 'migração 0049 abortada: % evento(s) de oferta pendente(s) em crm.offer_event_outbox (envio ao pixel ainda não confirmado). Esta versão não entrega mais esses eventos. Drene com a versão anterior (até status sent/discarded) e rode a migração de novo.', n;
++  END IF;
++
++  SELECT count(*) INTO n FROM crm.offer_sale_notifications WHERE status = 'pending';
++  IF n > 0 THEN
++    RAISE EXCEPTION 'migração 0049 abortada: % notificação(ões) de venda de oferta pendente(s) em crm.offer_sale_notifications. Esta versão não entrega mais essas notificações. Drene com a versão anterior (até status sent) e rode a migração de novo.', n;
++  END IF;
++
++  SELECT count(*) INTO n FROM crm.flow_runs WHERE offer_scoped AND status IN ('running', 'waiting');
++  IF n > 0 THEN
++    RAISE EXCEPTION 'migração 0049 abortada: % run(s) de fluxo de oferta ainda ativo(s) (running/waiting, offer_scoped). Eles dependem do contexto de oferta removido. Deixe terminar (ou pare por decisão do operador) e rode a migração de novo.', n;
++  END IF;
++
++  SELECT count(*) INTO n FROM crm.payment_charges
++   WHERE opportunity_id IS NOT NULL AND status = 'created' AND created_at > now() - interval '7 days';
++  IF n > 0 THEN
++    RAISE EXCEPTION 'migração 0049 abortada: % cobrança(s) de oferta aguardando pagamento (status created, últimos 7 dias). Esta versão não registra mais a venda de uma cobrança de oferta aprovada depois. Aguarde a aprovação/expiração com a versão anterior e rode a migração de novo.', n;
++  END IF;
++
++  SELECT count(*) INTO n FROM (
++    SELECT 1 FROM crm.flow_runs WHERE status IN ('running', 'waiting') GROUP BY company_id, contact_id HAVING count(*) > 1
++  ) d;
++  IF n > 0 THEN
++    RAISE EXCEPTION 'migração 0049 abortada: % contato(s) com mais de um run ativo; o índice único por contato não pode ser recriado. Resolva as duplicatas (um run ativo por contato) e rode a migração de novo.', n;
++  END IF;
++END $$;
++--> statement-breakpoint
++DROP TRIGGER IF EXISTS validate_offer_run_scope ON crm.flow_runs;
++--> statement-breakpoint
++DROP TRIGGER IF EXISTS offer_pixel_destination ON crm.pixel_configs;
++--> statement-breakpoint
++DROP TRIGGER IF EXISTS offer_payment_destination ON crm.payment_integrations;
++--> statement-breakpoint
++DROP TRIGGER IF EXISTS offer_pixel_delete ON crm.pixel_configs;
++--> statement-breakpoint
++DROP TRIGGER IF EXISTS offer_payment_delete ON crm.payment_integrations;
++--> statement-breakpoint
++DROP FUNCTION IF EXISTS crm.validate_offer_run_scope();
++--> statement-breakpoint
++DROP FUNCTION IF EXISTS crm.guard_offer_destination();
++--> statement-breakpoint
++DROP FUNCTION IF EXISTS crm.guard_offer_destination_delete();
++--> statement-breakpoint
++DROP INDEX IF EXISTS crm.flow_runs_active_chat_uq;
++--> statement-breakpoint
++DROP INDEX IF EXISTS crm.flow_runs_active_contact_uq;
++--> statement-breakpoint
++CREATE UNIQUE INDEX flow_runs_active_contact_uq ON crm.flow_runs(company_id, contact_id) WHERE status IN ('running', 'waiting');
++--> statement-breakpoint
++CREATE FUNCTION crm.offer_legacy_frozen() RETURNS trigger LANGUAGE plpgsql AS $$
++BEGIN
++  RAISE EXCEPTION 'offer_legacy_frozen: crm.% é histórico somente leitura (ofertas foram aposentadas); nada é recobrado nem reenviado', TG_TABLE_NAME;
++END $$;
++--> statement-breakpoint
++CREATE TRIGGER offer_legacy_frozen BEFORE INSERT OR UPDATE ON crm.offers FOR EACH ROW EXECUTE FUNCTION crm.offer_legacy_frozen();
++--> statement-breakpoint
++CREATE TRIGGER offer_legacy_frozen BEFORE INSERT OR UPDATE ON crm.offer_connections FOR EACH ROW EXECUTE FUNCTION crm.offer_legacy_frozen();
++--> statement-breakpoint
++CREATE TRIGGER offer_legacy_frozen BEFORE INSERT OR UPDATE ON crm.offer_opportunities FOR EACH ROW EXECUTE FUNCTION crm.offer_legacy_frozen();
++--> statement-breakpoint
++CREATE TRIGGER offer_legacy_frozen BEFORE INSERT OR UPDATE ON crm.offer_event_outbox FOR EACH ROW EXECUTE FUNCTION crm.offer_legacy_frozen();
++--> statement-breakpoint
++CREATE TRIGGER offer_legacy_frozen BEFORE INSERT OR UPDATE ON crm.offer_sale_notifications FOR EACH ROW EXECUTE FUNCTION crm.offer_legacy_frozen();
+diff --git a/packages/db/drizzle/crm/meta/_journal.json b/packages/db/drizzle/crm/meta/_journal.json
+index 92970cfac45e896c55dbcc8cf34a3fd17e9b12f7..22befc36000b549d6376ded3ecd0e2b3f2d8e8b4 100644
+--- a/packages/db/drizzle/crm/meta/_journal.json
++++ b/packages/db/drizzle/crm/meta/_journal.json
+@@ -344,6 +344,13 @@
+       "when": 1795104000000,
+       "tag": "0048_pixel_allowed_events",
+       "breakpoints": true
++    },
++    {
++      "idx": 49,
++      "version": "7",
++      "when": 1795190400000,
++      "tag": "0049_retire_offers",
++      "breakpoints": true
+     }
+   ]
+ }
+diff --git a/packages/db/src/retire-offers-migration.unit.test.ts b/packages/db/src/retire-offers-migration.unit.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..e760ad56fc8da0265b08b3dfbf9c630cfdbf5ae2
+--- /dev/null
++++ b/packages/db/src/retire-offers-migration.unit.test.ts
+@@ -0,0 +1,30 @@
++import { readFileSync } from 'node:fs'
++import { join } from 'node:path'
++import { describe, expect, it } from 'vitest'
++import { MIGRATION_SETS } from './client.js'
++
++// Contrato estático da 0049 (sem banco): a verificação com Postgres real roda na CI.
++const sql = readFileSync(join(MIGRATION_SETS.crm.folder, '0049_retire_offers.sql'), 'utf8')
++const journal = JSON.parse(readFileSync(join(MIGRATION_SETS.crm.folder, 'meta', '_journal.json'), 'utf8')) as { entries: { idx: number; tag: string; when: number }[] }
++
++describe('0049_retire_offers', () => {
++  it('está no journal, depois da 0048, com data crescente', () => {
++    const e = journal.entries
++    expect(e.at(-1)).toMatchObject({ idx: 49, tag: '0049_retire_offers' })
++    expect(e.at(-1)!.when).toBeGreaterThan(e.at(-2)!.when)
++  })
++  it('não apaga tabelas nem dados históricos', () => {
++    expect(sql).not.toMatch(/DROP\s+TABLE/i)
++    expect(sql).not.toMatch(/DELETE\s+FROM/i)
++    expect(sql).not.toMatch(/TRUNCATE/i)
++  })
++  it('aborta com erro explicativo diante de pendências e duplicatas', () => {
++    for (const piece of ['offer_event_outbox WHERE status', 'offer_sale_notifications WHERE status', 'offer_scoped AND status', 'payment_charges', 'HAVING count(*) > 1'])
++      expect(sql).toContain(piece)
++    expect(sql.match(/RAISE EXCEPTION 'migração 0049 abortada/g)).toHaveLength(5)
++  })
++  it('libera o índice único por contato e congela o legado', () => {
++    expect(sql).toContain("CREATE UNIQUE INDEX flow_runs_active_contact_uq ON crm.flow_runs(company_id, contact_id) WHERE status IN ('running', 'waiting')")
++    expect(sql.match(/CREATE TRIGGER offer_legacy_frozen/g)).toHaveLength(5)
++  })
++})
+diff --git a/packages/db/src/schema/crm/flows.ts b/packages/db/src/schema/crm/flows.ts
+index cfdbaa87bbd4a048205f34908c092543aeb1ff48..d4a2ef3a70d48270cc71f62300b7eefaa05a061f 100644
+--- a/packages/db/src/schema/crm/flows.ts
++++ b/packages/db/src/schema/crm/flows.ts
+@@ -188,6 +188,7 @@ export const flowRuns = crm.table(
+     wait: jsonb('wait').$type<Record<string, unknown>>(),
+     /** Origem do run (gatilho, chat, webhook, disparo…). */
+     trigger: jsonb('trigger').$type<Record<string, unknown>>(),
++    /** LEGADO (ofertas aposentadas na 0049): só histórico, nunca escrito pelo código novo. */
+     offerScoped: boolean('offer_scoped').notNull().default(false),
+     error: text('error'),
+     startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
+@@ -198,8 +199,7 @@ export const flowRuns = crm.table(
+     // Um run ativo por contato na empresa (06 §5.5).
+     uniqueIndex('flow_runs_active_contact_uq')
+       .on(t.companyId, t.contactId)
+-      .where(sql`${t.status} in ('running', 'waiting') and not ${t.offerScoped}`),
+-    uniqueIndex('flow_runs_active_chat_uq').on(t.companyId,t.chatId).where(sql`${t.status} in ('running', 'waiting') and ${t.chatId} is not null`),
++      .where(sql`${t.status} in ('running', 'waiting')`),
+     index('flow_runs_company_flow_status_idx').on(t.companyId, t.flowId, t.status),
+     index('flow_runs_company_contact_idx').on(t.companyId, t.contactId, t.startedAt),
+   ],
+diff --git a/packages/db/src/schema/crm/offers.ts b/packages/db/src/schema/crm/offers.ts
+index 9ac6ded17cfa412e6ed07aedee85de5b0b753c01..7c92135b8a8e4c800c46cd929c7bcbd93381c655 100644
+--- a/packages/db/src/schema/crm/offers.ts
++++ b/packages/db/src/schema/crm/offers.ts
+@@ -1,3 +1,7 @@
++/**
++ * LEGADO: ofertas compartilhadas foram aposentadas (migração 0049). As tabelas ficam só como histórico, congeladas por
++ * trigger (INSERT/UPDATE recusados) e sem uso no código. Não adicionar leitura/escrita de runtime aqui.
++ */
+ import { sql } from 'drizzle-orm'
+ import { boolean, bigserial, integer, jsonb, text, timestamp, uuid, index, unique, primaryKey, check, foreignKey } from 'drizzle-orm/pg-core'
+ import { crm, createdAt, updatedAt } from './schema.js'
