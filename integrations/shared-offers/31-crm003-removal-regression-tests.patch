@@ -76,13 +76,15 @@ index 0000000000000000000000000000000000000000..2a5e17c8c339a9ab1b049bca2ac351ad
 +})
 diff --git a/tests/acceptance/T125/crm003-regression.test.ts b/tests/acceptance/T125/crm003-regression.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..7f11bad7fdb253967e3eed21bef0428a0290e925
+index 0000000000000000000000000000000000000000..5431363af30ef7102eefd5bad8fcbed5e7e04721
 --- /dev/null
 +++ b/tests/acceptance/T125/crm003-regression.test.ts
-@@ -0,0 +1,184 @@
+@@ -0,0 +1,197 @@
 +// CRM-003 R1. Disposable PostgreSQL/Redis, synthetic tenants and fake providers only.
 +/* eslint-disable @typescript-eslint/no-explicit-any -- acceptance JSON fixtures */
 +import { randomUUID } from 'node:crypto'
++import { createServer, type Server } from 'node:http'
++import type { AddressInfo } from 'node:net'
 +import { afterAll, beforeAll, expect, it } from 'vitest'
 +import { FakeXPag } from '../../../packages/core/src/payments/xpag/fake'
 +import { chatOf, history, messageFlow, phone, receive, sentTexts, tenant, waitFor, type System, type Tenant } from './setup'
@@ -91,7 +93,9 @@ index 0000000000000000000000000000000000000000..7f11bad7fdb253967e3eed21bef0428a
 +let sys: System, user: Tenant, other: Tenant, readToken: string, writeToken: string
 +let legacyPixel: string, legacyIntegration: string, legacyOpportunity: string
 +const gateway = new FakeXPag({ clientId: 'crm003-test', clientSecret: 'synthetic-local-only' })
-+const old = { gate: process.env.SHARED_OFFERS_COMPANY_ID, xpag: process.env.XPAG_API_URL, public: process.env.API_PUBLIC_URL }
++const old = { gate: process.env.SHARED_OFFERS_COMPANY_ID, xpag: process.env.XPAG_API_URL, public: process.env.API_PUBLIC_URL, spyUrl: process.env.SPY_API_URL, spyToken: process.env.SPY_API_TOKEN, spyCompany: process.env.CRM_SPY_COMPANY_ID }
++// Local fake Spy upstream: the spy bridge is outside CRM-003; this only keeps list_spy_offers reachable.
++let spyServer: Server | undefined
 +let sequence = 0
 +const removed = ['list_offers', 'get_offer', 'get_offer_resources', 'get_offer_results', 'create_offer', 'update_offer', 'set_offer_connection_mode', 'list_conversation_offer_opportunities', 'adopt_offer_business_area']
 +
@@ -114,6 +118,14 @@ index 0000000000000000000000000000000000000000..7f11bad7fdb253967e3eed21bef0428a
 +  sys = upgradeSystem
 +  user = await tenant(sys); other = await tenant(sys)
 +  process.env.SHARED_OFFERS_COMPANY_ID = user.companyId
++  spyServer = createServer((req, res) => {
++    res.writeHead(req.method === 'GET' ? 200 : 405, { 'content-type': 'application/json' })
++    res.end(req.method === 'GET' ? JSON.stringify({ items: [] }) : '{}')
++  })
++  await new Promise<void>(resolve => spyServer!.listen(0, '127.0.0.1', resolve))
++  process.env.SPY_API_URL = `http://127.0.0.1:${(spyServer.address() as AddressInfo).port}`
++  process.env.SPY_API_TOKEN = 'crm003-fake'
++  process.env.CRM_SPY_COMPANY_ID = user.companyId
 +  const reader = await user.c.post('/api/mcp_credentials', { name: 'CRM003 reader', access: 'read' })
 +  const writer = await user.c.post('/api/mcp_credentials', { name: 'CRM003 writer', access: 'write' })
 +  expect(reader.status).toBe(201); expect(writer.status).toBe(201)
@@ -141,7 +153,8 @@ index 0000000000000000000000000000000000000000..7f11bad7fdb253967e3eed21bef0428a
 +
 +afterAll(async () => {
 +  await sys?.close(); await gateway.stop()
-+  for (const [key, value] of Object.entries({ SHARED_OFFERS_COMPANY_ID: old.gate, XPAG_API_URL: old.xpag, API_PUBLIC_URL: old.public })) {
++  if (spyServer) await new Promise<void>(resolve => spyServer!.close(() => resolve()))
++  for (const [key, value] of Object.entries({ SHARED_OFFERS_COMPANY_ID: old.gate, XPAG_API_URL: old.xpag, API_PUBLIC_URL: old.public, SPY_API_URL: old.spyUrl, SPY_API_TOKEN: old.spyToken, CRM_SPY_COMPANY_ID: old.spyCompany })) {
 +    if (value === undefined) delete process.env[key]; else process.env[key] = value
 +  }
 +}, 120_000)
