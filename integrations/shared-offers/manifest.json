@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/Guilherme100A/crm-copy.git",
   "base_sha": "acf78e2da49865afa06fe6a4cee77bcf0e888152",
-  "expected_tree": "dfca731ee8513c072dc185f8638cc7b6695c1832",
+  "expected_tree": "0f49cb47e98ab4bcf7d9a1cfbf6703d1a3c0a72a",
   "sanitization": {
     "excluded_files": [
       "scripts/elevenlabs-account-diagnose.ts",
@@ -28,7 +28,7 @@
     ],
     "reason": "Exclude unrelated operator scripts/private deployment context and audit-only harnesses; replace operational hosts in documentation and URL fixtures with reserved example.test hosts. Original local source preserved.",
     "baseline_tree": "539e4a6dac07e50188e418d0e1a3d669e5f6d687",
-    "final_tree": "dfca731ee8513c072dc185f8638cc7b6695c1832"
+    "final_tree": "0f49cb47e98ab4bcf7d9a1cfbf6703d1a3c0a72a"
   },
   "test_only_changes": [
     {
@@ -790,10 +790,11 @@
     },
     {
       "file": "31-crm003-removal-regression-tests.patch",
-      "description": "CRM-003 R1 QA (crm-copy d08c5ab over 6d2b093, Lince): T125/crm003-regression (6: 5 + A5 historic pixel/XPag edit/rotate/delete) seeded with historic offer data BEFORE 0049 via crm003-upgrade-system (real migrator, journal through 0048, then 0049 twice for idempotence), and crm003-browser (2 widths); local fake Spy upstream keeps list_spy_offers reachable. Test-only.",
-      "sha256": "50dbb20d6ffb75a96c78ec40e63de369a3be507d2e7c4ca2ebcaa8af04ad1ff4",
-      "bytes": 27346,
+      "description": "CRM-003 R1 QA (crm-copy 7401cc6 over 6d2b093, Lince): T125/crm003-regression (6: 5 + A5 historic pixel/XPag edit/rotate/delete) seeded with historic offer data BEFORE 0049 via crm003-upgrade-system (real migrator, journal through 0048, then 0049 twice for idempotence), and crm003-browser (2 widths); local fake Spy upstream keeps list_spy_offers reachable. T125/business-areas adapted to retired offers (15 -> 10: offer-only cases removed or turned into absence assertions; area behaviour kept; per-area flow-run isolation asserted in flows start private). Test-only.",
+      "sha256": "e8184541bd102b3f61dd96013c3c1abfae5687700935069aae92de73199f3f94",
+      "bytes": 57933,
       "files": [
+        "tests/acceptance/T125/business-areas.test.ts",
         "tests/acceptance/T125/crm003-browser.test.ts",
         "tests/acceptance/T125/crm003-regression.test.ts",
         "tests/acceptance/T125/crm003-upgrade-system.ts"

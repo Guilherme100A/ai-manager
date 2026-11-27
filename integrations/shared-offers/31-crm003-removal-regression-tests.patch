@@ -1,3 +1,360 @@
+diff --git a/tests/acceptance/T125/business-areas.test.ts b/tests/acceptance/T125/business-areas.test.ts
+index c81e0eef526408a6ee2d0376d0f5096294fe6030..e4711a0c1becb8213d6e67941996c2c67846d236 100644
+--- a/tests/acceptance/T125/business-areas.test.ts
++++ b/tests/acceptance/T125/business-areas.test.ts
+@@ -8,7 +8,7 @@ import { chromium, type Browser } from '@playwright/test'
+ import { afterAll, beforeAll, expect, it } from 'vitest'
+ import { startSystem, tenant, connectMeta, salesPixel, type System, type Tenant } from './setup'
+ 
+-let sys: System, t: Tenant, foreign: Tenant, areas: any[], bundles: any[], oldOffer: any, legacyBundle: any, writer: string, reader: string
++let sys: System, t: Tenant, foreign: Tenant, areas: any[], bundles: any[], writer: string, reader: string
+ let server: Server, browser: Browser
+ const previousGate = process.env.SHARED_OFFERS_COMPANY_ID
+ const fixtureSecret = 'synthetic-area-xpag-never-contact-provider'
+@@ -47,9 +47,6 @@ beforeAll(async () => {
+     const [flow] = await sys.q("insert into crm.flows(company_id,name,status,published_version) values($1,$2,'active',1) returning id", [t.companyId, 'Area flow ' + i])
+     bundles.push({ owner_user_id: user, product_id: product.id, flow_id: flow.id, currency: 'BRL', connection_ids: [t.connectionId], integration_id: integration.id, ad_account_id: accounts[i]!.localId, pixel_id: pixel.id, origins: [] })
+   }
+-  const made = await t.c.post('/api/offers', { name: 'Existing unassigned offer', active: false, config: bundles[2] })
+-  expect(made.status).toBe(201); oldOffer = made.body.offer
+-  legacyBundle = { ...bundles[2] }
+   writer = (await t.c.post('/api/mcp_credentials', { name: 'Area writer', access: 'write' })).body.token
+   reader = (await t.c.post('/api/mcp_credentials', { name: 'Area reader', access: 'read' })).body.token
+ }, 180000)
+@@ -60,7 +57,7 @@ afterAll(async () => {
+   if (previousGate === undefined) delete process.env.SHARED_OFFERS_COMPANY_ID; else process.env.SHARED_OFFERS_COMPANY_ID = previousGate
+ }, 120000)
+ 
+-it('explicit initialization creates exactly three areas idempotently, leaving all users/resources/offers untouched', async () => {
++it('explicit initialization creates exactly three areas idempotently, leaving all users/resources untouched and offers absent', async () => {
+   const before = await sys.q('select id from crm.users order by id')
+   expect((await call('GET', '/api/business-areas')).body.items).toEqual([])
+   const first = await call('POST', '/api/business-areas/initialize', undefined, {})
+@@ -68,7 +65,7 @@ it('explicit initialization creates exactly three areas idempotently, leaving al
+   expect(areas.map(a => a.slot)).toEqual([1, 2, 3])
+   expect((await call('POST', '/api/business-areas/initialize', undefined, {})).body.items).toEqual(areas)
+   expect(await sys.q('select id from crm.users order by id')).toEqual(before)
+-  expect((await sys.q('select business_area_id,active,version from crm.offers where id=$1', [oldOffer.id]))[0]).toEqual({ business_area_id: null, active: false, version: 1 })
++  expect(await sys.q('select id from crm.offers where company_id=$1', [t.companyId])).toHaveLength(0)
+   expect(await sys.q('select * from crm.business_area_resources')).toHaveLength(0)
+ })
+ it('names/BMs are explicit, scoped by company, unique and validated without contacting Meta', async () => {
+@@ -77,7 +74,11 @@ it('names/BMs are explicit, scoped by company, unique and validated without cont
+   expect((await call('PUT', '/api/business-areas/' + areas[1].id, undefined, { name: 'Admin 2', bm_id: '111000' })).status).toBe(409)
+   expect((await call('PUT', '/api/business-areas/' + areas[1].id, undefined, { name: 'Admin 2', bm_id: 'not-a-bm' })).status).toBe(422)
+   expect((await call('GET', '/api/business-areas', undefined, undefined, foreign)).status).toBe(404)
+-  expect((await call('GET', '/api/offers', randomUUID())).status).toBe(404)
++  expect((await call('GET', '/api/flows', randomUUID())).status).toBe(404)
++  // CRM-003: a API de ofertas não existe mais (nem com área válida).
++  for (const gone of ['/api/offers', '/api/offers/resources', '/api/offers/results']) expect((await call('GET', gone, areas[0].id)).status).toBe(404)
++  expect((await call('POST', '/api/offers', areas[0].id, { name: 'Removed', config: bundles[0] })).status).toBe(404)
++  expect((await call('POST', '/api/business-areas/' + areas[0].id + '/adopt-offer', undefined, { offer_id: randomUUID(), confirm: true })).status).toBe(404)
+ })
+ it('authorizes one Facebook profile separately in three workspaces and binds distinct ad accounts and pixels via MCP', async () => {
+   const user = 'workspace-fb-owner'
+@@ -153,18 +154,19 @@ it('authorizes one Facebook profile separately in three workspaces and binds dis
+   expect(sys.fakeMeta.capiEvents).toHaveLength(0)
+ })
+ it('shares chips, flows and payment accounts while filtering Meta resources by workspace', async () => {
++  const bindings = await sys.q('select * from crm.business_area_resources order by kind,resource_id')
+   for (const [i, workspace] of areas.entries()) {
+-    const response = await call('GET', '/api/offers/resources', workspace.id)
++    const response = await call('GET', '/api/business-areas/catalog', workspace.id)
+     expect(response.status).toBe(200)
+     for (const bundle of bundles) {
+-      expect(response.body.integrations.map((item: any) => item.id)).toContain(bundle.integration_id)
+-      expect(response.body.flows.map((item: any) => item.id)).toContain(bundle.flow_id)
++      expect(response.body.integration.map((item: any) => item.id)).toContain(bundle.integration_id)
++      expect(response.body.flow.map((item: any) => item.id)).toContain(bundle.flow_id)
+     }
+-    expect(response.body.accounts.map((item: any) => item.id)).toEqual([bundles[i].ad_account_id])
+-    expect(response.body.pixels.map((item: any) => item.id)).toEqual([bundles[i].pixel_id])
+-    expect(response.body.connections.map((item: any) => item.id)).toContain(t.connectionId)
++    expect(response.body.account.map((item: any) => item.id)).toEqual([bundles[i].ad_account_id])
++    expect(response.body.pixel.map((item: any) => item.id)).toEqual([bundles[i].pixel_id])
+     expect(JSON.stringify(response.body)).not.toContain(fixtureSecret)
+   }
++  expect(await sys.q('select * from crm.business_area_resources order by kind,resource_id')).toEqual(bindings)
+   expect((await call('GET', '/api/payment-integrations/' + bundles[1].integration_id, areas[0].id)).status).toBe(200)
+   expect((await call('POST', '/api/meta/oauth/start', areas[0].id, {})).status).toBe(200)
+   expect((await call('PUT', '/api/meta/ad-accounts/' + bundles[1].ad_account_id, areas[0].id, { included_in_dashboard: false })).status).toBe(404)
+@@ -172,21 +174,6 @@ it('shares chips, flows and payment accounts while filtering Meta resources by w
+   expect(filtered.body).toMatchObject({ warnings: ['no_ad_accounts'], targets_total: 0 })
+   expect((await call('POST', '/api/business-areas/' + areas[1].id + '/resources', undefined, { kind: 'integration', resource_id: bundles[0].integration_id })).status).toBe(409)
+ })
+-it('keeps offers separate while two workspaces use shared operational resources and their own Meta assets', async () => {
+-  for (let i = 0; i < 2; i++) {
+-    const { ad_account_id, pixel_id } = bundles[i]
+-    const created = await call('POST', '/api/offers', areas[i].id, { name: 'Business offer ' + i, config: { ...bundles[0], ad_account_id, pixel_id } })
+-    expect(created.status, JSON.stringify(created.body)).toBe(201)
+-    bundles[i].offerId = created.body.offer.id
+-    expect(created.body.offer).toMatchObject({ active: false, business_area_id: areas[i].id })
+-  }
+-  expect((await call('GET', '/api/offers', areas[0].id)).body.items.map((r: any) => r.id)).toEqual([bundles[0].offerId])
+-  expect((await call('GET', '/api/offers/' + bundles[1].offerId, areas[0].id)).status).toBe(404)
+-  for (const key of ['integration_id', 'ad_account_id', 'pixel_id', 'flow_id', 'product_id'])
+-    expect((await call('POST', '/api/offers', areas[0].id, { name: 'Unknown resource', config: { ...bundles[0], [key]: randomUUID() } })).status).toBe(422)
+-  expect((await call('POST', '/api/offers', areas[0].id, { name: 'Wrong Meta area', config: { ...bundles[0], pixel_id: bundles[1].pixel_id } })).status).toBe(422)
+-  expect((await call('GET', '/api/offers')).body.items.map((r: any) => r.id)).toEqual([oldOffer.id])
+-})
+ it('MCP carries an explicit area on each call without leaking state to the next caller, and retains read/write permissions', async () => {
+   expect((await tool(reader, 'list_business_areas')).data.items).toHaveLength(3)
+   expect((await tool(reader, 'initialize_business_areas')).error).toBe(true)
+@@ -208,62 +195,6 @@ it('flow editing rejects both foreign and dynamic destination references before
+   }
+   expect(await sys.q('select id from crm.flow_nodes where flow_id=$1', [id])).toHaveLength(0)
+ })
+-it('adoption moves only a general offer and preserves its activation, shared resources and history', async () => {
+-  const resourceBindings = await sys.q('select * from crm.business_area_resources order by kind,resource_id')
+-  const failed = await call('POST', `/api/business-areas/${areas[1].id}/adopt-offer`, undefined, { offer_id: bundles[0].offerId, confirm: true })
+-  expect(failed.status).toBe(409)
+-  expect((await sys.q('select business_area_id from crm.offers where id=$1', [bundles[0].offerId]))[0].business_area_id).toBe(areas[0].id)
+-  expect((await call('POST', `/api/business-areas/${areas[2].id}/adopt-offer`, undefined, { offer_id: oldOffer.id })).status).toBe(422)
+-  const adopted = await call('POST', `/api/business-areas/${areas[2].id}/adopt-offer`, undefined, { offer_id: oldOffer.id, confirm: true })
+-  expect(adopted.status, JSON.stringify(adopted.body)).toBe(200)
+-  const offer = (await sys.q('select * from crm.offers where id=$1', [oldOffer.id]))[0]
+-  expect(offer).toMatchObject({ business_area_id: areas[2].id, active: false, version: 2, config: oldOffer.config })
+-  expect((await call('POST', `/api/business-areas/${areas[2].id}/adopt-offer`, undefined, { offer_id: oldOffer.id, confirm: true })).status).toBe(200)
+-  expect((await sys.q('select version from crm.offers where id=$1', [oldOffer.id]))[0].version).toBe(2)
+-  expect(await sys.q('select id from crm.flow_runs')).toHaveLength(0)
+-  expect(await sys.q('select * from crm.business_area_resources order by kind,resource_id')).toEqual(resourceBindings)
+-  expect(await sys.q('select id from crm.payment_charges')).toHaveLength(0)
+-})
+-it('simultaneous moves cannot give the same offer to two workspaces', async () => {
+-  const created = await call('POST', '/api/offers', undefined, { name: 'Concurrent general offer', config: legacyBundle })
+-  expect(created.status).toBe(201)
+-  const offerId = created.body.offer.id
+-  const results = await Promise.all(areas.slice(0,2).map(area =>
+-    call('POST', '/api/business-areas/' + area.id + '/adopt-offer', undefined, { offer_id: offerId, confirm: true })))
+-  expect(results.map(result => result.status).sort()).toEqual([200,409])
+-  const [row] = await sys.q('select version, business_area_id from crm.offers where id=$1', [offerId])
+-  expect(row.version).toBe(2)
+-  expect(areas.slice(0,2).map(area => area.id)).toContain(row.business_area_id)
+-})
+-it('the same shared chip freezes the selected business, BM and payment destination, with separated historical results', async () => {
+-  const { OffersService } = await import('@crm/core'), svc = new OffersService(sys.db)
+-  const definition={schema:'crm.flow/v1',entry:'start',nodes:[{id:'start',type:'start',name:'Start',position:{x:0,y:0},actions:[]}],edges:[],variables:[],refs:{}}
+-  await sys.q('insert into crm.flow_versions(company_id,flow_id,version,definition) values($1,$2,1,$3)',[t.companyId,bundles[0].flow_id,definition])
+-  const [contact]=await sys.q("insert into crm.contacts(company_id,name) values($1,'Synthetic area contact') returning id",[t.companyId])
+-  const [chat]=await sys.q('insert into crm.chats(company_id,contact_id,connection_id) values($1,$2,$3) returning id',[t.companyId,contact.id,t.connectionId])
+-  expect((await call('PUT','/api/offers/'+bundles[0].offerId,areas[0].id,{name:'Business offer 0',active:true,config:bundles[0]})).status).toBe(200)
+-  await svc.manageConnection(t.companyId,t.connectionId,true)
+-  const resolved=await svc.createOpportunity(t.companyId,chat.id,{},bundles[0].offerId)
+-  expect(resolved.state).toBe('resolved')
+-  const op=resolved.opportunity!,snapshot=op.snapshot as any
+-  expect(snapshot).toMatchObject({business_area_id:areas[0].id,bm_id:'111000',connection_id:t.connectionId,integration_id:bundles[0].integration_id,ad_account_id:bundles[0].ad_account_id})
+-  await sys.q("insert into crm.sales(company_id,contact_id,connection_id,product_id,opportunity_id,amount_cents,currency,status,source) values($1,$2,$3,$4,$5,100,'BRL','approved','manual')",[t.companyId,contact.id,t.connectionId,bundles[0].product_id,op.id])
+-  expect((await call('GET','/api/offers/results',areas[1].id)).body.items).toEqual([])
+-  expect((await call('GET','/api/offers/results',areas[0].id)).body.items).toEqual([expect.objectContaining({offer_id:bundles[0].offerId,revenue_cents:'100'})])
+-  expect((await call('GET','/api/chats/'+chat.id+'/offers',areas[1].id)).body.items).toEqual([])
+-  expect((await call('GET','/api/chats/'+chat.id+'/offers',areas[0].id)).body.items).toHaveLength(1)
+-  const [offerRun] = await sys.q("insert into crm.flow_runs(company_id,flow_id,contact_id,chat_id,status,offer_scoped,trigger) values($1,$2,$3,$4,'completed',true,$5) returning id", [t.companyId,bundles[0].flow_id,contact.id,chat.id,{opportunity_id:op.id}])
+-  expect((await call('GET','/api/flow-runs/'+offerRun.id,areas[0].id)).status).toBe(200)
+-  expect((await call('GET','/api/flow-runs/'+offerRun.id,areas[1].id)).status).toBe(404)
+-  expect((await call('GET','/api/flows/'+bundles[0].flow_id+'/runs',areas[1].id)).body.items).toEqual([])
+-  expect((await call('GET','/api/chats/'+chat.id+'/flow-runs',areas[1].id)).body.items).toEqual([])
+-  expect((await call('PUT','/api/business-areas/'+areas[0].id,undefined,{name:'Admin 1',bm_id:'333000'})).status).toBe(200)
+-  expect((await sys.q('select snapshot from crm.offer_opportunities where id=$1',[op.id]))[0].snapshot.bm_id).toBe('111000')
+-  expect((await call('PUT','/api/business-areas/'+areas[0].id,undefined,{name:'Admin 1',bm_id:'111000'})).status).toBe(200)
+-  expect((await call('PUT','/api/offers/'+bundles[0].offerId,areas[0].id,{name:'Business offer 0',active:false,config:bundles[0]})).status).toBe(200)
+-  expect(await sys.q('select id from crm.flow_runs')).toEqual([{ id: offerRun.id }])
+-  expect(await sys.q('select id from crm.payment_charges')).toHaveLength(0)
+-})
+ it('permissions and company gate are checked on each area management call', async () => {
+   const user = bundles[0].owner_user_id
+   await sys.q("update crm.company_members set role='member',permission_keys=ARRAY[]::text[] where company_id=$1 and user_id=$2", [t.companyId,user])
+@@ -277,8 +208,6 @@ it('another admin of the SAME company cannot discover area tools or read area da
+   const account = { ...foreign, companyId:t.companyId }
+   expect((await call('GET','/api/business-areas',undefined,undefined,account)).status).toBe(404)
+   expect((await call('GET','/api/business-areas/catalog',undefined,undefined,account)).status).toBe(404)
+-  expect((await call('GET','/api/offers',areas[0].id,undefined,account)).status).toBe(404)
+-  expect((await call('GET','/api/offers/'+bundles[0].offerId,undefined,undefined,account)).status).toBe(404)
+   expect((await call('GET','/api/payment-integrations',undefined,undefined,account)).status).toBe(404)
+   expect((await call('GET','/api/events',undefined,undefined,account)).status).toBe(404)
+   expect((await call('GET','/api/jobs',undefined,undefined,account)).status).toBe(404)
+@@ -287,7 +216,6 @@ it('another admin of the SAME company cannot discover area tools or read area da
+   expect((await tool(made.body.token,'list_business_areas')).error).toBe(true)
+   expect((await tool(made.body.token,'get_business_area_resource_catalog')).error).toBe(true)
+   expect((await tool(made.body.token,'list_flows')).data.flows).toEqual([])
+-  expect((await tool(made.body.token,'adopt_offer_business_area',{id:areas[0].id,offer_id:bundles[0].offerId,confirm:true})).error).toBe(true)
+   const profile=(await call('GET','/api/auth/profile',undefined,undefined,account)).body
+   expect(profile.companies.find((c:any)=>c.id===t.companyId)).toMatchObject({business_areas_admin:false,business_areas_enabled:true})
+   await sys.q('update crm.users set last_company_id=$1 where id=$2',[t.companyId,user])
+@@ -302,16 +230,15 @@ it('flows start private, can be shared deliberately and keep editing in the owne
+   expect((await call('GET','/api/flows/'+id,b)).status).toBe(404)
+   expect((await call('GET','/api/flows/names',b)).body.items.map((f:any)=>f.id)).not.toContain(id)
+   await sys.q("update crm.flows set status='active',published_version=1 where id=$1", [id])
+-  const candidate = {name:'Offer using a workspace flow',config:{...bundles[1],flow_id:id}}
+-  expect((await call('POST','/api/offers',b,candidate)).status).toBe(422)
+-  expect((await call('GET','/api/offers/resources',a)).body.flows.map((f:any)=>f.id)).toContain(id)
++  expect((await call('GET','/api/business-areas/catalog',a)).body.flow.map((f:any)=>f.id)).toContain(id)
++  expect((await call('GET','/api/business-areas/catalog',b)).body.flow.map((f:any)=>f.id)).not.toContain(id)
+   expect((await call('POST','/api/flows/'+id+'/share-workspace',b,{})).status).toBe(404)
+   expect((await tool(reader,'share_workspace_flow',{flow_id:id,business_area_id:a,confirm:true})).error).toBe(true)
+   expect((await tool(writer,'share_workspace_flow',{flow_id:id,business_area_id:a,confirm:true})).error).toBe(false)
+   expect((await tool(reader,'list_flows',{business_area_id:b})).data.flows.map((f:any)=>f.id)).toContain(id)
+   expect((await call('GET','/api/flows/'+id,b)).status).toBe(200)
+   expect((await call('PATCH','/api/flows/'+id,b,{name:'Attempt from another workspace'})).status).toBe(404)
+-  expect((await call('POST','/api/offers',b,candidate)).status).toBe(201)
++  expect((await call('GET','/api/business-areas/catalog',b)).body.flow.map((f:any)=>f.id)).toContain(id)
+   const duplicated=await call('POST',`/api/flows/${id}/duplicate`,a,{})
+   expect(duplicated.status).toBe(201)
+   expect((await call('GET','/api/flows/'+duplicated.body.flow.id,b)).status).toBe(404)
+@@ -344,8 +271,17 @@ it('flows start private, can be shared deliberately and keep editing in the owne
+   expect((await call('GET','/api/flow-runs/'+run.id,b)).status).toBe(200)
+   expect((await tool(reader,'get_conversation_flow_runs',{id:chat.id,business_area_id:a})).data.items).toHaveLength(1)
+   expect((await tool(reader,'get_conversation_flow_runs',{id:chat.id,business_area_id:b})).data.items).toHaveLength(1)
++  // Isolamento de execuções por workspace: a run de um fluxo PRIVADO de A não aparece em B por nenhuma via.
++  const [privateRun]=await sys.q("insert into crm.flow_runs(company_id,flow_id,contact_id,chat_id,status) values($1,$2,$3,$4,'completed') returning id",[t.companyId,duplicated.body.flow.id,contact.id,chat.id])
++  expect((await call('GET','/api/flow-runs/'+privateRun.id,a)).status).toBe(200)
++  expect((await call('GET','/api/flow-runs/'+privateRun.id,b)).status).toBe(404)
++  expect((await call('GET','/api/flows/'+duplicated.body.flow.id+'/runs',a)).body.items.map((r:any)=>r.id)).toEqual([privateRun.id])
++  expect((await call('GET','/api/flows/'+duplicated.body.flow.id+'/runs',b)).status).toBe(404)
++  expect((await call('GET','/api/chats/'+chat.id+'/flow-runs',a)).body.items.map((r:any)=>r.id).sort()).toEqual([privateRun.id,run.id].sort())
++  expect((await call('GET','/api/chats/'+chat.id+'/flow-runs',b)).body.items.map((r:any)=>r.id)).toEqual([run.id])
++  expect((await call('POST','/api/flow-runs/'+privateRun.id+'/cancel',b,{})).status).toBe(404)
+ })
+-it('desktop/mobile navigation selects the actual business area, filters offers and shows its declared BM', async () => {
++it('desktop/mobile navigation selects the actual business area, hides offers and shows its declared BM', async () => {
+   const root = resolve(process.env.CRM_EMBEDDED_DIST!)
+   server = createServer(async (req,res) => {
+     try {
+@@ -388,32 +324,15 @@ it('desktop/mobile navigation selects the actual business area, filters offers a
+       expect(await page.getByTestId('nav-item-offers').count()).toBe(0)
+       await page.getByTestId('flows-search').fill(privateFlow.name)
+       await page.getByTestId('flows-item-menu-'+privateFlow.id).click()
+-      await page.getByTestId('flows-item-commercial-'+privateFlow.id).click()
+-      await page.getByTestId('flow-commercial-dialog').waitFor()
+-      expect(await page.getByTestId('flow-commercial-save').isDisabled()).toBe(true)
+-      await page.getByRole('button',{name:'Fechar'}).click()
+-      await page.goto(base+'/crm/offers') // Compatibilidade de cadastros antigos; não é a entrada do workspace.
+-      await page.getByRole('heading',{name:'Ofertas do workspace'}).waitFor()
+-      await expect.poll(()=>page.getByRole('button',{name:/Business offer 0/}).isVisible()).toBe(true)
+-      expect(await page.getByRole('button',{name:/Business offer 1/}).isVisible()).toBe(false)
++      await page.getByTestId('flows-item-open-'+privateFlow.id).waitFor()
++      expect(await page.getByTestId('flows-item-commercial-'+privateFlow.id).count()).toBe(0)
++      await page.keyboard.press('Escape')
+       expect(await page.getByTestId('business-area-bm').textContent()).toContain('111000')
+-      const form = page.locator('form').filter({ has: page.getByRole('button', { name: 'Salvar oferta' }) })
+-      const offerName = 'Workspace browser offer ' + width
+-      await form.getByLabel('Nome da oferta').fill(offerName)
+-      const shared = bundles[0]
+-      for (const [label, id] of Object.entries({
+-        'Responsável': shared.owner_user_id,
+-        'Produto': shared.product_id,
+-        'Fluxo publicado': shared.flow_id,
+-        'Conta recebedora XPag': shared.integration_id,
+-        'Conta de anúncios': shared.ad_account_id,
+-        'Pixel de destino': shared.pixel_id,
+-      })) await form.getByLabel(label, { exact: true }).selectOption(String(id))
+-      await form.getByRole('group', { name: /Chips permitidos/ }).getByRole('checkbox').first().check()
+-      await form.getByRole('button', { name: 'Salvar oferta' }).click()
+-      await page.getByRole('button', { name: new RegExp(offerName) }).waitFor()
+-      await page.reload()
+-      await expect.poll(()=>page.getByRole('button',{name:/Business offer 0/}).isVisible()).toBe(true)
++      await page.goto(base+'/crm/offers')
++      await expect.poll(()=>page.getByRole('heading',{name:/Página não encontrada|Page not found/i}).count()).toBe(1)
++      expect(await page.getByRole('heading',{name:'Ofertas do workspace'}).count()).toBe(0)
++      await page.goto(base+'/crm/flows')
++      await page.getByTestId('page-flows').waitFor()
+       await page.getByRole('navigation',{name:'Fluxos e recursos do workspace'}).getByRole('link',{name:'Fluxos'}).click()
+       await page.getByTestId('flows-search').fill(privateFlow.name)
+       await page.getByTestId('flows-item-menu-'+privateFlow.id).click()
+@@ -424,10 +343,6 @@ it('desktop/mobile navigation selects the actual business area, filters offers a
+       await page.getByRole('button',{name:'Trocar workspace'}).click()
+       await page.getByTestId('workspace-enter-2').click()
+       await page.getByTestId('page-flows').waitFor()
+-      await page.goto(base+'/crm/offers') // Rota legada continua consultável sem virar a entrada do workspace.
+-      await expect.poll(()=>page.getByRole('button',{name:/Business offer 1/}).isVisible()).toBe(true)
+-      expect(await page.getByRole('button',{name:/Business offer 0/}).isVisible()).toBe(false)
+-      expect(await page.getByRole('button',{name:new RegExp(offerName)}).count()).toBe(0)
+       expect(await page.getByTestId('business-area-bm').textContent()).toContain('222000')
+       await page.getByRole('navigation',{name:'Fluxos e recursos do workspace'}).getByRole('link',{name:'Fluxos'}).click()
+       await page.getByTestId('flows-search').fill(privateFlow.name)
+@@ -438,13 +353,14 @@ it('desktop/mobile navigation selects the actual business area, filters offers a
+       await page.getByRole('button',{name:'Trocar workspace'}).click()
+       await page.getByTestId('workspace-enter-3').click()
+       await expect.poll(()=>page.getByTestId('workspace-current').textContent()).toBe(areas[2].name)
+-      await page.goto(base+'/crm/offers')
+-      expect(await page.getByRole('button',{name:/Business offer [01]/}).count()).toBe(0)
++      await page.getByTestId('page-flows').waitFor()
++      expect(await page.getByTestId('business-area-bm').count()).toBe(0)
+       await page.getByRole('button',{name:'Trocar workspace'}).click()
+       await page.getByTestId('workspace-enter-general').click()
+       await expect.poll(()=>page.getByTestId('workspace-current').textContent()).toBe('Geral')
+-      await page.goto(base+'/crm/offers')
+-      expect(await page.getByRole('button',{name:/Business offer [01]/}).count()).toBe(0)
++      await page.getByTestId('page-flows').waitFor()
++      expect(await page.getByTestId('business-area-bm').count()).toBe(0)
++      expect(await page.getByTestId('nav-item-offers').count()).toBe(0)
+       expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true)
+       await page.goto(base+'/crm/facebook/profiles?'+new URLSearchParams({ meta_oauth: 'success', meta_workspace: areas[1].id }))
+       await expect.poll(()=>page.getByTestId('workspace-current').textContent()).toBe(areas[1].name)
+@@ -464,64 +380,3 @@ it('desktop/mobile navigation selects the actual business area, filters offers a
+     expect((await unauthorized.request.get(base+'/crm/api/business-areas')).status()).toBe(404)
+   } finally {await unauthorized.close()}
+ },120000)
+-
+-it('configura comercialmente um fluxo sem cadastrar outra oferta na interface, com escopo e permissões', async () => {
+-  const area = areas[0].id
+-  const created = await call('POST', '/api/flows', area, { name: 'Fluxo comercial único' })
+-  expect(created.status).toBe(201)
+-  const flowId = created.body.flow.id
+-  const endpoint = `/api/flows/${flowId}/commercial`
+-  const config = { ...bundles[0] }
+-  delete config.flow_id
+-  delete config.offerId
+-  const draft = await call('GET', endpoint, area)
+-  expect(draft).toMatchObject({ status: 200, body: { commercial: null, can_save: true } })
+-  expect((await call('PUT', endpoint, area, { active: false, config: { ...bundles[0], flow_id: flowId } })).status).toBe(422)
+-  expect((await call('PUT', endpoint, area, { active: false, config: { owner_user_id: bundles[0].owner_user_id } })).status).toBe(422)
+-  expect((await call('PUT', endpoint, area, { active: true, config })).status).toBe(409)
+-  expect((await call('POST', '/api/offers', area, { name: 'Ativação legada indevida', active: true, config: { ...config, flow_id: flowId } })).status).toBe(422)
+-  const savedDraft = await call('PUT', endpoint, area, { active: false, config })
+-  expect(savedDraft.status, JSON.stringify(savedDraft.body)).toBe(201)
+-  expect(savedDraft.body.commercial.active).toBe(false)
+-  await sys.q("update crm.flows set status='active',published_version=1 where id=$1 and company_id=$2", [flowId, t.companyId])
+-  expect((await call('GET', endpoint, area)).body.can_save).toBe(true)
+-  const first = await call('PUT', endpoint, area, { active: false, config })
+-  expect(first.status, JSON.stringify(first.body)).toBe(200)
+-  expect(first.body.commercial.id).toBe(savedDraft.body.commercial.id)
+-  expect(first.body.commercial.config.flow_id).toBe(flowId)
+-  expect(first.body.commercial.name).toBe(created.body.flow.name)
+-  const again = await call('PUT', endpoint, area, { active: false, config })
+-  expect(again.status).toBe(200)
+-  expect(again.body.commercial.id).toBe(first.body.commercial.id)
+-  expect((await sys.q("select id from crm.offers where company_id=$1 and config->>'flow_id'=$2", [t.companyId, flowId]))).toHaveLength(1)
+-  const context = await browser.newContext({ viewport: { width: 390, height: 844 } })
+-  try {
+-    const base = 'http://127.0.0.1:' + (server.address() as any).port
+-    await context.addCookies([{ name: 'crm_session', value: t.token, url: base, httpOnly: true, sameSite: 'Lax' }])
+-    const page = await context.newPage()
+-    await page.goto(base+'/crm/flows')
+-    await page.getByTestId('workspace-enter-1').click()
+-    await page.getByTestId('flows-search').fill('Fluxo comercial único')
+-    await page.getByTestId('flows-item-menu-'+flowId).click()
+-    await page.getByTestId('flows-item-commercial-'+flowId).click()
+-    await page.getByTestId('flow-commercial-dialog').waitFor()
+-    expect(await page.getByLabel('Conta recebedora XPag').inputValue()).toBe(config.integration_id)
+-    expect(await page.getByLabel('Pixel de Purchase').inputValue()).toBe(config.pixel_id)
+-    await page.getByLabel('Descrição do custo').fill('Custo medido no teste')
+-    await page.getByTestId('flow-commercial-save').click()
+-    await page.getByTestId('flow-commercial-dialog').waitFor({ state: 'hidden' })
+-    await page.reload()
+-    await page.getByTestId('flows-search').fill('Fluxo comercial único')
+-    await page.getByTestId('flows-item-menu-'+flowId).click()
+-    await page.getByTestId('flows-item-commercial-'+flowId).click()
+-    expect(await page.getByLabel('Descrição do custo').inputValue()).toBe('Custo medido no teste')
+-  } finally { await context.close() }
+-  expect((await call('GET', endpoint, areas[1].id)).status).toBe(404)
+-  expect((await call('PUT', endpoint, areas[1].id, { active: false, config })).status).toBe(404)
+-  expect((await call('GET', endpoint, area, undefined, foreign)).status).toBe(404)
+-  expect((await call('PUT', endpoint, area, { active: false, config: { ...config, pixel_id: bundles[1].pixel_id } })).status).toBe(422)
+-  const secondLegacy = await call('POST', '/api/offers', area, { name: 'Legado do mesmo fluxo', active: false, config: { ...config, flow_id: flowId } })
+-  expect(secondLegacy.status).toBe(201)
+-  expect((await call('GET', endpoint, area)).status).toBe(409)
+-  expect((await call('PUT', endpoint, area, { active: false, config })).status).toBe(409)
+-})
 diff --git a/tests/acceptance/T125/crm003-browser.test.ts b/tests/acceptance/T125/crm003-browser.test.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..2a5e17c8c339a9ab1b049bca2ac351add6416715
