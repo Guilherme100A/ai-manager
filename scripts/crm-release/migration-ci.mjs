@@ -191,7 +191,7 @@ try {
   const blocked = await create(); utility('pg_restore', ['--no-owner', '--exit-on-error', '--dbname', blocked.url, before49])
   const blockedRuns = (await blocked.client.query('SELECT id,status,offer_scoped FROM crm.flow_runs ORDER BY id')).rows
   assert.ok(blockedRuns.some(x => x.offer_scoped && ['running', 'waiting'].includes(x.status)), 'fixture must keep an active offer-scoped run')
-  await assert.rejects(migrateUrl(blocked.url, { set: 'crm' }), e => (e.cause?.code ?? e.code) === 'P0001' && /migração 0049 abortada: 1 run(s) de fluxo de oferta/.test(String(e.cause?.message ?? e.message)))
+  await assert.rejects(migrateUrl(blocked.url, { set: 'crm' }), e => (e.cause?.code ?? e.code) === 'P0001' && String(e.cause?.message ?? e.message).includes('migração 0049 abortada: 1 run(s) de fluxo de oferta'))
   assert.deepEqual(await crmJournal(blocked.client), journalAfter)
   assert.deepEqual(await offerSchema(blocked.client), { trigger: true, indexes: 2, frozen: 0 })
   assert.deepEqual((await blocked.client.query('SELECT id,status,offer_scoped FROM crm.flow_runs ORDER BY id')).rows, blockedRuns)
