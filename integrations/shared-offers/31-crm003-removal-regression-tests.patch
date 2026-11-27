@@ -76,18 +76,20 @@ index 0000000000000000000000000000000000000000..2a5e17c8c339a9ab1b049bca2ac351ad
 +})
 diff --git a/tests/acceptance/T125/crm003-regression.test.ts b/tests/acceptance/T125/crm003-regression.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..1c9c2073dd96e64be7c45a1e745583597b8c22ed
+index 0000000000000000000000000000000000000000..7f11bad7fdb253967e3eed21bef0428a0290e925
 --- /dev/null
 +++ b/tests/acceptance/T125/crm003-regression.test.ts
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,184 @@
 +// CRM-003 R1. Disposable PostgreSQL/Redis, synthetic tenants and fake providers only.
 +/* eslint-disable @typescript-eslint/no-explicit-any -- acceptance JSON fixtures */
 +import { randomUUID } from 'node:crypto'
 +import { afterAll, beforeAll, expect, it } from 'vitest'
 +import { FakeXPag } from '../../../packages/core/src/payments/xpag/fake'
-+import { chatOf, history, messageFlow, phone, receive, sentTexts, startSystem, tenant, waitFor, type System, type Tenant } from './setup'
++import { chatOf, history, messageFlow, phone, receive, sentTexts, tenant, waitFor, type System, type Tenant } from './setup'
++import { startUpgradeSystem } from './crm003-upgrade-system'
 +
 +let sys: System, user: Tenant, other: Tenant, readToken: string, writeToken: string
++let legacyPixel: string, legacyIntegration: string, legacyOpportunity: string
 +const gateway = new FakeXPag({ clientId: 'crm003-test', clientSecret: 'synthetic-local-only' })
 +const old = { gate: process.env.SHARED_OFFERS_COMPANY_ID, xpag: process.env.XPAG_API_URL, public: process.env.API_PUBLIC_URL }
 +let sequence = 0
@@ -108,7 +110,8 @@ index 0000000000000000000000000000000000000000..1c9c2073dd96e64be7c45a1e74558359
 +  await gateway.start()
 +  process.env.XPAG_API_URL = gateway.url
 +  process.env.API_PUBLIC_URL = 'http://crm003.invalid'
-+  sys = await startSystem()
++  const upgradeSystem = await startUpgradeSystem()
++  sys = upgradeSystem
 +  user = await tenant(sys); other = await tenant(sys)
 +  process.env.SHARED_OFFERS_COMPANY_ID = user.companyId
 +  const reader = await user.c.post('/api/mcp_credentials', { name: 'CRM003 reader', access: 'read' })
@@ -117,6 +120,23 @@ index 0000000000000000000000000000000000000000..1c9c2073dd96e64be7c45a1e74558359
 +  readToken = reader.body.token; writeToken = writer.body.token
 +  // Historical row, not a newly activated feature: reproduces an already managed chip after upgrade.
 +  await sys.q('insert into crm.offer_connections(company_id,connection_id) values($1,$2)', [user.companyId, user.connectionId])
++  const pixel = await user.c.post('/api/meta/pixels', { name: 'CRM003 legacy pixel', pixel_id: '123456789101', access_token: 'EAABsyntheticLegacyToken123456789', auto_send_sales: false })
++  expect(pixel.status, pixel.text).toBe(201); legacyPixel = pixel.body.pixel.id
++  const integration = await user.c.post('/api/payment-integrations', { label: 'CRM003 legacy XPag', gateway: 'xpag', client_id: 'crm003-legacy', client_secret: 'synthetic-old-secret' })
++  expect(integration.status, integration.text).toBe(201); legacyIntegration = integration.body.integration.id
++  const [offer] = await sys.q("insert into crm.offers(company_id,name,config) values($1,'CRM003 historic offer',$2::jsonb) returning id", [user.companyId, JSON.stringify({ pixel_id: legacyPixel, integration_id: legacyIntegration })])
++  const [contact] = await sys.q("insert into crm.contacts(company_id,name) values($1,'CRM003 synthetic historical contact') returning id", [user.companyId])
++  const [chat] = await sys.q('insert into crm.chats(company_id,contact_id,connection_id) values($1,$2,$3) returning id', [user.companyId, contact.id, user.connectionId])
++  const [opportunity] = await sys.q('insert into crm.offer_opportunities(company_id,offer_id,contact_id,chat_id,snapshot,evidence) values($1,$2,$3,$4,$5::jsonb,$6::jsonb) returning id', [user.companyId, offer.id, contact.id, chat.id, JSON.stringify({ pixel_id: legacyPixel, integration_id: legacyIntegration }), '{}'])
++  legacyOpportunity = opportunity.id
++  await expect(sys.q("update crm.pixel_configs set pixel_id='987654321009' where id=$1", [legacyPixel])).rejects.toThrow(/offer_destination_locked/)
++  await expect(sys.q("update crm.payment_integrations set client_id='crm003-rotated-client' where id=$1", [legacyIntegration])).rejects.toThrow(/offer_destination_locked/)
++  await upgradeSystem.upgrade()
++  // The actual 0049 must preserve the row, install its guard, and be idempotent.
++  await upgradeSystem.upgrade()
++  expect(await sys.q('select connection_id from crm.offer_connections where company_id=$1', [user.companyId])).toEqual([{ connection_id: user.connectionId }])
++  await expect(sys.q('update crm.offer_connections set connection_id=connection_id where company_id=$1', [user.companyId])).rejects.toThrow(/offer_legacy_frozen/)
++  expect(await sys.q('select connection_id from crm.offer_connections where company_id=$1', [user.companyId])).toEqual([{ connection_id: user.connectionId }])
 +}, 180_000)
 +
 +afterAll(async () => {
@@ -199,6 +219,32 @@ index 0000000000000000000000000000000000000000..1c9c2073dd96e64be7c45a1e74558359
 +  expect((await sentTexts(sys, user)).filter(text => text === marker)).toHaveLength(1)
 +})
 +
++it('A5 allows editing, rotating and deleting historic pixel and XPag resources after upgrade', async () => {
++  const [pixelBefore] = await sys.q('select access_token_enc from crm.pixel_configs where id=$1', [legacyPixel])
++  const [paymentBefore] = await sys.q('select client_secret_enc from crm.payment_integrations where id=$1', [legacyIntegration])
++  const pixelUpdate = await user.c.put(`/api/meta/pixels/${legacyPixel}`, { name: 'CRM003 edited pixel', pixel_id: '987654321009', access_token: 'EAABsyntheticRotatedToken987654321' })
++  expect(pixelUpdate.status, pixelUpdate.text).toBe(200)
++  const pixelRead = await user.c.get(`/api/meta/pixels/${legacyPixel}`)
++  expect(pixelRead.status).toBe(200)
++  expect(pixelRead.body.pixel).toMatchObject({ name: 'CRM003 edited pixel' })
++  const paymentUpdate = await user.c.put(`/api/payment-integrations/${legacyIntegration}`, { label: 'CRM003 edited XPag', client_id: 'crm003-rotated-client', client_secret: 'synthetic-rotated-secret' })
++  expect(paymentUpdate.status, paymentUpdate.text).toBe(200)
++  const paymentRead = await user.c.get(`/api/payment-integrations/${legacyIntegration}`)
++  expect(paymentRead.status).toBe(200)
++  expect(paymentRead.body.integration).toMatchObject({ label: 'CRM003 edited XPag', client_id: 'crm003-rotated-client' })
++  const [pixelAfter] = await sys.q('select pixel_id, access_token_enc from crm.pixel_configs where id=$1', [legacyPixel])
++  const [paymentAfter] = await sys.q('select client_secret_enc from crm.payment_integrations where id=$1', [legacyIntegration])
++  expect(pixelAfter.access_token_enc).not.toBe(pixelBefore.access_token_enc)
++  expect(pixelAfter.pixel_id).toBe('987654321009')
++  expect(paymentAfter.client_secret_enc).not.toBe(paymentBefore.client_secret_enc)
++  expect((await user.c.delete(`/api/meta/pixels/${legacyPixel}`)).status).toBe(204)
++  expect((await user.c.delete(`/api/payment-integrations/${legacyIntegration}`)).status).toBe(200)
++  expect((await user.c.get(`/api/meta/pixels/${legacyPixel}`)).status).toBe(404)
++  expect((await user.c.get(`/api/payment-integrations/${legacyIntegration}`)).status).toBe(404)
++  const history = await sys.q('select snapshot from crm.offer_opportunities where id=$1', [legacyOpportunity])
++  expect(history).toEqual([{ snapshot: { pixel_id: legacyPixel, integration_id: legacyIntegration } }])
++})
++
 +it('keeps private flows isolated between workspaces after removal of offers', async () => {
 +  const initialized = await user.c.post('/api/business-areas/initialize', {})
 +  expect(initialized.status, initialized.text).toBe(201)
@@ -218,3 +264,124 @@ index 0000000000000000000000000000000000000000..1c9c2073dd96e64be7c45a1e74558359
 +  expect(data.flows.map((flow: any) => flow.id)).not.toContain(id)
 +  expect((await user.c.get(`/api/flows/${id}`, a)).status).toBe(200)
 +})
+diff --git a/tests/acceptance/T125/crm003-upgrade-system.ts b/tests/acceptance/T125/crm003-upgrade-system.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..fd1afac9af991ea9cc7cecabb6b78a0df352b672
+--- /dev/null
++++ b/tests/acceptance/T125/crm003-upgrade-system.ts
+@@ -0,0 +1,115 @@
++// QA-only system: old-schema fixture followed by the real production migrator.
++import { randomBytes } from 'node:crypto'
++import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import { newWorkerEnv, startWorker } from '../helpers/wa-worker'
++import type { System } from './setup'
++
++// eslint-disable-next-line @typescript-eslint/no-explicit-any
++type Any = any
++
++export const META_APP_ID = 'app-t125'
++export const META_APP_SECRET = `secret-t125-${randomBytes(6).toString('hex')}`
++
++export async function startUpgradeSystem(): Promise<System & { upgrade: () => Promise<void> }> {
++  // Filas isoladas pelo CRM_QUEUE_PREFIX desta execução (definido na config da aceitação, T121).
++  const REDIS_URL = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379/1'
++  const wenv = newWorkerEnv()
++  wenv.vars.REDIS_URL = REDIS_URL
++
++  // Meta: servidor fake local e as mesmas variáveis que o server.ts e o worker leem do ambiente.
++  const { FakeMetaGraph }: Any = await import('@crm/core/meta-testing')
++  const fakeMeta = new FakeMetaGraph({ appId: META_APP_ID, appSecret: META_APP_SECRET, pageSize: 50 })
++  const metaStarted = await fakeMeta.start()
++  const metaUrl: string = metaStarted?.url ?? fakeMeta.url
++  Object.assign(process.env, {
++    META_GRAPH_URL: metaUrl,
++    META_APP_ID,
++    META_APP_SECRET,
++    META_OAUTH_REDIRECT_URI: 'https://api.t125.test/api/meta/oauth/callback',
++    META_OAUTH_DIALOG_URL: 'http://facebook.t125.test/dialog/oauth',
++    WEB_PUBLIC_URL: 'http://web.t125.test',
++    META_FX_RATES: JSON.stringify({ 'USD:BRL': 5 }),
++  })
++  const wa = await startWorker(wenv)
++  const credentialsKey = randomBytes(32).toString('base64')
++  process.env.CREDENTIALS_KEY = credentialsKey
++  const storageDir = mkdtempSync(join(tmpdir(), 'crm-t125-storage-'))
++
++  const { createDb, migrateUrl, MIGRATION_SETS }: Any = await import('@crm/db')
++  const { createTempDatabase }: Any = await import('@crm/db/testing')
++  const kit: Any = await import('@crm/node-kit')
++  await import('@crm/core')
++  await import('@crm/wa-gateway-rpc')
++  const wk: Any = await import('@crm/worker')
++  const api: Any = await import('@crm/api')
++  kit.resetCredentialsCrypto?.()
++  kit.initCredentialsCrypto?.()
++
++  // Run the unmodified production migrator with a temporary journal ending at 0048.
++  const preDir = mkdtempSync(join(tmpdir(), 'crm003-before-0049-'))
++  cpSync(MIGRATION_SETS.crm.folder, preDir, { recursive: true })
++  const journalPath = join(preDir, 'meta', '_journal.json')
++  const journal = JSON.parse(readFileSync(journalPath, 'utf8'))
++  if (!journal.entries.some((entry: Any) => entry.tag === '0049_retire_offers')) throw new Error('CRM-003 migration 0049 is required in the integrated checkout')
++  journal.entries = journal.entries.filter((entry: Any) => entry.idx < 49)
++  if (journal.entries.at(-1)?.idx !== 48) throw new Error('Expected CRM migrations through 0048')
++  writeFileSync(journalPath, JSON.stringify(journal))
++  const tmp = await createTempDatabase({ migrate: false })
++  try { await migrateUrl(tmp.url, { set: 'all', folders: { crm: preDir } }) } finally { rmSync(preDir, { recursive: true, force: true }) }
++  const db = createDb(tmp.url)
++  db.$client.on?.('error', () => {})
++  const q = async (text: string, params: unknown[] = []) => (await db.$client.query(text, params)).rows
++
++  const env = {
++    ...process.env,
++    DATABASE_URL: tmp.url,
++    REDIS_URL,
++    CREDENTIALS_KEY: credentialsKey,
++    STORAGE_DIR: storageDir,
++    WA_GATEWAY: 'rpc',
++    WA_RPC_URL: wa.url,
++    WA_RPC_PROFILE: 'crm',
++    INTERNAL_TOKEN: wenv.token,
++    WA_EVENTS_STREAM: wenv.stream,
++    AI_MODE: 'fake',
++    META_GRAPH_URL: metaUrl,
++    META_APP_ID,
++    META_APP_SECRET,
++    META_FX_RATES: JSON.stringify({ 'USD:BRL': 5 }),
++    ANTIBAN_MODE: 'passthrough',
++    LOG_LEVEL: 'warn',
++  }
++  const prod = await wk.startProductionWorker({ env, db, migrate: false, handleSignals: false })
++
++  // API pela MESMA composição do server.ts (T125): createProductionApiDeps({ env }) + createApp(deps).
++  // Só o mailer é sobreposto (memória). O salesPublisher → fila meta-capi vem do código de produção.
++  if (typeof api.createProductionApiDeps !== 'function') throw new Error('@crm/api não exporta createProductionApiDeps')
++  const production = await api.createProductionApiDeps({ env: { ...env, TRUST_PROXY: 'true', WEB_PUBLIC_URL: 'http://web.t125.test' }, db, migrate: false })
++  const app = api.createApp({ ...production.deps, mailer: new kit.MemoryMailer() })
++
++  return {
++    fakeMeta,
++    wenv,
++    wa,
++    tmp,
++    db,
++    app,
++    prod,
++    storageDir,
++    q,
++    upgrade: async () => { await migrateUrl(tmp.url, { set: 'all' }) },
++    close: async () => {
++      await prod?.stop?.().catch(() => {})
++      await (metaStarted?.close ?? fakeMeta.close)?.call(metaStarted ?? fakeMeta)
++      production.dispose?.()
++      await production.close?.().catch(() => {})
++      await wa.shutdown().catch(() => wa.kill())
++      await db.$client.end().catch(() => {})
++      await tmp.drop().catch(() => {})
++      rmSync(storageDir, { recursive: true, force: true })
++      wenv.cleanup()
++    },
++  }
++}

@@ -34,8 +34,8 @@ export function adaptReviewerSuite(input) {
 }
 export function assertIntegrationComplete(report) {
   // CRM-003: shared Offers suites (shared-offers, adapted reviewer) retired with the feature; negative/regression suite replaces them.
-  const expected = new Map([['crm003-regression.test.ts', 5], ['operational-ci.test.ts', 2]])
-  check(report?.numTotalTests === 7 && report.numPassedTests === 7 && report.numFailedTests === 0 && report.numPendingTests === 0 && report.numTodoTests === 0 && report.numFailedTestSuites === 0, 'Acceptance incomplete: all 57 tests must execute and pass, no pending/skip/todo')
+  const expected = new Map([['crm003-regression.test.ts', 6], ['operational-ci.test.ts', 2]])
+  check(report?.numTotalTests === 8 && report.numPassedTests === 8 && report.numFailedTests === 0 && report.numPendingTests === 0 && report.numTodoTests === 0 && report.numFailedTestSuites === 0, 'Acceptance incomplete: all 57 tests must execute and pass, no pending/skip/todo')
   check(Array.isArray(report.testResults) && report.testResults.length === 2, 'Both acceptance suites required')
   const names = report.testResults.map(s => s.name.replaceAll('\\', '/').split('/').at(-1))
   check(new Set(names).size === 2, 'Duplicate acceptance suite')
@@ -54,7 +54,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
       console.log('CI reviewer fixture scoped to synthetic tenant; strict foreign-company 404; original source preserved')
     } else if (mode === 'verify') {
       assertIntegrationComplete(JSON.parse(fs.readFileSync(file, 'utf8')))
-      console.log('PASS all 7 acceptance tests (CRM-003 regression + operational); no pending/skip/todo')
+      console.log('PASS all 8 acceptance tests (CRM-003 regression + operational); no pending/skip/todo')
     } else throw Error('Use prepare <reconstructed-crm> or verify <integration.json>')
   } catch (e) { console.error(e.message); process.exitCode = 1 }
 }

@@ -40,7 +40,7 @@ for (const initial of [undefined, '', 'other-fixture']) for (const cleanupFails 
   assert.equal(env.SHARED_OFFERS_COMPANY_ID, initial)
   assert.equal(Object.hasOwn(env, 'SHARED_OFFERS_COMPANY_ID'), initial !== undefined)
 })
-function report() { return { numTotalTests: 7, numPassedTests: 7, numFailedTests: 0, numPendingTests: 0, numTodoTests: 0, numFailedTestSuites: 0, testResults: [['crm003-regression.test.ts', 5], ['operational-ci.test.ts', 2]].map(([name, n]) => ({ name: '/ci/' + name, status: 'passed', assertionResults: Array.from({ length: n }, () => ({ status: 'passed' })) })) } }
+function report() { return { numTotalTests: 8, numPassedTests: 8, numFailedTests: 0, numPendingTests: 0, numTodoTests: 0, numFailedTestSuites: 0, testResults: [['crm003-regression.test.ts', 6], ['operational-ci.test.ts', 2]].map(([name, n]) => ({ name: '/ci/' + name, status: 'passed', assertionResults: Array.from({ length: n }, () => ({ status: 'passed' })) })) } }
 test('complete report accepted', () => assert.doesNotThrow(() => assertIntegrationComplete(report())))
 for (const [name, mutate] of [
   ['real setup failure shape:18passed39pending0assertion failures', r => { r.numPassedTests = 2; r.numPendingTests = 5; r.numFailedTestSuites = 1; r.testResults[1].status = 'failed' }],

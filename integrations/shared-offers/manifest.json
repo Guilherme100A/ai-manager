@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/Guilherme100A/crm-copy.git",
   "base_sha": "acf78e2da49865afa06fe6a4cee77bcf0e888152",
-  "expected_tree": "dacdb6e313ac3ae303ce8ed3884b0b8010eedbcc",
+  "expected_tree": "0f401a7b5a632e50831159d8299aeaddf4b2218b",
   "sanitization": {
     "excluded_files": [
       "scripts/elevenlabs-account-diagnose.ts",
@@ -28,7 +28,7 @@
     ],
     "reason": "Exclude unrelated operator scripts/private deployment context and audit-only harnesses; replace operational hosts in documentation and URL fixtures with reserved example.test hosts. Original local source preserved.",
     "baseline_tree": "539e4a6dac07e50188e418d0e1a3d669e5f6d687",
-    "final_tree": "dacdb6e313ac3ae303ce8ed3884b0b8010eedbcc"
+    "final_tree": "0f401a7b5a632e50831159d8299aeaddf4b2218b"
   },
   "test_only_changes": [
     {
@@ -790,12 +790,13 @@
     },
     {
       "file": "31-crm003-removal-regression-tests.patch",
-      "description": "CRM-003 R1 QA (crm-copy b5ed2e7 over 6d2b093): T125/crm003-regression (5) and crm003-browser (2 widths) negative and regression suites. Test-only.",
-      "sha256": "b5dfb79da4980878be182f22ec751eb7a8a0656c35a6e870002d942fa9b25039",
-      "bytes": 15762,
+      "description": "CRM-003 R1 QA (crm-copy da47000 over 6d2b093, Lince): T125/crm003-regression (6: 5 + A5 historic pixel/XPag edit/rotate/delete) seeded with historic offer data BEFORE 0049 via crm003-upgrade-system (real migrator, journal through 0048, then 0049 twice for idempotence), and crm003-browser (2 widths). Test-only.",
+      "sha256": "969830b6a81791376e35f264c7e1c4712c72d75246128b184fec6f218c0eaa17",
+      "bytes": 26324,
       "files": [
         "tests/acceptance/T125/crm003-browser.test.ts",
-        "tests/acceptance/T125/crm003-regression.test.ts"
+        "tests/acceptance/T125/crm003-regression.test.ts",
+        "tests/acceptance/T125/crm003-upgrade-system.ts"
       ]
     }
   ],
