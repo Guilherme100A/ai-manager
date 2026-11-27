@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/Guilherme100A/crm-copy.git",
   "base_sha": "acf78e2da49865afa06fe6a4cee77bcf0e888152",
-  "expected_tree": "4ca23fc779974f3772dcf5e6aeb6f0604fde0e0c",
+  "expected_tree": "0231d1807fbae95079ff90554a068aab8618b692",
   "sanitization": {
     "excluded_files": [
       "scripts/elevenlabs-account-diagnose.ts",
@@ -683,6 +683,60 @@
         "apps/web/src/i18n/es/facebook.json",
         "apps/web/src/i18n/pt-BR/facebook.json",
         "tests/acceptance/T005-R4/browser-discovery.mjs"
+      ]
+    },
+    {
+      "file": "27-remove-shared-offers-web-api.patch",
+      "description": "CRM-003 R1 P-B (crm-copy 9dc4088 over 6d2b093): removes the shared Offers web page/route/commercial dialog and the /api/offers API route; business areas gate via isBusinessAreasCompany. No migrations; tables untouched.",
+      "sha256": "76839c0ec976cd1bea6dc10c49f1012ddbf57ec632a135e5f536dfcc0c1bc4ac",
+      "bytes": 91900,
+      "files": [
+        "apps/api/src/middleware/business-area.ts",
+        "apps/api/src/routes/auth/shared-offers-profile.db.unit.test.ts",
+        "apps/api/src/routes/business-areas/index.ts",
+        "apps/api/src/routes/flow-runs/funnel.ts",
+        "apps/api/src/routes/flow-runs/index.ts",
+        "apps/api/src/routes/index.ts",
+        "apps/api/src/routes/offers/index.ts",
+        "apps/web/src/app/access.ts",
+        "apps/web/src/app/nav.ts",
+        "apps/web/src/features/business-areas/areas.tsx",
+        "apps/web/src/features/flow-editor/canvas/editor.tsx",
+        "apps/web/src/features/flows/commercial-dialog.tsx",
+        "apps/web/src/features/flows/flows-page.tsx",
+        "apps/web/src/features/offers/page.tsx",
+        "apps/web/src/features/offers/style.css",
+        "apps/web/src/i18n/en/shell.json",
+        "apps/web/src/i18n/es/shell.json",
+        "apps/web/src/i18n/pt-BR/shell.json",
+        "apps/web/src/lib/session.ts",
+        "apps/web/src/routeTree.gen.ts",
+        "apps/web/src/routes/offers.tsx"
+      ]
+    },
+    {
+      "file": "28-remove-shared-offers-mcp-catalog.patch",
+      "description": "CRM-003 R1 MCP (crm-copy 59cf8b6 over 6d2b093): removes Offers tools and docs from the MCP catalog; adds catalog-sem-ofertas unit test and T125/mcp-sem-ofertas acceptance test (replaces mcp-offers). No migrations.",
+      "sha256": "c27d806f1fc47e2ce45e418abc4d2a2af24d85aa2498b50162fbf6c874bff538",
+      "bytes": 60667,
+      "files": [
+        "docs/mcp-chip-pairing.md",
+        "docs/mcp-meta-workspaces.md",
+        "docs/mcp-open-conversation.md",
+        "docs/mcp-shared-offers.md",
+        "docs/shared-offers.md",
+        "packages/core/src/mcp/server.ts",
+        "packages/core/src/mcp/tools/business-areas.ts",
+        "packages/core/src/mcp/tools/catalog-sem-ofertas.unit.test.ts",
+        "packages/core/src/mcp/tools/conversations.ts",
+        "packages/core/src/mcp/tools/index.ts",
+        "packages/core/src/mcp/tools/meta-workspaces.ts",
+        "packages/core/src/mcp/tools/offers.ts",
+        "packages/core/src/mcp/tools/offers.unit.test.ts",
+        "packages/core/src/mcp/tools/shared.ts",
+        "tests/acceptance/T125/business-areas.test.ts",
+        "tests/acceptance/T125/mcp-offers.test.ts",
+        "tests/acceptance/T125/mcp-sem-ofertas.test.ts"
       ]
     }
   ],

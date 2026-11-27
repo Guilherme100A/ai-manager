@@ -138,7 +138,7 @@ jobs:
         run: |
           mkdir -p "$CRM_REPORT_DIR" "$RUNNER_TEMP/output/shared-offers"
           node scripts/prepare-shared-offers-crm.mjs "$RUNNER_TEMP/crm-source"
-          test "$(git -C "$RUNNER_TEMP/crm-source" write-tree)" = 4ca23fc779974f3772dcf5e6aeb6f0604fde0e0c
+          test "$(git -C "$RUNNER_TEMP/crm-source" write-tree)" = 0231d1807fbae95079ff90554a068aab8618b692
       - name: Install and build test dependencies on the runner only
         run: |
           diag() { node "$GITHUB_WORKSPACE/scripts/crm-release/listener-diagnostic.mjs" "$RUNNER_TEMP/crm-source" "$CRM_REPORT_DIR" "$@"; }
@@ -173,8 +173,8 @@ jobs:
           node "$GITHUB_WORKSPACE/scripts/crm-release/prepare-ci-tests.mjs" verify "$CRM_REPORT_DIR/integration.json"
           diag persistent-login pnpm exec vitest run --config tests/acceptance/vitest.config.ts tests/acceptance/T125/persistent-login-ci.test.ts --reporter=json --outputFile="$CRM_REPORT_DIR/persistent-login.json"
           node -e 'const r=require(process.argv[1]); if(r.numTotalTests!==2 || r.numPassedTests!==2 || r.numPendingTests || r.numFailedTests || !r.success) process.exit(1)' "$CRM_REPORT_DIR/persistent-login.json"
-          diag mcp-offers pnpm exec vitest run --config tests/acceptance/vitest.config.ts tests/acceptance/T125/mcp-offers.test.ts --reporter=json --outputFile="$CRM_REPORT_DIR/mcp-offers.json"
-          node -e 'const r=require(process.argv[1]); if(r.numTotalTests!==8 || r.numPassedTests!==8 || r.numPendingTests || r.numFailedTests || !r.success) process.exit(1)' "$CRM_REPORT_DIR/mcp-offers.json"
+          diag mcp-sem-ofertas pnpm exec vitest run --config tests/acceptance/vitest.config.ts tests/acceptance/T125/mcp-sem-ofertas.test.ts --reporter=json --outputFile="$CRM_REPORT_DIR/mcp-sem-ofertas.json"
+          node -e 'const r=require(process.argv[1]); if(r.numTotalTests!==4 || r.numPassedTests!==4 || r.numPendingTests || r.numFailedTests || !r.success) process.exit(1)' "$CRM_REPORT_DIR/mcp-sem-ofertas.json"
           diag business-areas pnpm exec vitest run --config tests/acceptance/vitest.config.ts tests/acceptance/T125/business-areas.test.ts --reporter=json --outputFile="$CRM_REPORT_DIR/business-areas.json"
           node -e 'const r=require(process.argv[1]); if(r.numTotalTests!==15 || r.numPassedTests!==15 || r.numPendingTests || r.numFailedTests || !r.success) process.exit(1)' "$CRM_REPORT_DIR/business-areas.json"
           diag core pnpm --filter @crm/core exec vitest run src/offers src/connections src/flows/engine src/flows/nodes/messaging src/flows/nodes/interactive src/flows/nodes/external src/flows/triggers src/payments/webhooks src/mcp src/mcp-oauth src/chats/ingest src/chats/send src/media src/meta-capi src/flows/nodes/pixel --maxWorkers=2 --reporter=json --outputFile="$CRM_REPORT_DIR/core.json"
@@ -204,7 +204,7 @@ jobs:
       - name: Build immutable Alpine/musl release (never copy runner node_modules)
         run: |
           printf '.git\n**/node_modules\n**/dist\noutput\n.env\ntest-results\nplaywright-report\n**/.vite\ntests/acceptance/T125/operational-ci.test.ts\ntests/acceptance/T125/revisor-gated-ci.test.ts\ntests/acceptance/T125/persistent-login-ci.test.ts\n' > "$RUNNER_TEMP/crm-source/.dockerignore"
-          docker build --platform linux/amd64 --build-arg SOURCE_TREE=4ca23fc779974f3772dcf5e6aeb6f0604fde0e0c -f integrations/shared-offers/Dockerfile -t "crm-shared-offers:$GITHUB_SHA" "$RUNNER_TEMP/crm-source"
+          docker build --platform linux/amd64 --build-arg SOURCE_TREE=0231d1807fbae95079ff90554a068aab8618b692 -f integrations/shared-offers/Dockerfile -t "crm-shared-offers:$GITHUB_SHA" "$RUNNER_TEMP/crm-source"
           docker run --rm --network none -w /crm/apps/api "crm-shared-offers:$GITHUB_SHA" node /crm/node_modules/tsx/dist/cli.mjs --conditions=development -e "import('@crm/core').then(()=>console.log('Alpine workspace/dependencies load'))"
           docker volume create "ci_crm_${GITHUB_RUN_ID}_deps"
           docker run --rm --network none -v "ci_crm_${GITHUB_RUN_ID}_deps:/crm/node_modules:ro" "crm-shared-offers:$GITHUB_SHA" node -e "require('fs').accessSync('/crm/node_modules/tsx/dist/cli.mjs')"

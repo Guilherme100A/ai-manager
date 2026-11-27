@@ -1,0 +1,1826 @@
+diff --git a/apps/api/src/middleware/business-area.ts b/apps/api/src/middleware/business-area.ts
+index ac182c398aa878b785fd83da377ef03eff69547a..2ef2f33419c607b21b9e97c065fe28006cc513d5 100644
+--- a/apps/api/src/middleware/business-area.ts
++++ b/apps/api/src/middleware/business-area.ts
+@@ -1,5 +1,5 @@
+ import type { MiddlewareHandler } from 'hono'
+-import { BusinessAreasService, BusinessAreaError, isSharedOffersCompany } from '@crm/core'
++import { BusinessAreasService, BusinessAreaError, isBusinessAreasCompany } from '@crm/core'
+ import { sql } from 'drizzle-orm'
+ import type { AppEnv, ResolvedDeps } from '../lib/types'
+ import { ApiError } from '../lib/errors'
+@@ -10,11 +10,11 @@ class RollbackResponse extends Error {}
+ const collectionActions = new Set(['names', 'import', 'import-json'])
+ const flowUseActions = new Set(['validate', 'simulate', 'trigger', 'duplicate'])
+ 
+-/** Absent header selects Geral. Offers and workspace-owned flows are scoped. */
++/** Absent header selects Geral. Workspace-owned flows are scoped. */
+ export function businessAreaContext(deps: ResolvedDeps): MiddlewareHandler<AppEnv> {
+   return async (c, next) => {
+     const ctx = c.get('ctx'), company = ctx?.companyId
+-    if (!company || !isSharedOffersCompany(company)) {
++    if (!company || !isBusinessAreasCompany(company)) {
+       if (c.req.header(BUSINESS_AREA_HEADER)) throw new ApiError('NOT_FOUND', 'Área não encontrada')
+       return next()
+     }
+@@ -24,8 +24,8 @@ export function businessAreaContext(deps: ResolvedDeps): MiddlewareHandler<AppEn
+       if (requested && !administrator) throw new ApiError('NOT_FOUND','Área não encontrada')
+       const resolved = requested ? await svc.get(company, requested) : null
+       if (!requested && !await svc.enabled(company)) return next()
+-      if (!administrator && (/^\/api\/(business-areas|offers|flows|flow-folders|flow-runs|products|payment-integrations|meta|sales|dashboard|exports|jobs|events|notifications)(\/|$)/.test(c.req.path)
+-        || /^\/api\/chats\/[^/]+\/(offers?|flow-runs)$/.test(c.req.path))) throw new ApiError('NOT_FOUND','Recurso não encontrado')
++      if (!administrator && (/^\/api\/(business-areas|flows|flow-folders|flow-runs|products|payment-integrations|meta|sales|dashboard|exports|jobs|events|notifications)(\/|$)/.test(c.req.path)
++        || /^\/api\/chats\/[^/]+\/flow-runs$/.test(c.req.path))) throw new ApiError('NOT_FOUND','Recurso não encontrado')
+       const area = resolved?.id ?? null
+       c.set('businessArea', area)
+       setAudit(c, { detail: { business_area_id: area } })
+@@ -62,10 +62,10 @@ export function businessAreaContext(deps: ResolvedDeps): MiddlewareHandler<AppEn
+         if (path.endsWith('/paste-nodes')) ids.push(path.split('/')[3])
+         for (const id of ids) if (id) await svc.assertFlowReferences(company, referencesArea, id)
+       }
+-      // Serialize offer mutations with moves out of Geral.
++      // Serialize flow mutations with moves out of Geral.
+       // These handlers enqueue work after their own DB commit. Never delay that commit until after enqueueing.
+       const lifecycle = /\/flows\/[^/]+\/(activate|pause|archive|unarchive|trigger)$/.test(c.req.path)
+-      if ((flowWrite || flowId || c.req.path.startsWith('/api/offers')) && !lifecycle && !['GET', 'HEAD'].includes(c.req.method)) {
++      if ((flowWrite || flowId) && !lifecycle && !['GET', 'HEAD'].includes(c.req.method)) {
+         try {
+           await deps.areaTransaction(async tx => {
+             await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`business-areas:${company}`},0))`)
+diff --git a/apps/api/src/routes/auth/shared-offers-profile.db.unit.test.ts b/apps/api/src/routes/auth/shared-offers-profile.db.unit.test.ts
+deleted file mode 100644
+index dd6e50ecf52b3f738ab36e13c7fcf7499efca769..0000000000000000000000000000000000000000
+--- a/apps/api/src/routes/auth/shared-offers-profile.db.unit.test.ts
++++ /dev/null
+@@ -1,128 +0,0 @@
+-import { randomUUID } from 'node:crypto'
+-import { createServer } from 'node:http'
+-import { readFileSync, existsSync } from 'node:fs'
+-import { resolve, extname } from 'node:path'
+-import { afterAll, beforeAll, expect, it } from 'vitest'
+-import { chromium } from '@playwright/test'
+-import { companies, createDb, type Database } from '@crm/db'
+-import { createTempDatabase, type TempDatabase } from '@crm/db/testing'
+-import { signSsoToken } from '@crm/core'
+-import { createLogger, MemoryMailer, redisConnection } from '@crm/node-kit'
+-import { createApp, type RedisClient } from '../../app'
+-
+-let temp: TempDatabase, db: Database, redis: RedisClient, app: ReturnType<typeof createApp>
+-let ssoCompany: string
+-const previous = process.env.SHARED_OFFERS_COMPANY_ID
+-const secret = 'local-only-profile-contract-secret-123456789'
+-const headers = { 'content-type': 'application/json', 'x-requested-with': 'crm' }
+-const post = (path: string, body: unknown, cookie?: string) => app.request(path, { method: 'POST', headers: { ...headers, ...(cookie ? { cookie } : {}) }, body: JSON.stringify(body) })
+-const cookieOf = (res: Response) => res.headers.get('set-cookie')!.split(';')[0]!
+-const token = () => {
+-  const now = Math.floor(Date.now() / 1000), id = randomUUID()
+-  return signSsoToken({ iss: 'ai-manager', aud: 'crm', sub: `ai-manager:${id}`, email: `${id}@example.test`, name: 'SSO fixture', iat: now, exp: now + 120, jti: randomUUID() }, secret)
+-}
+-const profile = async (cookie: string) => {
+-  const res = await app.request('/api/auth/profile', { headers: { cookie } })
+-  expect(res.status).toBe(200)
+-  return res.json() as Promise<any>
+-}
+-beforeAll(async () => {
+-  temp = await createTempDatabase({ migrate: true })
+-  db = createDb(temp.url, { max: 4 })
+-  redis = redisConnection({ url: process.env.REDIS_URL ?? 'redis://127.0.0.1:6379/1' })
+-  app = createApp({ db, redis, ssoSecret: secret, cookieSecure: false, mailer: new MemoryMailer(), logger: createLogger({ level: 'silent' }) })
+-  const [company] = await db.insert(companies).values({ name: 'SSO test company', slug: 'ai-manager' }).returning()
+-  ssoCompany = company!.id
+-}, 60_000)
+-afterAll(async () => {
+-  if (previous === undefined) delete process.env.SHARED_OFFERS_COMPANY_ID
+-  else process.env.SHARED_OFFERS_COMPANY_ID = previous
+-  redis?.disconnect()
+-  await db?.$client.end()
+-  await temp?.drop()
+-})
+-
+-it('register contract, login, profile and company switch agree on capabilities without changing permissions', async () => {
+-  const email = `${randomUUID()}@example.test`, password = 'fixture-password-123'
+-  const registered = await post('/api/auth/register', { name: 'Profile fixture', email, password, password_confirmation: password })
+-  expect(registered.status).toBe(201)
+-  const registration = await registered.json() as any
+-  expect(registration.companies).toBeUndefined() // Existing register contract returns user + message.
+-  process.env.SHARED_OFFERS_COMPANY_ID = registration.user.last_company_id
+-  const loggedIn = await post('/api/auth/login', { email, password })
+-  expect(loggedIn.status).toBe(200)
+-  const login = await loggedIn.json() as any, cookie = cookieOf(loggedIn)
+-  expect(login.companies[0].shared_offers).toBe(true)
+-  expect((await profile(cookie)).companies).toEqual(login.companies)
+-  const created = await post('/api/companies', { name: 'Other fixture company' }, cookie)
+-  expect(created.status).toBe(201)
+-  const other = (await created.json() as any).company
+-  expect((await post(`/api/companies/${other.id}/switch`, {}, cookie)).status).toBe(200)
+-  const switched = await profile(cookie)
+-  expect(switched.user.last_company_id).toBe(other.id)
+-  expect(switched.companies.find((c: any) => c.id === other.id).shared_offers).toBe(false)
+-  expect(switched.companies.find((c: any) => c.id === registration.user.last_company_id).shared_offers).toBe(true)
+-  const loggedInAgain = await post('/api/auth/login', { email, password })
+-  expect((await loggedInAgain.json() as any).companies).toEqual(switched.companies)
+-})
+-
+-it('first SSO response already matches profile; disabled and invalid configuration return explicit false', async () => {
+-  for (const setting of [ssoCompany, '', 'invalid']) {
+-    process.env.SHARED_OFFERS_COMPANY_ID = setting
+-    const response = await post('/api/auth/sso', { token: token() })
+-    expect(response.status).toBe(200)
+-    const sso = await response.json() as any
+-    expect(sso.companies[0].shared_offers).toBe(setting === ssoCompany)
+-    expect((await profile(cookieOf(response))).companies).toEqual(sso.companies)
+-    expect(sso.companies[0].effective_permissions).toContain('settings.products.view')
+-  }
+-})
+-
+-it('browser first SSO shows offers immediately for the target and denies a different target without forced refetch', async () => {
+-  const root = resolve('../web/dist')
+-  const server = createServer(async (req, res) => {
+-    try {
+-      if (req.url?.startsWith('/api/')) {
+-        const chunks: Buffer[] = []
+-        for await (const chunk of req) chunks.push(Buffer.from(chunk))
+-        const response = await app.request(req.url, { method: req.method, headers: req.headers as Record<string, string>, ...(!['GET', 'HEAD'].includes(req.method!) ? { body: Buffer.concat(chunks) } : {}) })
+-        res.writeHead(response.status, Object.fromEntries(response.headers.entries()))
+-        res.end(Buffer.from(await response.arrayBuffer()))
+-        return
+-      }
+-      const path = resolve(root, '.' + new URL(req.url!, 'http://local').pathname)
+-      const file = path.startsWith(root) && existsSync(path) && extname(path) ? path : resolve(root, 'index.html')
+-      res.setHeader('content-type', extname(file) === '.js' ? 'text/javascript' : extname(file) === '.css' ? 'text/css' : 'text/html')
+-      res.end(readFileSync(file))
+-    } catch { res.statusCode = 500; res.end('test server failure') }
+-  })
+-  await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
+-  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`
+-  const browser = await chromium.launch({ headless: true })
+-  try {
+-    for (const authorized of [true, false]) {
+-      process.env.SHARED_OFFERS_COMPANY_ID = authorized ? ssoCompany : randomUUID()
+-      const context = await browser.newContext()
+-      const page = await context.newPage()
+-      const ssoResponse = page.waitForResponse(r => r.url().endsWith('/api/auth/sso'))
+-      await page.goto(`${base}/auth/sso#token=${token()}`)
+-      const response = await ssoResponse
+-      expect(response.status()).toBe(200)
+-      expect((await response.json()).companies[0].shared_offers).toBe(authorized)
+-      await page.getByTestId('nav-item-chats').waitFor()
+-      if (authorized) {
+-        await page.getByTestId('nav-item-offers').click()
+-        await page.getByRole('heading', { name: 'Ofertas compartilhadas' }).waitFor()
+-      } else {
+-        expect(await page.getByTestId('nav-item-offers').count()).toBe(0)
+-        await page.goto(`${base}/offers`)
+-        await page.getByRole('alert').filter({ hasText: 'Ofertas indispon' }).waitFor()
+-      }
+-      await context.close()
+-    }
+-  } finally {
+-    await browser.close()
+-    server.closeAllConnections()
+-    await new Promise<void>(r => server.close(() => r()))
+-  }
+-}, 60_000)
+diff --git a/apps/api/src/routes/business-areas/index.ts b/apps/api/src/routes/business-areas/index.ts
+index d382358a60151ccad157eb329de9b71f57ec53e8..a66dc7764cd023282743ca3d556455a8ce95dcb9 100644
+--- a/apps/api/src/routes/business-areas/index.ts
++++ b/apps/api/src/routes/business-areas/index.ts
+@@ -1,6 +1,6 @@
+ import { Hono } from 'hono'
+ import { z } from 'zod'
+-import { BusinessAreasService, BusinessAreaError, isSharedOffersCompany } from '@crm/core'
++import { BusinessAreasService, BusinessAreaError, isBusinessAreasCompany } from '@crm/core'
+ import type { AppEnv, ResolvedDeps } from '../../lib/types'
+ import { getCompanyCtx } from '../../lib/context'
+ import { ApiError } from '../../lib/errors'
+@@ -16,7 +16,7 @@ export function businessAreasRoutes(deps: ResolvedDeps) {
+   const app = new Hono<AppEnv>(), svc = new BusinessAreasService(deps.db)
+   const company = (c: Parameters<typeof getCompanyCtx>[0]) => getCompanyCtx(c).companyId
+   const gate = async (c: Parameters<typeof getCompanyCtx>[0], next: () => Promise<void>) => {
+-    if (!isSharedOffersCompany(company(c)) || !await svc.administrator(company(c),getCompanyCtx(c).user?.id)) throw new ApiError('NOT_FOUND', 'Área não encontrada')
++    if (!isBusinessAreasCompany(company(c)) || !await svc.administrator(company(c),getCompanyCtx(c).user?.id)) throw new ApiError('NOT_FOUND', 'Área não encontrada')
+     await next()
+   }
+   app.use('/api/business-areas', gate)
+@@ -38,11 +38,5 @@ export function businessAreasRoutes(deps: ResolvedDeps) {
+   app.post('/api/business-areas/:id/resources', requirePerm('settings.products.edit'), async () => {
+     throw new ApiError('CONFLICT', 'Os recursos são compartilhados entre os workspaces')
+   })
+-  app.post('/api/business-areas/:id/adopt-offer', requirePerm('settings.products.edit'), validate('param', z.object({ id: z.uuid() })),
+-    validate('json', z.object({ offer_id: z.uuid(), confirm: z.literal(true) })), async c => {
+-      const result = await svc.adoptOffer(company(c), c.req.param('id'), c.req.valid('json').offer_id)
+-      setAudit(c, { action: 'business_areas.adopt_offer', targetType: 'offer', targetId: result.offer_id, detail: { business_area_id: result.business_area_id } })
+-      return c.json(result)
+-    })
+   return app
+ }
+diff --git a/apps/api/src/routes/flow-runs/funnel.ts b/apps/api/src/routes/flow-runs/funnel.ts
+index 5ca3ebe2bfdd1e4b2a27b869b63760de06552221..5b60b4a8203603a3c55c8908eb901890c65f81b6 100644
+--- a/apps/api/src/routes/flow-runs/funnel.ts
++++ b/apps/api/src/routes/flow-runs/funnel.ts
+@@ -6,15 +6,6 @@ import { FLOW_RUN_STATUSES, chats, flowRunSteps, flowRuns, type Database, type F
+ import type { FlowDefinition } from '@crm/shared/flows'
+ import { workspaceFlowFilter } from '@crm/core'
+ 
+-export function offerRunScope(area: string | null | undefined): SQL | undefined {
+-  if (area === undefined) return undefined
+-  return sql`(not ${flowRuns.offerScoped} or exists (
+-    select 1 from crm.offer_opportunities o
+-    where o.company_id=${flowRuns.companyId} and o.id::text=${flowRuns.trigger}->>'opportunity_id'
+-      and o.snapshot->>'business_area_id' is not distinct from ${area}::text
+-  ))`
+-}
+-
+ export interface FlowFunnelFilter {
+   businessArea?: string | null
+   from: Date
+@@ -56,7 +47,7 @@ export async function flowFunnel(db: Database, companyId: string, flowId: string
+   const where: SQL[] = [eq(flowRuns.companyId, companyId), eq(flowRuns.flowId, flowId), gte(flowRuns.startedAt, f.from), lte(flowRuns.startedAt, f.to)]
+   if (f.connectionId)
+     where.push(inArray(flowRuns.chatId, db.select({ id: chats.id }).from(chats).where(and(eq(chats.companyId, companyId), eq(chats.connectionId, f.connectionId)))))
+-  const runs = and(...where, offerRunScope(f.businessArea), workspaceFlowFilter(companyId, f.businessArea, flowRuns.flowId))
++  const runs = and(...where, workspaceFlowFilter(companyId, f.businessArea, flowRuns.flowId))
+ 
+   const byStatus = await db.select({ status: flowRuns.status, n: sql<number>`count(*)::int` }).from(flowRuns).where(runs).groupBy(flowRuns.status)
+   const stopped = await db
+diff --git a/apps/api/src/routes/flow-runs/index.ts b/apps/api/src/routes/flow-runs/index.ts
+index 23f2d6494c8a580e6319a3658fa15c6458d4ef6a..9db038ce9c78e9cb1cb7b858c331a22b5f551c9f 100644
+--- a/apps/api/src/routes/flow-runs/index.ts
++++ b/apps/api/src/routes/flow-runs/index.ts
+@@ -4,7 +4,7 @@
+ import { Hono, type Context } from 'hono'
+ import { and, asc, count, desc, eq, inArray, sql } from 'drizzle-orm'
+ import { z } from 'zod'
+-import { CANCELLABLE_RUN_STATUSES, FlowEngineError, FlowStore, FlowStoreError, OffersService, workspaceFlowFilter } from '@crm/core'
++import { CANCELLABLE_RUN_STATUSES, FlowEngineError, FlowStore, FlowStoreError, workspaceFlowFilter } from '@crm/core'
+ import { FLOW_RUN_STATUSES, chats, flowRunSteps, flowRuns, flows } from '@crm/db'
+ import { buildPageMeta, pageOffset, pageQuerySchema } from '@crm/shared'
+ import { getCompanyCtx } from '../../lib/context'
+@@ -13,7 +13,7 @@ import { validate } from '../../lib/validate'
+ import type { AppEnv, ResolvedDeps } from '../../lib/types'
+ import { requirePerm } from '../../middleware/authorize'
+ import { setAudit } from '../../middleware/audit'
+-import { flowFunnel, offerRunScope } from './funnel'
++import { flowFunnel } from './funnel'
+ import { flowServices } from './services'
+ 
+ export { flowServices, registerConnectionNameSource, type ConnectionNameSource, type FlowServices } from './services'
+@@ -65,7 +65,7 @@ export function flowRunsRoutes(deps: ResolvedDeps) {
+ 
+   const runOf = async (companyId: string, id: string, area?: string | null) => {
+     if (!UUID_RE.test(id)) throw new ApiError('NOT_FOUND', 'Execução não encontrada')
+-    const [row] = await runsWithName(and(eq(flowRuns.id, id), eq(flowRuns.companyId, companyId), offerRunScope(area), workspaceFlowFilter(companyId, area, flowRuns.flowId)))
++    const [row] = await runsWithName(and(eq(flowRuns.id, id), eq(flowRuns.companyId, companyId), workspaceFlowFilter(companyId, area, flowRuns.flowId)))
+     if (!row) throw new ApiError('NOT_FOUND', 'Execução não encontrada')
+     return row
+   }
+@@ -106,12 +106,10 @@ export function flowRunsRoutes(deps: ResolvedDeps) {
+       .limit(1)
+     if (!chat) throw new ApiError('NOT_FOUND', 'Chat não encontrado')
+ 
+-    const [chip] = await deps.db.select({connectionId:chats.connectionId}).from(chats).where(eq(chats.id,chat.id))
+-    if(chip && await new OffersService(deps.db).managed(ctx.companyId,chip.connectionId)) throw new ApiError('CONFLICT','Selecione uma oferta para iniciar neste chip')
+     const active = await deps.db
+       .select({ id: flowRuns.id })
+       .from(flowRuns)
+-      .where(and(eq(flowRuns.companyId, ctx.companyId), eq(flowRuns.contactId, chat.contactId), sql`(${flowRuns.chatId}=${chat.id} or ${flowRuns.chatId} is null)`, offerRunScope(c.get('businessArea')), workspaceFlowFilter(ctx.companyId, c.get('businessArea'), flowRuns.flowId), inArray(flowRuns.status, [...CANCELLABLE_RUN_STATUSES])))
++      .where(and(eq(flowRuns.companyId, ctx.companyId), eq(flowRuns.contactId, chat.contactId), sql`(${flowRuns.chatId}=${chat.id} or ${flowRuns.chatId} is null)`, workspaceFlowFilter(ctx.companyId, c.get('businessArea'), flowRuns.flowId), inArray(flowRuns.status, [...CANCELLABLE_RUN_STATUSES])))
+     const cancelled = await cancelRuns(ctx.companyId, active.map((r) => r.id))
+ 
+     let runId: string
+@@ -145,7 +143,7 @@ export function flowRunsRoutes(deps: ResolvedDeps) {
+       throw err
+     })
+     const q = c.req.valid('query')
+-    const where = and(eq(flowRuns.companyId, ctx.companyId), eq(flowRuns.flowId, flow.id), offerRunScope(c.get('businessArea')), q.status ? eq(flowRuns.status, q.status) : undefined)
++    const where = and(eq(flowRuns.companyId, ctx.companyId), eq(flowRuns.flowId, flow.id), q.status ? eq(flowRuns.status, q.status) : undefined)
+     const [total] = await deps.db.select({ n: count() }).from(flowRuns).where(where)
+     const rows = await runsWithName(where).orderBy(desc(flowRuns.startedAt)).limit(q.limit).offset(pageOffset(q))
+     return c.json({ items: rows.map((r) => toRunDto(r.run, r.flowName)), page: buildPageMeta(q, { total: Number(total?.n ?? 0) }) })
+@@ -208,7 +206,7 @@ export function flowRunsRoutes(deps: ResolvedDeps) {
+     if (!chat) throw new ApiError('NOT_FOUND', 'Chat não encontrado')
+     const activeOnly = ['1', 'true'].includes(c.req.valid('query').active ?? '')
+     const rows = await runsWithName(
+-      and(eq(flowRuns.companyId, ctx.companyId), eq(flowRuns.chatId, chat.id), offerRunScope(c.get('businessArea')), workspaceFlowFilter(ctx.companyId, c.get('businessArea'), flowRuns.flowId), activeOnly ? inArray(flowRuns.status, [...CANCELLABLE_RUN_STATUSES]) : undefined),
++      and(eq(flowRuns.companyId, ctx.companyId), eq(flowRuns.chatId, chat.id), workspaceFlowFilter(ctx.companyId, c.get('businessArea'), flowRuns.flowId), activeOnly ? inArray(flowRuns.status, [...CANCELLABLE_RUN_STATUSES]) : undefined),
+     ).orderBy(desc(flowRuns.startedAt))
+     return c.json({ items: rows.map((r) => toRunDto(r.run, r.flowName)) })
+   })
+@@ -229,7 +227,7 @@ export function flowRunsRoutes(deps: ResolvedDeps) {
+       .select({ id: flowRuns.id })
+       .from(flowRuns)
+       .innerJoin(chats, eq(chats.id, flowRuns.chatId))
+-      .where(and(eq(flowRuns.companyId, ctx.companyId), eq(chats.connectionId, connectionId), offerRunScope(c.get('businessArea')), workspaceFlowFilter(ctx.companyId, c.get('businessArea'), flowRuns.flowId), inArray(flowRuns.status, [...CANCELLABLE_RUN_STATUSES])))
++      .where(and(eq(flowRuns.companyId, ctx.companyId), eq(chats.connectionId, connectionId), workspaceFlowFilter(ctx.companyId, c.get('businessArea'), flowRuns.flowId), inArray(flowRuns.status, [...CANCELLABLE_RUN_STATUSES])))
+     const done = await cancelRuns(ctx.companyId, runs.map((r) => r.id))
+     setAudit(c, { action: 'flow_run.cancel_all', targetType: 'connection', targetId: connectionId, detail: { cancelled: done.length } })
+     return c.json({ cancelled: done.length })
+diff --git a/apps/api/src/routes/index.ts b/apps/api/src/routes/index.ts
+index 990f7830403b9d1667b0358eed68ae5c700d35d1..4b4f20f649fff1a0fac8fc0c82640cf03a6c7ef4 100644
+--- a/apps/api/src/routes/index.ts
++++ b/apps/api/src/routes/index.ts
+@@ -1,6 +1,5 @@
+ import { businessAreasRoutes } from './business-areas/index'
+ import { businessAreaContext } from '../middleware/business-area'
+-import { offersRoutes } from './offers/index'
+ // Registro das rotas (SPEC 2.4, compartilhado aditivo): cada módulo acrescenta `app.route('/', <módulo>Routes(deps))`.
+ import type { Hono } from 'hono'
+ import type { AppEnv, ResolvedDeps } from '../lib/types'
+@@ -107,7 +106,6 @@ export function registerRoutes(app: Hono<AppEnv>, deps: ResolvedDeps): void {
+   app.route('/', flowSimulateRoutes(deps)) // T82
+   app.route('/', flowShareRoutes(deps))
+   app.route('/', kanbanRoutes(deps))
+-  app.route('/', offersRoutes(deps))
+   app.route('/', productsRoutes(deps))
+   app.route('/', invoiceIntegrationsRoutes(deps)) // T112: antes de salesRoutes (/api/sales/:id/invoice, reemit-invoice)
+   app.route('/', utmifyRoutes(deps)) // T113: antes de salesRoutes (/api/sales/:id/utmify)
+diff --git a/apps/api/src/routes/offers/index.ts b/apps/api/src/routes/offers/index.ts
+deleted file mode 100644
+index 717c1c6863fdb6a4eb2a16f94ac5f783b2a7b956..0000000000000000000000000000000000000000
+--- a/apps/api/src/routes/offers/index.ts
++++ /dev/null
+@@ -1,193 +0,0 @@
+-import { Hono } from 'hono'
+-import { z } from 'zod'
+-import { BusinessAreasService, OffersService, OfferError, isSharedOffersCompany, offerRows, type OfferConfig } from '@crm/core'
+-import type { Database } from '@crm/db'
+-import { sql } from 'drizzle-orm'
+-import { getCompanyCtx } from '../../lib/context'
+-import { ApiError } from '../../lib/errors'
+-import type { AppEnv, ResolvedDeps } from '../../lib/types'
+-import { requirePerm } from '../../middleware/authorize'
+-import { validate } from '../../lib/validate'
+-import { flowServices } from '../flow-runs/services'
+-import { setAudit } from '../../middleware/audit'
+-
+-const config = z.object({
+-  owner_user_id: z.uuid(),
+-  product_id: z.uuid(),
+-  currency: z.string(),
+-  flow_id: z.uuid(),
+-  connection_ids: z.array(z.uuid()).min(1),
+-  integration_id: z.uuid(),
+-  ad_account_id: z.uuid(),
+-  pixel_id: z.uuid(),
+-  origins: z.array(z.object({ type: z.enum(['source_id', 'link']), value: z.string().min(1) })),
+-  cost_cents: z.number().int().nonnegative().nullable().optional(),
+-  cost_label: z.string().optional(),
+-})
+-const body = z.object({ name: z.string().min(1).max(120), active: z.boolean().optional(), config })
+-const flowCommercialBody = z.object({ active: z.boolean(), config: config.omit({ flow_id: true }).strict() }).strict()
+-export function offersRoutes(deps: ResolvedDeps) {
+-  const app = new Hono<AppEnv>(),
+-    service = new OffersService(deps.db)
+-  // Runs after authenticated company membership resolution, before any offer query/mutation.
+-  const gate = async (c: Parameters<typeof getCompanyCtx>[0], next: () => Promise<void>) => {
+-    if (!isSharedOffersCompany(getCompanyCtx(c).companyId)) throw new ApiError('NOT_FOUND', 'Recurso não encontrado')
+-    await next()
+-  }
+-  app.use('/api/offers', gate)
+-  app.use('/api/offers/*', gate)
+-  app.use('/api/chats/:id/offers', gate)
+-  app.use('/api/chats/:id/offer', gate)
+-  app.use('/api/flows/:id/commercial', gate)
+-  app.onError((err, c) => {
+-    if (err instanceof OfferError) return c.json({ error: { code: 'VALIDATION_ERROR', message: err.message } }, 422)
+-    throw err
+-  })
+-  app.get('/api/offers/resources', requirePerm('settings.products.view'), async (c) =>
+-    c.json(await service.resources(getCompanyCtx(c).companyId, c.get('businessArea'))),
+-  )
+-  const commercialFlow = async (db: Database, company: string, area: string | null | undefined, id: string) => {
+-    if (!await new BusinessAreasService(db).flowAllowed(company, area ?? null, id, true))
+-      throw new ApiError('NOT_FOUND', 'Fluxo não encontrado neste workspace')
+-    if (area) {
+-      const owned = await offerRows(db, sql`select 1 from crm.business_area_resources where company_id=${company}
+-        and kind='flow' and resource_id=${id} and area_id=${area}::uuid limit 1`)
+-      if (!owned.length) throw new ApiError('NOT_FOUND', 'Fluxo não pertence a este workspace')
+-    }
+-    const [flow] = await offerRows<{ id: string; name: string; status: string; published_version: number | null }>(
+-      db, sql`select id,name,status,published_version from crm.flows where company_id=${company} and id=${id} for share`,
+-    )
+-    if (!flow) throw new ApiError('NOT_FOUND', 'Fluxo não encontrado')
+-    return flow
+-  }
+-  const flowCommercialRows = (db: Database, company: string, flowId: string) =>
+-    offerRows<{ id: string; business_area_id: string | null; active: boolean; version: number; config: OfferConfig }>(
+-      db, sql`select id,business_area_id,active,version,config from crm.offers where company_id=${company}
+-        and config->>'flow_id'=${flowId} order by created_at limit 2`,
+-    )
+-  const oneCommercial = <T extends { business_area_id: string | null }>(rows: T[], area: string | null | undefined): T | null => {
+-    if (rows.length > 1 || (rows[0] && rows[0].business_area_id !== (area ?? null)))
+-      throw new ApiError('CONFLICT', 'Há configuração comercial legada ambígua para este fluxo; revise antes de editar')
+-    return rows[0] ?? null
+-  }
+-  app.get('/api/flows/:id/commercial', requirePerm('flows.view'), requirePerm('settings.products.view'),
+-    validate('param', z.object({ id: z.uuid() })), async c => {
+-      const company = getCompanyCtx(c).companyId, area = c.get('businessArea'), id = c.req.param('id')
+-      const flow = await commercialFlow(deps.db, company, area, id)
+-      const commercial = oneCommercial(await flowCommercialRows(deps.db, company, id), area)
+-      return c.json({ commercial, resources: await service.resources(company, area),
+-        can_save: flow.status !== 'archived' })
+-    })
+-  app.put('/api/flows/:id/commercial', requirePerm('flows.edit'), requirePerm('settings.products.edit'),
+-    validate('param', z.object({ id: z.uuid() })), validate('json', flowCommercialBody), async c => {
+-      const company = getCompanyCtx(c).companyId, area = c.get('businessArea'), id = c.req.param('id')
+-      const input = c.req.valid('json')
+-      const result = await deps.db.transaction(async tx => {
+-        const db = tx as unknown as Database
+-        await db.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`flow-commercial:${company}:${id}`},0))`)
+-        const flow = await commercialFlow(db, company, area, id)
+-        if (flow.status === 'archived') throw new ApiError('CONFLICT', 'Desarquive o fluxo antes de editar a configuração comercial')
+-        if (input.active && (flow.status !== 'active' || flow.published_version === null))
+-          throw new ApiError('CONFLICT', 'Publique e ative o fluxo antes de habilitar entradas comerciais')
+-        const existing = oneCommercial(await flowCommercialRows(db, company, id), area)
+-        const commercial = await new OffersService(db).save(company, {
+-          name: flow.name, active: input.active, config: { ...input.config, flow_id: id },
+-        }, existing?.id, area)
+-        return { commercial, created: !existing }
+-      })
+-      setAudit(c, { action: result.created ? 'flow.commercial.create' : 'flow.commercial.update', targetType: 'flow', targetId: id })
+-      return c.json({ commercial: result.commercial }, result.created ? 201 : 200)
+-    })
+-  app.get(
+-    '/api/offers/results',
+-    requirePerm('settings.products.view'),
+-    validate('query', z.object({ owner: z.uuid().optional(), offer: z.uuid().optional() })),
+-    async (c) =>
+-      c.json({
+-        items: await service.report(getCompanyCtx(c).companyId, c.req.valid('query').owner, c.req.valid('query').offer, c.get('businessArea')),
+-      }),
+-  )
+-  app.get('/api/offers', requirePerm('settings.products.view'), async (c) =>
+-    c.json({ items: await service.list(getCompanyCtx(c).companyId, c.get('businessArea')) }),
+-  )
+-  app.get('/api/offers/:id', requirePerm('settings.products.view'), validate('param', z.object({ id: z.uuid() })), async (c) => {
+-    const offer = await service.get(getCompanyCtx(c).companyId, c.req.param('id'), c.get('businessArea'))
+-    if (!offer) throw new ApiError('NOT_FOUND', 'Oferta não encontrada')
+-    return c.json({ offer })
+-  })
+-  app.post('/api/offers', requirePerm('settings.products.edit'), validate('json', body), async (c) => {
+-    const offer = await service.save(
+-      getCompanyCtx(c).companyId,
+-      c.req.valid('json') as { name: string; active?: boolean; config: OfferConfig },
+-      undefined, c.get('businessArea'),
+-    )
+-    setAudit(c, { action: 'offers.create', targetType: 'offer', targetId: offer.id })
+-    return c.json({ offer }, 201)
+-  })
+-  app.put(
+-    '/api/offers/:id',
+-    requirePerm('settings.products.edit'),
+-    validate('param', z.object({ id: z.uuid() })),
+-    validate('json', body),
+-    async (c) => {
+-      const offer = await service.save(
+-        getCompanyCtx(c).companyId,
+-        c.req.valid('json') as { name: string; active?: boolean; config: OfferConfig },
+-        c.req.param('id'), c.get('businessArea'),
+-      )
+-      setAudit(c, { action: 'offers.update', targetType: 'offer', targetId: offer.id })
+-      return c.json({ offer })
+-    },
+-  )
+-  app.put(
+-    '/api/offers/chips/:id',
+-    requirePerm('settings.products.edit'),
+-    validate('param', z.object({ id: z.uuid() })),
+-    validate('json', z.object({ enabled: z.boolean() })),
+-    async (c) => {
+-      await service.manageConnection(getCompanyCtx(c).companyId, c.req.param('id'), c.req.valid('json').enabled)
+-      return c.json({ ok: true })
+-    },
+-  )
+-  app.get(
+-    '/api/chats/:id/offers',
+-    requirePerm('chat.view'),
+-    validate('param', z.object({ id: z.uuid() })),
+-    async (c) => {
+-      const company = getCompanyCtx(c).companyId
+-      const opportunities = await offerRows(
+-        deps.db,
+-        sql`select id,offer_id,evidence,snapshot->>'name' as name,created_at from crm.offer_opportunities where company_id=${company} and chat_id=${c.req.param('id')} ${c.get('businessArea') !== undefined ? sql`and snapshot->>'business_area_id' is not distinct from ${c.get('businessArea')}` : sql``} order by created_at desc`,
+-      )
+-      return c.json({ items: opportunities })
+-    },
+-  )
+-  app.post(
+-    '/api/chats/:id/offer',
+-    requirePerm('flows.run'),
+-    validate('param', z.object({ id: z.uuid() })),
+-    validate('json', z.object({ offer_id: z.uuid(), replace_active: z.literal(true) })),
+-    async (c) => {
+-      const company = getCompanyCtx(c).companyId
+-      if (!await service.get(company,c.req.valid('json').offer_id,c.get('businessArea'))) throw new ApiError('NOT_FOUND','Oferta não pertence à área selecionada')
+-      const resolved = await service.createOpportunity(company, c.req.param('id'), {}, c.req.valid('json').offer_id)
+-      if (!resolved.opportunity) throw new ApiError('CONFLICT', 'Oferta inativa ou incompatível com este chip')
+-      const op = resolved.opportunity,
+-        svc = flowServices(deps)
+-      await svc.control.cancelForContact({ companyId: company, chatId: op.chat_id }, op.contact_id)
+-      const run = await svc.engine.startRun(
+-        { companyId: company },
+-        {
+-          versionId: op.snapshot.version_id,
+-          contactId: op.contact_id,
+-          chatId: op.chat_id,
+-          trigger: { type: 'offer_manual', opportunity_id: op.id },
+-        },
+-      )
+-      await svc.enqueue(run)
+-      setAudit(c, { action: 'offers.select', targetType: 'opportunity', targetId: op.id })
+-      return c.json({ opportunity_id: op.id, run_id: run.runId }, 201)
+-    },
+-  )
+-  return app
+-}
+diff --git a/apps/web/src/app/access.ts b/apps/web/src/app/access.ts
+index 1e01b8059ee54fa3f2d92aa612bc1f9ab5c4ee76..ec402db3237684fb74a61419fdc7b56fe81fa0c7 100644
+--- a/apps/web/src/app/access.ts
++++ b/apps/web/src/app/access.ts
+@@ -3,7 +3,7 @@
+ import { hasAny, type Session } from '@/lib/session'
+ import { BOTTOM_NAV, NAV_SECTIONS, SUPPORT_NAV_SECTIONS, type NavItem, type NavSection } from './nav'
+ 
+-type Access = Pick<Session, 'isOwner' | 'isSupport' | 'isPlatformAdmin' | 'perms'> & { company?: { shared_offers?: boolean; business_areas_admin?: boolean; business_areas_enabled?: boolean } | null }
++type Access = Pick<Session, 'isOwner' | 'isSupport' | 'isPlatformAdmin' | 'perms'> & { company?: { business_areas_admin?: boolean; business_areas_enabled?: boolean } | null }
+ 
+ /** Seções com os itens que a sessão pode ver; seção vazia some (spec 18 §2.5). */
+ export function visibleSections(session: Access): NavSection[] {
+@@ -15,8 +15,6 @@ export function visibleSections(session: Access): NavSection[] {
+ }
+ 
+ function itemVisible(session: Access, item: NavItem): boolean {
+-  if (item.id === 'offers' && session.company?.shared_offers !== true) return false
+-  if (item.id === 'offers' && session.company?.business_areas_enabled) return false
+   if (item.platformAdminOnly) return session.isPlatformAdmin
+   return hasAny(session, item.permissions)
+ }
+@@ -71,7 +69,6 @@ function supportAllowed(path: string): boolean {
+ 
+ /** A sessão pode abrir o caminho? (só o pathname, sem query) */
+ export function canAccess(session: Access, pathname: string): boolean {
+-  if (matches(pathname,'/offers') && session.company?.business_areas_enabled && !session.company.business_areas_admin) return false
+   if (pathname === '/' || pathname === '/login') return true
+   if (matches(pathname, '/admin')) return session.isPlatformAdmin
+   if (session.isSupport) return supportAllowed(pathname)
+diff --git a/apps/web/src/app/nav.ts b/apps/web/src/app/nav.ts
+index 8f49c329a91a512c8588646ebd04071a43b46b50..72233a2d02095e61efbab8275540939e72df3076 100644
+--- a/apps/web/src/app/nav.ts
++++ b/apps/web/src/app/nav.ts
+@@ -62,7 +62,6 @@ export const NAV_SECTIONS: NavSection[] = [
+       { id: 'connections', labelKey: 'nav.items.connections', icon: Cable, to: '/connections', permissions: ['connections.view'] },
+       { id: 'inbound-webhooks', labelKey: 'nav.items.inboundWebhooks', icon: Webhook, to: '/settings/inbound-webhooks', permissions: ['webhooks.view'] },
+       { id: 'mass-dispatch', labelKey: 'nav.items.massDispatch', icon: Send, to: '/mass-dispatches', permissions: ['contacts.view'] },
+-      { id: 'offers', labelKey:'nav.items.offers', icon:Megaphone, to:'/offers', permissions:['settings.products.view'] },
+       { id: 'facebook', labelKey: 'nav.items.facebook', icon: Megaphone, to: '/facebook', permissions: ['facebook.campaigns', 'facebook.pixel', 'facebook.profiles'] },
+     ],
+   },
+diff --git a/apps/web/src/features/business-areas/areas.tsx b/apps/web/src/features/business-areas/areas.tsx
+index 04fe364653130665eaefbe67bbaafe82106e5411..2eced83d8b30e91408e74fb26cdb3f9a34785375 100644
+--- a/apps/web/src/features/business-areas/areas.tsx
++++ b/apps/web/src/features/business-areas/areas.tsx
+@@ -6,14 +6,10 @@ interface Area { id: string; slot: number; name: string; bm_id: string | null }
+ export function BusinessAreaManager() {
+   const [areas, setAreas] = useState<Area[]>([]),
+     [selected, setSelected] = useState(''), [name, setName] = useState(''), [bm, setBm] = useState(''),
+-    [offers, setOffers] = useState<{ id: string; name: string }[]>([]), [adopt, setAdopt] = useState(''),
+     [error, setError] = useState(''), [notice, setNotice] = useState(''), [busy, setBusy] = useState(false)
+   const load = async () => {
+-    const [a, o] = await Promise.all([
+-      api.get<{ items: Area[] }>('/api/business-areas', { headers: { 'X-Business-Area-Id': '' } }),
+-      api.get<{ items: { id: string; name: string }[] }>('/api/offers', { headers: { 'X-Business-Area-Id': '' } }),
+-    ])
+-    setAreas(a.items); setOffers(o.items)
++    const a = await api.get<{ items: Area[] }>('/api/business-areas', { headers: { 'X-Business-Area-Id': '' } })
++    setAreas(a.items)
+   }
+   const run = async (fn: () => Promise<void>) => {
+     setError(''); setNotice(''); setBusy(true)
+@@ -22,12 +18,12 @@ export function BusinessAreaManager() {
+   useEffect(() => { void run(load) }, [])
+   useEffect(() => { const a = areas.find(a => a.id === selected); setName(a?.name ?? ''); setBm(a?.bm_id ?? '') }, [selected, areas])
+   return <details data-testid="business-area-manager">
+-    <summary>Configurar workspaces e mover ofertas antigas</summary>
++    <summary>Configurar workspaces</summary>
+     {error && <p role="alert">{error}</p>}{notice && <p role="status">{notice}</p>}
+     {!areas.length ? <button type="button" disabled={busy} onClick={() => void run(async () => {
+       await api.post('/api/business-areas/initialize', {}); window.location.reload()
+     })}>Criar as três áreas sem mover cadastros</button> : <>
+-      <label>Workspace a configurar<select aria-label="Área a configurar" value={selected} onChange={e => { setSelected(e.target.value); setAdopt('') }}>
++      <label>Workspace a configurar<select aria-label="Área a configurar" value={selected} onChange={e => { setSelected(e.target.value) }}>
+         <option value="">Selecione uma área</option>{areas.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+       </select></label>
+       {selected && <>
+@@ -37,15 +33,6 @@ export function BusinessAreaManager() {
+         <button type="button" disabled={busy || !name.trim()} onClick={() => void run(async () => {
+           await api.put('/api/business-areas/' + selected, { name, bm_id: bm || null }); await load(); setNotice('Workspace salvo')
+         })}>Salvar nome e BM</button>
+-        <fieldset><legend>Mover oferta de Geral</legend>
+-          <p>Mova apenas a oferta. Os recursos continuam compartilhados e o histórico mantém o contexto original.</p>
+-          <select aria-label="Oferta existente sem área" value={adopt} onChange={e => setAdopt(e.target.value)}>
+-            <option value="">Selecione uma oferta sem área</option>{offers.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+-          </select>
+-          <button type="button" disabled={busy || !adopt} onClick={() => void run(async () => {
+-            await api.post(`/api/business-areas/${selected}/adopt-offer`, { offer_id: adopt, confirm: true }); setAdopt(''); await load(); setNotice('Oferta movida para o workspace')
+-          })}>Mover oferta para o workspace</button>
+-        </fieldset>
+ 
+       </>}
+     </>}
+diff --git a/apps/web/src/features/flow-editor/canvas/editor.tsx b/apps/web/src/features/flow-editor/canvas/editor.tsx
+index 7c8e05376a3f1d9daa3476bf2f3c72c4d54685d7..deb24767b3561821d896811da031cd9d0739ebe4 100644
+--- a/apps/web/src/features/flow-editor/canvas/editor.tsx
++++ b/apps/web/src/features/flow-editor/canvas/editor.tsx
+@@ -60,7 +60,6 @@ import {
+ } from './model'
+ import { isForeign, onGraphUpdated } from './realtime'
+ import { FlowCopilot } from '../../flow-copilot'
+-import { CommercialDialog } from '../../flows/commercial-dialog'
+ 
+ /** Um componente para todos os tipos (fora do componente: o xyflow remonta os nós se o objeto mudar). */
+ const NODE_TYPES: NodeTypes = Object.fromEntries(FLOW_NODE_TYPE_VALUES.map((t) => [t, FlowNodeComponent]))
+@@ -116,7 +115,6 @@ export function FlowEditorPage({ flowId, mode }: { flowId: string; mode: 'edit'
+         bundle={q.data}
+         readOnly={!canEdit}
+         canEditFlows={hasAny(session, ['flows.edit'])}
+-        canCommercial={hasAny(session, ['settings.products.view'])}
+         me={session.user.id}
+         mode={mode}
+       />
+@@ -133,14 +131,12 @@ function EditorBody({
+   bundle,
+   readOnly,
+   canEditFlows,
+-  canCommercial,
+   me,
+   mode,
+ }: {
+   bundle: EditorBundle
+   readOnly: boolean
+   canEditFlows: boolean
+-  canCommercial: boolean
+   me: string
+   mode: 'edit' | 'view'
+ }) {
+@@ -181,7 +177,6 @@ function EditorBody({
+   const [status, setStatus] = useState<AutosaveStatus>({ state: 'idle', savedAt: null })
+   const [paletteOpen, setPaletteOpen] = useState(false)
+   const [propsOpen, setPropsOpen] = useState(false)
+-  const [commercialOpen, setCommercialOpen] = useState(false)
+   const [deleting, setDeleting] = useState<DeleteRequest | null>(null)
+   const [busy, setBusy] = useState(false)
+ 
+@@ -500,8 +495,6 @@ function EditorBody({
+         </span>
+         <div className="ml-auto flex flex-wrap items-center gap-2">
+           <FlowCopilot flowId={flowId} beforeSend={() => saver.flush()} />
+-          {!readOnly && canCommercial && <Button size="sm" variant="outline" data-testid="flow-commercial-open"
+-            onClick={() => setCommercialOpen(true)}>Pagamentos e anúncios</Button>}
+           {mode === 'view' && canEditFlows ? (
+             <Link
+               to="/flows/$flowId/edit"
+@@ -545,7 +538,6 @@ function EditorBody({
+         </div>
+       </header>
+ 
+-      <CommercialDialog flow={commercialOpen ? flow : null} onClose={() => setCommercialOpen(false)} />
+ 
+       {readOnly ? (
+         <p
+diff --git a/apps/web/src/features/flows/commercial-dialog.tsx b/apps/web/src/features/flows/commercial-dialog.tsx
+deleted file mode 100644
+index 7d264242acc5648efbd80eb0e655304ef759aac5..0000000000000000000000000000000000000000
+--- a/apps/web/src/features/flows/commercial-dialog.tsx
++++ /dev/null
+@@ -1,299 +0,0 @@
+-import { Dialog } from '@base-ui/react/dialog'
+-import { useEffect, useState } from 'react'
+-import { Button } from '@/components/ui/button'
+-import { useSession } from '@/features/settings-company/ui'
+-import { Field, inputClass, serverMessage } from '@/features/settings-quick-replies/kit'
+-import { api } from '@/lib/http'
+-import { hasAny } from '@/lib/session'
+-import { notify } from '@/lib/toast'
+-
+-type FlowRef = { id: string; name: string; status: 'draft' | 'active' | 'paused' | 'archived'; workspace_owned?: boolean }
+-
+-type Item = { id: string; name: string; currency?: string }
+-type Origin = { type: 'source_id' | 'link'; value: string }
+-type CommercialConfig = {
+-  owner_user_id: string
+-  product_id: string
+-  currency: string
+-  connection_ids: string[]
+-  integration_id: string
+-  ad_account_id: string
+-  pixel_id: string
+-  origins: Origin[]
+-  cost_cents: number | null
+-  cost_label: string
+-}
+-type SelectKey = 'owner_user_id' | 'product_id' | 'integration_id' | 'ad_account_id' | 'pixel_id'
+-type Commercial = { id: string; active: boolean; version: number; config: CommercialConfig }
+-type Resources = {
+-  members: Item[]
+-  products: Item[]
+-  connections: Item[]
+-  integrations: Item[]
+-  accounts: Item[]
+-  pixels: (Item & { meta_ad_account_id?: string | null })[]
+-  links: Item[]
+-  managed_connections: string[]
+-}
+-type Response = { commercial: Commercial | null; resources: Resources; can_save: boolean }
+-type Result = {
+-  offer_id: string
+-  currency: string
+-  sales: number
+-  revenue_cents: string
+-  costs_complete: boolean
+-  estimated_profit_cents: string | null
+-}
+-
+-const blank = (owner: string): CommercialConfig => ({
+-  owner_user_id: owner,
+-  product_id: '',
+-  currency: 'BRL',
+-  connection_ids: [],
+-  integration_id: '',
+-  ad_account_id: '',
+-  pixel_id: '',
+-  origins: [],
+-  cost_cents: null,
+-  cost_label: '',
+-})
+-
+-// The server derives the flow ID and name from the route. Never copy a flow ID from the browser payload.
+-const payload = (config: CommercialConfig): CommercialConfig => ({
+-  owner_user_id: config.owner_user_id,
+-  product_id: config.product_id,
+-  currency: config.currency,
+-  connection_ids: config.connection_ids,
+-  integration_id: config.integration_id,
+-  ad_account_id: config.ad_account_id,
+-  pixel_id: config.pixel_id,
+-  origins: config.origins,
+-  cost_cents: config.cost_cents,
+-  cost_label: config.cost_label,
+-})
+-
+-export function CommercialDialog({ flow, onClose }: { flow: FlowRef | null; onClose: () => void }) {
+-  const session = useSession()
+-  const canView = !!session && hasAny(session, ['settings.products.view'])
+-  const canEdit = !!session && hasAny(session, ['flows.edit']) && hasAny(session, ['settings.products.edit']) && flow?.workspace_owned !== false
+-  const [data, setData] = useState<Response | null>(null)
+-  const [config, setConfig] = useState<CommercialConfig>(blank(''))
+-  const [active, setActive] = useState(false)
+-  const [loading, setLoading] = useState(false)
+-  const [saving, setSaving] = useState(false)
+-  const [chipPending, setChipPending] = useState<string | null>(null)
+-  const [results, setResults] = useState<Result[] | null>(null)
+-  const [resultsError, setResultsError] = useState(false)
+-  const [error, setError] = useState('')
+-  const canSave = canEdit && data?.can_save === true
+-  const complete = Boolean(config.owner_user_id && config.product_id && config.integration_id &&
+-    config.ad_account_id && config.pixel_id && config.connection_ids.length &&
+-    config.origins.every(origin => origin.value.trim()))
+-
+-  useEffect(() => {
+-    if (!flow || !canView) return
+-    let cancelled = false
+-    setLoading(true)
+-    setData(null)
+-    setError('')
+-    setResults(null)
+-    setResultsError(false)
+-    void api.get<Response>(`/api/flows/${encodeURIComponent(flow.id)}/commercial`)
+-      .then(result => {
+-        if (cancelled) return
+-        setData(result)
+-        setConfig(result.commercial ? payload(result.commercial.config) : blank(session?.user.id ?? ''))
+-        setActive(flow.status === 'active' && (result.commercial?.active ?? false))
+-        if (!result.commercial) {
+-          setResults([])
+-          return
+-        }
+-        void api.get<{ items: Result[] }>('/api/offers/results', { query: { offer: result.commercial.id } })
+-          .then(report => { if (!cancelled) setResults(report.items) })
+-          .catch(() => { if (!cancelled) setResultsError(true) })
+-      })
+-      .catch(err => { if (!cancelled) setError(serverMessage(err) ?? 'Não foi possível carregar esta configuração.') })
+-      .finally(() => { if (!cancelled) setLoading(false) })
+-    return () => { cancelled = true }
+-  }, [flow?.id, canView, session?.user.id])
+-
+-  function update<K extends keyof CommercialConfig>(key: K, value: CommercialConfig[K]) {
+-    setConfig(previous => ({ ...previous, [key]: value }))
+-  }
+-
+-  async function save() {
+-    if (!flow || !data || !canSave || !complete) return
+-    setSaving(true)
+-    setError('')
+-    try {
+-      const result = await api.put<{ commercial: Commercial }>(
+-        `/api/flows/${encodeURIComponent(flow.id)}/commercial`,
+-        { active: flow.status === 'active' && active, config: payload(config) },
+-      )
+-      setData(previous => previous && { ...previous, commercial: result.commercial })
+-      if (!data.commercial) setResults([])
+-      notify('success', 'Configuração do fluxo salva')
+-      onClose()
+-    } catch (err) {
+-      setError(serverMessage(err) ?? 'Não foi possível salvar a configuração do fluxo.')
+-    } finally {
+-      setSaving(false)
+-    }
+-  }
+-
+-  async function toggleChip(connectionId: string, enabled: boolean) {
+-    if (!flow || !data?.commercial?.active || !canSave ||
+-      !data.commercial.config.connection_ids.includes(connectionId)) return
+-    const name = data.resources.connections.find(item => item.id === connectionId)?.name ?? 'chip'
+-    const warning = enabled
+-      ? `Ativar a modalidade comercial no ${name}? Isso afeta o chip compartilhado: entradas sem vínculo ficam para atendimento manual e gatilhos legados deixam de iniciar fluxos nele.`
+-      : `Desativar a modalidade comercial no ${name}? Isso afeta todos os fluxos que usam esse chip.`
+-    if (!window.confirm(warning)) return
+-    setChipPending(connectionId)
+-    setError('')
+-    try {
+-      await api.put(`/api/offers/chips/${encodeURIComponent(connectionId)}`, { enabled })
+-      const response = await api.get<Response>(`/api/flows/${encodeURIComponent(flow.id)}/commercial`)
+-      setData(response)
+-      notify('success', enabled ? 'Modalidade comercial ativada no chip' : 'Modalidade comercial desativada no chip')
+-    } catch (err) {
+-      setError(serverMessage(err) ?? 'Não foi possível alterar o modo deste chip.')
+-    } finally {
+-      setChipPending(null)
+-    }
+-  }
+-
+-  const resources = data?.resources
+-  const money = (cents: string, currency: string) =>
+-    new Intl.NumberFormat('pt-BR', { style: 'currency', currency }).format(Number(cents) / 100)
+-  const selectedPixels = resources?.pixels.filter(pixel => !config.ad_account_id || pixel.meta_ad_account_id === config.ad_account_id) ?? []
+-  const select = (label: string, key: SelectKey, items: Item[]) => (
+-    <Field label={label} htmlFor={`flow-commercial-${key}`}>
+-      <select id={`flow-commercial-${key}`} className={inputClass} value={String(config[key])}
+-        disabled={!canSave}
+-        onChange={event => key === 'ad_account_id'
+-          ? setConfig(previous => ({ ...previous, ad_account_id: event.target.value, pixel_id: '' }))
+-          : update(key, event.target.value)}>
+-        <option value="">Selecione</option>
+-        {items.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+-      </select>
+-    </Field>
+-  )
+-
+-  return (
+-    <Dialog.Root open={!!flow} onOpenChange={open => !open && onClose()}>
+-      <Dialog.Portal>
+-        <Dialog.Backdrop className="fixed inset-0 z-[70] bg-black/40" />
+-        <Dialog.Popup data-testid="flow-commercial-dialog"
+-          className="fixed top-1/2 left-1/2 z-[70] flex max-h-[calc(100dvh-2rem)] w-[min(54rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 flex-col rounded-xl border bg-background shadow-xl outline-none">
+-          <Dialog.Title className="border-b px-5 py-4 text-lg font-semibold">Pagamentos e anúncios · {flow?.name}</Dialog.Title>
+-          <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-5 py-4 text-sm">
+-            <p className="text-muted-foreground">Esta configuração pertence somente a este fluxo. Para outra combinação de produto, pagamento ou pixel, duplique o fluxo e configure a cópia. O valor cobrado é definido nos blocos de pagamento do editor.</p>
+-            {flow?.status !== 'active' && <p role="status" className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3">Você pode salvar a configuração inativa. Para receber entradas comerciais, publique e ative o fluxo depois. Abrir este painel não ativa nem envia mensagens.</p>}
+-            {data && !data.can_save && <p role="status" className="rounded-md border p-3">Desarquive o fluxo para editar esta configuração.</p>}
+-            {!canView && <p role="alert">Você não tem permissão para ver os recursos comerciais.</p>}
+-            {loading && <p role="status">Carregando recursos…</p>}
+-            {error && <p role="alert" data-testid="flow-commercial-error" className="text-destructive">{error}</p>}
+-            {resources && <>
+-              {(!resources.products.length || !resources.integrations.length || !resources.accounts.length || !resources.pixels.length) &&
+-                <p role="status" className="rounded-md border p-3">Para completar esta configuração, cadastre o produto, conecte XPag e vincule conta de anúncios e pixel no workspace.</p>}
+-              <div className="grid gap-3 sm:grid-cols-2">
+-                {resources.members.length > 1 && select('Responsável pelo resultado', 'owner_user_id', resources.members)}
+-                {select('Produto', 'product_id', resources.products)}
+-                <Field label="Moeda" htmlFor="flow-commercial-currency">
+-                  <select id="flow-commercial-currency" className={inputClass} value={config.currency}
+-                    disabled={!canSave} onChange={event => update('currency', event.target.value)}>
+-                    {['BRL', 'MXN', 'USD', 'EUR'].map(currency => <option key={currency}>{currency}</option>)}
+-                  </select>
+-                </Field>
+-                {select('Conta recebedora XPag', 'integration_id', resources.integrations)}
+-                {select('Conta de anúncios', 'ad_account_id', resources.accounts)}
+-                {select('Pixel de Purchase', 'pixel_id', selectedPixels)}
+-              </div>
+-              <fieldset className="rounded-md border p-3">
+-                <legend className="px-1 font-medium">Chips usados neste fluxo</legend>
+-                <div className="grid gap-2 sm:grid-cols-2">
+-                  {resources.connections.map(chip => <label key={chip.id} className="flex items-center gap-2">
+-                    <input type="checkbox" checked={config.connection_ids.includes(chip.id)}
+-                      disabled={!canSave}
+-                      onChange={event => update('connection_ids', event.target.checked
+-                        ? [...config.connection_ids, chip.id] : config.connection_ids.filter(id => id !== chip.id))} />
+-                    {chip.name}
+-                  </label>)}
+-                </div>
+-                {config.connection_ids.length > 0 && <div className="mt-3 border-t pt-3">
+-                  <p className="mb-2 text-xs text-muted-foreground">O modo comercial é global para cada chip. Ativá-lo muda o tratamento de entradas nesse chip, inclusive de outros fluxos. Salve e habilite a configuração deste fluxo antes de alterar o modo do chip.</p>
+-                  {resources.connections.filter(chip => config.connection_ids.includes(chip.id)).map(chip => <label key={chip.id} className="flex items-center gap-2 py-1">
+-                    <input type="checkbox" checked={resources.managed_connections.includes(chip.id)}
+-                      disabled={!canSave || chipPending !== null || !data?.commercial?.active || !data?.commercial?.config.connection_ids.includes(chip.id)}
+-                      onChange={event => void toggleChip(chip.id, event.target.checked)} />
+-                    Modo comercial em {chip.name}
+-                  </label>)}
+-                </div>}
+-              </fieldset>
+-              <fieldset className="rounded-md border p-3">
+-                <legend className="px-1 font-medium">Origem dos anúncios</legend>
+-                <p className="mb-2 text-xs text-muted-foreground">Vincule um ID de anúncio ou link rastreável exato. A origem não será presumida pela hora da mensagem.</p>
+-                {config.origins.map((origin, index) => <div key={index} className="mb-2 grid gap-2 sm:grid-cols-[12rem_1fr_auto]">
+-                  <select aria-label={`Tipo de origem ${index + 1}`} className={inputClass} value={origin.type}
+-                    disabled={!canSave}
+-                    onChange={event => update('origins', config.origins.map((item, i) => i === index ? { type: event.target.value as Origin['type'], value: '' } : item))}>
+-                    <option value="source_id">ID de anúncio</option><option value="link">Link rastreável</option>
+-                  </select>
+-                  {origin.type === 'link' ? <select aria-label={`Link de origem ${index + 1}`} className={inputClass} value={origin.value}
+-                    disabled={!canSave}
+-                    onChange={event => update('origins', config.origins.map((item, i) => i === index ? { ...item, value: event.target.value } : item))}>
+-                    <option value="">Selecione o link</option>
+-                    {resources.links.map(link => <option key={link.id} value={link.id}>{link.name}</option>)}
+-                  </select> : <input aria-label={`ID de origem ${index + 1}`} className={inputClass} value={origin.value}
+-                    disabled={!canSave}
+-                    onChange={event => update('origins', config.origins.map((item, i) => i === index ? { ...item, value: event.target.value } : item))} />}
+-                  <Button type="button" variant="outline" disabled={!canSave}
+-                    onClick={() => update('origins', config.origins.filter((_, i) => i !== index))}>Remover</Button>
+-                </div>)}
+-                <Button type="button" variant="outline" disabled={!canSave}
+-                  onClick={() => update('origins', [...config.origins, { type: 'source_id', value: '' }])}>Adicionar origem</Button>
+-              </fieldset>
+-              <div className="grid gap-3 sm:grid-cols-2">
+-                <Field label="Custo declarado por venda (centavos)" htmlFor="flow-commercial-cost">
+-                  <input id="flow-commercial-cost" type="number" min="0" step="1" className={inputClass} value={config.cost_cents ?? ''}
+-                    disabled={!canSave}
+-                    onChange={event => update('cost_cents', event.target.value === '' ? null : Number(event.target.value))} />
+-                </Field>
+-                <Field label="Descrição do custo" htmlFor="flow-commercial-cost-label">
+-                  <input id="flow-commercial-cost-label" className={inputClass} value={config.cost_label}
+-                    disabled={!canSave} onChange={event => update('cost_label', event.target.value)} />
+-                </Field>
+-              </div>
+-              <p className="text-xs text-muted-foreground">Taxas XPag e gasto em anúncios não são incluídos automaticamente no lucro estimado.</p>
+-              <label className="flex items-center gap-2 font-medium">
+-                <input type="checkbox" checked={active} disabled={!canSave || flow?.status !== 'active'}
+-                  onChange={event => setActive(event.target.checked)} />
+-                Usar esta configuração para entradas comerciais deste fluxo
+-              </label>
+-              {data?.commercial && <section aria-labelledby="flow-commercial-results-title" className="rounded-md border p-3">
+-                <h3 id="flow-commercial-results-title" className="font-semibold">Resultados deste fluxo</h3>
+-                {resultsError ? <p role="status" className="mt-2 text-muted-foreground">Não foi possível carregar os resultados agora.</p>
+-                  : results === null ? <p role="status" className="mt-2 text-muted-foreground">Carregando resultados…</p>
+-                  : results.length === 0 ? <p className="mt-2 text-muted-foreground">Ainda não há vendas confirmadas para este fluxo.</p>
+-                  : <ul className="mt-2 space-y-2">
+-                    {results.map((item, index) => <li key={`${item.offer_id}-${item.currency}-${index}`} className="rounded-md bg-muted/50 p-2">
+-                      <strong>{item.sales} {item.sales === 1 ? 'venda' : 'vendas'}</strong> · Receita {money(item.revenue_cents, item.currency)}
+-                      <span className="block text-xs text-muted-foreground">{item.costs_complete && item.estimated_profit_cents !== null
+-                        ? `Lucro estimado ${money(item.estimated_profit_cents, item.currency)}`
+-                        : 'Custos incompletos; lucro não calculado.'}</span>
+-                    </li>)}
+-                  </ul>}
+-              </section>}
+-            </>}
+-          </div>
+-          <div className="flex justify-end gap-2 border-t px-5 py-3">
+-            <Button type="button" variant="outline" onClick={onClose}>Fechar</Button>
+-            {canEdit && <Button type="button" data-testid="flow-commercial-save" disabled={saving || loading || !canSave || !complete}
+-              onClick={() => void save()}>{saving ? 'Salvando…' : 'Salvar configuração'}</Button>}
+-          </div>
+-        </Dialog.Popup>
+-      </Dialog.Portal>
+-    </Dialog.Root>
+-  )
+-}
+diff --git a/apps/web/src/features/flows/flows-page.tsx b/apps/web/src/features/flows/flows-page.tsx
+index 8c2936d3340d6ed759213561d15b5dada60ca0d9..273e8e47c5f853f4c7bf23f460b0323325ec9532 100644
+--- a/apps/web/src/features/flows/flows-page.tsx
++++ b/apps/web/src/features/flows/flows-page.tsx
+@@ -24,12 +24,10 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
+ import { Button } from '@/components/ui/button'
+ import { activationIssues } from '@/features/flow-editor/canvas/api'
+ import { SearchBox, serverMessage, useDebounced, usePerms } from '@/features/settings-quick-replies/kit'
+-import { useSession } from '@/features/settings-company/ui'
+ import { useI18n, useT } from '@/i18n'
+ import { notify } from '@/lib/toast'
+ import { useIsDesktop } from '@/lib/use-media-query'
+ import { cn } from '@/lib/utils'
+-import { hasAny } from '@/lib/session'
+ import { applyReorder, flowsApi, flowsQuery, flowsQueryKey, type FlowDto, type FolderDto } from './api'
+ import {
+   DeleteFlowDialog,
+@@ -60,14 +58,12 @@ import {
+ } from './model'
+ import { Breadcrumb, FolderTree } from './tree'
+ import { folderColorClass, StatusBadge, type FlowsSearch } from './view'
+-import { CommercialDialog } from './commercial-dialog'
+ 
+ const NS = 'flows'
+ 
+ interface Perms {
+   canEdit: boolean
+   canDelete: boolean
+-  canCommercial?: boolean
+ }
+ 
+ export function FlowsPage({ search, onSearch }: { search: FlowsSearch; onSearch: (next: FlowsSearch) => void }) {
+@@ -77,8 +73,6 @@ export function FlowsPage({ search, onSearch }: { search: FlowsSearch; onSearch:
+   const navigate = useNavigate()
+   const q = useQuery(flowsQuery())
+   const perms = usePerms(['flows.edit'], ['flows.delete'])
+-  const session = useSession()
+-  const canCommercial = !!session && hasAny(session, ['settings.products.view'])
+   const current = folderIdOf(search.folder)
+   const status: StatusFilter = search.flow_status ?? 'all'
+   const view = desktop ? (search.view ?? 'cards') : 'cards'
+@@ -109,7 +103,6 @@ export function FlowsPage({ search, onSearch }: { search: FlowsSearch; onSearch:
+   const [moving, setMoving] = useState<FlowDto | null>(null)
+   const [deleting, setDeleting] = useState<FlowDto | null>(null)
+   const [sharing, setSharing] = useState<FlowDto | null>(null)
+-  const [commercial, setCommercial] = useState<FlowDto | null>(null)
+   const [importing, setImporting] = useState(false)
+   const [treeOpen, setTreeOpen] = useState(false)
+   const [blocked, setBlocked] = useState(false)
+@@ -386,7 +379,7 @@ export function FlowsPage({ search, onSearch }: { search: FlowsSearch; onSearch:
+                         view={view}
+                         page={page}
+                         onPage={setPage}
+-                        perms={{ ...perms, canCommercial }}
++                        perms={perms}
+                         canReorder={canReorder}
+                         folders={folders}
+                         showFolder={!!search.q}
+@@ -395,7 +388,6 @@ export function FlowsPage({ search, onSearch }: { search: FlowsSearch; onSearch:
+                           move: setMoving,
+                           remove: setDeleting,
+                           share: setSharing,
+-                          commercial: setCommercial,
+                           shareWithWorkspaces: f => {
+                             if (window.confirm(`Compartilhar “${f.name}” com os outros workspaces? Alterações publicadas no fluxo também valerão para quem o usa.`))
+                               void run(() => flowsApi.shareWithWorkspaces(f.id), 'Fluxo compartilhado com os outros workspaces')
+@@ -433,7 +425,6 @@ export function FlowsPage({ search, onSearch }: { search: FlowsSearch; onSearch:
+       <MoveDialog flow={moving} folders={moveTargets} onClose={() => setMoving(null)} />
+       <DeleteFlowDialog flow={deleting} onClose={() => setDeleting(null)} />
+       <ShareDialog flow={sharing} onClose={() => setSharing(null)} />
+-      <CommercialDialog flow={commercial} onClose={() => setCommercial(null)} />
+       <ImportDialog open={importing} onClose={() => setImporting(false)} />
+     </section>
+   )
+@@ -578,7 +569,6 @@ interface FlowActions {
+   move: (f: FlowDto) => void
+   remove: (f: FlowDto) => void
+   share: (f: FlowDto) => void
+-  commercial: (f: FlowDto) => void
+   shareWithWorkspaces: (f: FlowDto) => void
+   duplicate: (f: FlowDto) => void
+   status: (f: FlowDto, action: 'activate' | 'pause' | 'archive' | 'unarchive') => void
+@@ -868,7 +858,6 @@ function FlowMenu({
+       {canEdit ? (
+         <>
+           <MenuItem testid={`flows-item-edit-${id}`} label={t('menu.edit')} onClick={() => void navigate(link)} />
+-          {perms.canCommercial && <MenuItem testid={`flows-item-commercial-${id}`} label="Configurar pagamentos e anúncios" onClick={() => actions.commercial(flow)} />}
+           <MenuItem testid={`flows-item-rename-${id}`} label={t('menu.rename')} onClick={() => actions.rename(flow)} />
+           <MenuItem
+             testid={`flows-item-duplicate-${id}`}
+diff --git a/apps/web/src/features/offers/page.tsx b/apps/web/src/features/offers/page.tsx
+deleted file mode 100644
+index 43aa605970e3371d55d74bcc3f8d89d069bb6938..0000000000000000000000000000000000000000
+--- a/apps/web/src/features/offers/page.tsx
++++ /dev/null
+@@ -1,427 +0,0 @@
+-import { useEffect, useState } from 'react'
+-import { useSession } from '@/features/settings-company/ui'
+-import { activeBusinessArea, api } from '@/lib/http'
+-import './style.css'
+-type Item = { id: string; name: string; currency?: string }
+-type Config = {
+-  owner_user_id: string
+-  product_id: string
+-  currency: string
+-  flow_id: string
+-  connection_ids: string[]
+-  integration_id: string
+-  ad_account_id: string
+-  pixel_id: string
+-  origins: { type: 'source_id' | 'link'; value: string }[]
+-  cost_cents: number | null
+-  cost_label: string
+-}
+-type Offer = { id: string; name: string; active: boolean; version: number; config: Config }
+-type Resources = Record<string, Item[]> & { managed_connections: never }
+-const empty = (): Config => ({
+-  owner_user_id: '',
+-  product_id: '',
+-  currency: 'BRL',
+-  flow_id: '',
+-  connection_ids: [],
+-  integration_id: '',
+-  ad_account_id: '',
+-  pixel_id: '',
+-  origins: [],
+-  cost_cents: null,
+-  cost_label: '',
+-})
+-type Result = {
+-  offer_id: string
+-  offer_name: string
+-  owner_user_id: string
+-  currency: string
+-  sales: number
+-  revenue_cents: string
+-  costs_complete: boolean
+-  estimated_profit_cents: string | null
+-}
+-export function OffersPage() {
+-  const session = useSession()
+-  if (session?.company?.shared_offers !== true) return <p role="alert">Ofertas indisponíveis para esta empresa.</p>
+-  if (session.company.business_areas_enabled && !session.company.business_areas_admin) return <p role="alert">Área exclusiva da conta administradora.</p>
+-  return <AuthorizedOffersPage key={session.company.id} />
+-}
+-function AuthorizedOffersPage() {
+-  const session = useSession()
+-  const inWorkspace = activeBusinessArea() !== null
+-  const [resources, setResources] = useState<Resources>(),
+-    [offers, setOffers] = useState<Offer[]>([]),
+-    [id, setId] = useState(''),
+-    [name, setName] = useState(''),
+-    [active, setActive] = useState(false),
+-    [config, setConfig] = useState<Config>(empty),
+-    [error, setError] = useState(''),
+-    [notice, setNotice] = useState(''),
+-    [owner, setOwner] = useState(''),
+-    [filterOffer, setFilterOffer] = useState(''),
+-    [results, setResults] = useState<Result[]>([]),
+-    [chat, setChat] = useState(''),
+-    [manual, setManual] = useState('')
+-  const load = async () => {
+-    const [r, o] = await Promise.all([
+-      api.get<Resources>('/api/offers/resources'),
+-      api.get<{ items: Offer[] }>('/api/offers'),
+-    ])
+-    setResources(r)
+-    setOffers(o.items)
+-  }
+-  const run = async (fn: () => Promise<void>) => {
+-    setError('')
+-    setNotice('')
+-    try {
+-      await fn()
+-    } catch (e) {
+-      setError(e instanceof Error ? e.message : 'Falha na operação')
+-    }
+-  }
+-  useEffect(() => {
+-    void run(load)
+-  }, [])
+-  useEffect(() => {
+-    void api
+-      .get<{ items: Result[] }>('/api/offers/results', {
+-        query: { owner: owner || undefined, offer: filterOffer || undefined },
+-      })
+-      .then((r) => setResults(r.items))
+-      .catch((e) => setError(e instanceof Error ? e.message : 'Falha ao carregar resultados'))
+-  }, [owner, filterOffer, offers])
+-  const update = (key: keyof Config, value: unknown) => setConfig((c) => ({ ...c, [key]: value }))
+-  const select = (label: string, key: keyof Config, group: string) => (
+-    <label>
+-      {label}
+-      <select aria-label={label} required value={String(config[key])} onChange={(e) => update(key, e.target.value)}>
+-        <option value="">Selecione</option>
+-        {resources?.[group]?.map((x) => (
+-          <option key={x.id} value={x.id}>
+-            {x.name}
+-          </option>
+-        ))}
+-      </select>
+-    </label>
+-  )
+-  const reset = () => {
+-    setId('')
+-    setName('')
+-    setActive(false)
+-    setConfig(empty())
+-  }
+-  const edit = (o: Offer) => {
+-    setId(o.id)
+-    setName(o.name)
+-    setActive(o.active)
+-    setConfig(o.config)
+-    setNotice('Editando ' + o.name)
+-  }
+-  const money = (v: string, currency: string) =>
+-    new Intl.NumberFormat('pt-BR', { style: 'currency', currency }).format(Number(v) / 100)
+-  return (
+-    <section className="offers-page" data-testid="page-offers">
+-      <header>
+-        <div>
+-          <h1>{inWorkspace ? 'Ofertas do workspace' : 'Ofertas compartilhadas'}</h1>
+-          <p>{inWorkspace ? 'Crie ofertas deste workspace usando os recursos compartilhados da empresa.' : 'Uma empresa, todos os chips. A oferta define responsável, conta recebedora e destino dos eventos.'}</p>
+-        </div>
+-        <button onClick={reset}>Nova oferta</button>
+-      </header>
+-      {error && <p role="alert">{error}</p>}
+-      {notice && <p role="status">{notice}</p>}
+-      <details>
+-        <summary>Ativar modalidade de ofertas por chip</summary>
+-        <p>
+-          Ao ativar, origens sem vínculo ou em conflito ficam para atendimento manual. Os gatilhos legados automáticos
+-          deixam de iniciar ofertas neste chip.
+-        </p>
+-        {resources?.connections?.map((x) => (
+-          <label key={x.id} className="check">
+-            <input
+-              type="checkbox"
+-              checked={((resources.managed_connections ?? []) as string[]).includes(x.id)}
+-              onChange={(e) =>
+-                void run(async () => {
+-                  await api.put('/api/offers/chips/' + x.id, { enabled: e.target.checked })
+-                  await load()
+-                })
+-              }
+-            />
+-            {x.name}
+-          </label>
+-        ))}
+-      </details>
+-      <div className="offer-columns">
+-        <aside>
+-          <h2>Ofertas</h2>
+-          {offers.length === 0 && <p>Nenhuma oferta cadastrada.</p>}
+-          {offers.map((o) => (
+-            <button key={o.id} onClick={() => edit(o)}>
+-              {o.name} · {o.active ? 'Ativa' : 'Inativa'} · v{o.version}
+-            </button>
+-          ))}
+-        </aside>
+-        <form
+-          onSubmit={(e) => {
+-            e.preventDefault()
+-            void run(async () => {
+-              const body = { name, active, config }
+-              const saved = id
+-                ? await api.put<{ offer: Offer }>('/api/offers/' + id, body)
+-                : await api.post<{ offer: Offer }>('/api/offers', body)
+-              setId(saved.offer.id)
+-              await load()
+-              setNotice('Oferta salva')
+-            })
+-          }}
+-        >
+-          <h2>{id ? 'Editar oferta' : 'Cadastrar oferta'}</h2>
+-          <div className="offer-fields">
+-            <label>
+-              Nome da oferta
+-              <input required value={name} onChange={(e) => setName(e.target.value)} />
+-            </label>
+-            {select('Responsável', 'owner_user_id', 'members')}
+-            {select('Produto', 'product_id', 'products')}
+-            <label>
+-              Moeda
+-              <select aria-label="Moeda" value={config.currency} onChange={(e) => update('currency', e.target.value)}>
+-                {['BRL', 'MXN', 'USD', 'EUR'].map((c) => (
+-                  <option key={c}>{c}</option>
+-                ))}
+-              </select>
+-            </label>
+-            {select('Fluxo publicado', 'flow_id', 'flows')}
+-            {select('Conta recebedora XPag', 'integration_id', 'integrations')}
+-            {select('Conta de anúncios', 'ad_account_id', 'accounts')}
+-            {select('Pixel de destino', 'pixel_id', 'pixels')}
+-          </div>
+-          <fieldset>
+-            <legend>Chips permitidos — podem ser compartilhados entre todas as ofertas</legend>
+-            {resources?.connections?.map((x) => (
+-              <label className="check" key={x.id}>
+-                <input
+-                  type="checkbox"
+-                  checked={config.connection_ids.includes(x.id)}
+-                  onChange={(e) =>
+-                    update(
+-                      'connection_ids',
+-                      e.target.checked
+-                        ? [...config.connection_ids, x.id]
+-                        : config.connection_ids.filter((y) => y !== x.id),
+-                    )
+-                  }
+-                />
+-                {x.name}
+-              </label>
+-            ))}
+-          </fieldset>
+-          <fieldset>
+-            <legend>Vínculos de origem</legend>
+-            <p>
+-              IDs nativos são configurados explicitamente. Para links, o código exato da mensagem identifica o link
+-              escolhido. Proximidade de horário não resolve oferta.
+-            </p>
+-            {config.origins.map((o, i) => (
+-              <div className="origin-row" key={i}>
+-                <select
+-                  aria-label={'Tipo de origem ' + (i + 1)}
+-                  value={o.type}
+-                  onChange={(e) =>
+-                    update(
+-                      'origins',
+-                      config.origins.map((x, j) => (j === i ? { type: e.target.value, value: '' } : x)),
+-                    )
+-                  }
+-                >
+-                  <option value="source_id">ID do anúncio nativo</option>
+-                  <option value="link">Link rastreável (código exato)</option>
+-                </select>
+-                {o.type === 'link' ? (
+-                  <select
+-                    aria-label={'Link de origem ' + (i + 1)}
+-                    required
+-                    value={o.value}
+-                    onChange={(e) =>
+-                      update(
+-                        'origins',
+-                        config.origins.map((x, j) => (j === i ? { ...x, value: e.target.value } : x)),
+-                      )
+-                    }
+-                  >
+-                    <option value="">Selecione link</option>
+-                    {resources?.links?.map((x) => (
+-                      <option key={x.id} value={x.id}>
+-                        {x.name}
+-                      </option>
+-                    ))}
+-                  </select>
+-                ) : (
+-                  <input
+-                    aria-label={'ID de origem ' + (i + 1)}
+-                    required
+-                    value={o.value}
+-                    onChange={(e) =>
+-                      update(
+-                        'origins',
+-                        config.origins.map((x, j) => (j === i ? { ...x, value: e.target.value } : x)),
+-                      )
+-                    }
+-                  />
+-                )}
+-                <button
+-                  type="button"
+-                  onClick={() =>
+-                    update(
+-                      'origins',
+-                      config.origins.filter((_, j) => j !== i),
+-                    )
+-                  }
+-                >
+-                  Remover vínculo
+-                </button>
+-              </div>
+-            ))}
+-            <button
+-              type="button"
+-              onClick={() => update('origins', [...config.origins, { type: 'source_id', value: '' }])}
+-            >
+-              Adicionar vínculo
+-            </button>
+-          </fieldset>
+-          <div className="offer-fields">
+-            <label>
+-              Custo declarado por venda (centavos; opcional)
+-              <input
+-                type="number"
+-                min="0"
+-                step="1"
+-                value={config.cost_cents ?? ''}
+-                onChange={(e) => update('cost_cents', e.target.value === '' ? null : Number(e.target.value))}
+-              />
+-            </label>
+-            <label>
+-              Descrição do custo
+-              <input value={config.cost_label} onChange={(e) => update('cost_label', e.target.value)} />
+-            </label>
+-          </div>
+-          <p>
+-            Não inclui taxas XPag nem gasto de anúncios automaticamente. Custos incompletos não representam lucro real.
+-          </p>
+-          <label className="check">
+-            <input type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} />
+-            Oferta ativa
+-          </label>
+-          <button type="submit">Salvar oferta</button>
+-        </form>
+-      </div>
+-      <section>
+-        <h2>Escolher oferta manualmente para uma conversa</h2>
+-        <p>
+-          A seleção substitui o fluxo ativo somente desta conversa. Não confirma anúncio nem identificadores de clique.
+-        </p>
+-        <div className="offer-fields">
+-          <label>
+-            Conversa
+-            <select aria-label="Conversa" value={chat} onChange={(e) => setChat(e.target.value)}>
+-              <option value="">Selecione</option>
+-              {resources?.chats?.map((x) => (
+-                <option key={x.id} value={x.id}>
+-                  {x.name}
+-                </option>
+-              ))}
+-            </select>
+-          </label>
+-          <label>
+-            Oferta
+-            <select aria-label="Oferta" value={manual} onChange={(e) => setManual(e.target.value)}>
+-              <option value="">Selecione</option>
+-              {offers
+-                .filter((o) => o.active)
+-                .map((x) => (
+-                  <option key={x.id} value={x.id}>
+-                    {x.name}
+-                  </option>
+-                ))}
+-            </select>
+-          </label>
+-        </div>
+-        <button
+-          disabled={!chat || !manual}
+-          onClick={() =>
+-            void run(async () => {
+-              await api.post('/api/chats/' + chat + '/offer', { offer_id: manual, replace_active: true })
+-              setNotice('Oferta selecionada; execução iniciada sem atribuição inventada')
+-            })
+-          }
+-        >
+-          Substituir contexto e iniciar oferta
+-        </button>
+-      </section>
+-      <section>
+-        <h2>Resultados por responsável e oferta</h2>
+-        <div className="offer-fields">
+-          <label>
+-            Filtrar responsável
+-            <select aria-label="Filtrar responsável" value={owner} onChange={(e) => setOwner(e.target.value)}>
+-              <option value="">Todos</option>
+-              {resources?.members?.map((x) => (
+-                <option key={x.id} value={x.id}>
+-                  {x.name}
+-                </option>
+-              ))}
+-            </select>
+-          </label>
+-          <label>
+-            Filtrar oferta
+-            <select aria-label="Filtrar oferta" value={filterOffer} onChange={(e) => setFilterOffer(e.target.value)}>
+-              <option value="">Todas</option>
+-              {offers.map((x) => (
+-                <option key={x.id} value={x.id}>
+-                  {x.name}
+-                </option>
+-              ))}
+-            </select>
+-          </label>
+-        </div>
+-        <p>
+-          Moedas separadas. Filtros não restringem o acesso compartilhado dos administradores. Estimativa considera
+-          somente custos declarados por venda; custos operacionais e de mídia podem estar incompletos.
+-        </p>
+-        <div className="offer-table">
+-          <table>
+-            <thead>
+-              <tr>
+-                <th>Oferta</th>
+-                <th>Responsável</th>
+-                <th>Moeda</th>
+-                <th>Vendas</th>
+-                <th>Receita</th>
+-                <th>Lucro estimado dos custos declarados</th>
+-              </tr>
+-            </thead>
+-            <tbody>
+-              {results.map((r, i) => (
+-                <tr key={i}>
+-                  <td>{r.offer_name}</td>
+-                  <td>{resources?.members?.find((m) => m.id === r.owner_user_id)?.name ?? r.owner_user_id}</td>
+-                  <td>{r.currency}</td>
+-                  <td>{r.sales}</td>
+-                  <td>{money(r.revenue_cents, r.currency)}</td>
+-                  <td>
+-                    {r.estimated_profit_cents === null
+-                      ? 'Custos não informados'
+-                      : money(r.estimated_profit_cents, r.currency)}
+-                  </td>
+-                </tr>
+-              ))}
+-            </tbody>
+-          </table>
+-        </div>
+-        {!results.length && <p>Nenhuma venda aprovada neste filtro.</p>}
+-      </section>
+-    </section>
+-  )
+-}
+diff --git a/apps/web/src/features/offers/style.css b/apps/web/src/features/offers/style.css
+deleted file mode 100644
+index 97703786be0fa25d0e5f151ba783c35c9843794b..0000000000000000000000000000000000000000
+--- a/apps/web/src/features/offers/style.css
++++ /dev/null
+@@ -1,138 +0,0 @@
+-.offers-page {
+-  max-width: 1250px;
+-  margin: 0 auto;
+-  padding: 24px;
+-  color: var(--foreground, #263246);
+-}
+-.offers-page h1 {
+-  font-size: 26px;
+-  font-weight: 650;
+-}
+-.offers-page h2 {
+-  font-size: 19px;
+-  font-weight: 600;
+-  margin-bottom: 12px;
+-}
+-.offers-page p {
+-  color: var(--muted-foreground, #64748b);
+-  margin: 8px 0 16px;
+-  line-height: 1.5;
+-}
+-.offers-page header {
+-  display: flex;
+-  justify-content: space-between;
+-  gap: 16px;
+-}
+-.offers-page button {
+-  border: 1px solid #cbd5e1;
+-  border-radius: 7px;
+-  padding: 9px 13px;
+-  background: var(--card, #fff);
+-  cursor: pointer;
+-}
+-.offers-page button[type='submit'] {
+-  background: #146ef5;
+-  color: white;
+-  border-color: #146ef5;
+-}
+-.offers-page button:disabled {
+-  opacity: 0.5;
+-  cursor: default;
+-}
+-.offers-page section,
+-.offers-page details,
+-.offers-page form,
+-.offers-page aside {
+-  padding: 20px;
+-  background: var(--card, #fff);
+-  border: 1px solid #e2e8f0;
+-  border-radius: 12px;
+-  margin-top: 18px;
+-}
+-.offer-columns {
+-  display: grid;
+-  grid-template-columns: 220px 1fr;
+-  gap: 18px;
+-}
+-.offer-columns aside button {
+-  display: block;
+-  width: 100%;
+-  text-align: left;
+-  margin: 8px 0;
+-}
+-.offer-fields {
+-  display: grid;
+-  grid-template-columns: repeat(2, minmax(0, 1fr));
+-  gap: 16px;
+-}
+-.offers-page label {
+-  display: flex;
+-  flex-direction: column;
+-  gap: 7px;
+-  font-size: 14px;
+-}
+-.offers-page input:not([type='checkbox']),
+-.offers-page select {
+-  width: 100%;
+-  min-width: 0;
+-  border: 1px solid #cbd5e1;
+-  border-radius: 6px;
+-  padding: 9px;
+-  background: var(--background, #fff);
+-  color: inherit;
+-}
+-.offers-page .check {
+-  flex-direction: row;
+-  align-items: center;
+-  margin: 10px 0;
+-}
+-.offers-page fieldset {
+-  border-top: 1px solid #e2e8f0;
+-  padding-top: 14px;
+-  margin: 20px 0;
+-}
+-.offers-page legend {
+-  font-weight: 600;
+-}
+-.origin-row {
+-  display: grid;
+-  grid-template-columns: 1fr 1fr auto;
+-  gap: 8px;
+-  margin: 10px 0;
+-}
+-.offers-page [role='alert'] {
+-  color: #b91c1c;
+-  background: #fef2f2;
+-  padding: 12px;
+-  border-radius: 8px;
+-}
+-.offers-page [role='status'] {
+-  color: #166534;
+-  padding: 12px;
+-}
+-.offer-table {
+-  overflow: auto;
+-}
+-.offers-page table {
+-  width: 100%;
+-  text-align: left;
+-  font-size: 14px;
+-  border-collapse: collapse;
+-}
+-.offers-page th,
+-.offers-page td {
+-  padding: 12px;
+-  border-bottom: 1px solid #e2e8f0;
+-}
+-@media (max-width: 800px) {
+-  .offer-columns,
+-  .offer-fields {
+-    grid-template-columns: 1fr;
+-  }
+-  .origin-row {
+-    grid-template-columns: 1fr;
+-  }
+-  .offers-page {
+-    padding: 12px;
+-  }
+-}
+diff --git a/apps/web/src/i18n/en/shell.json b/apps/web/src/i18n/en/shell.json
+index 629cb86c21b430d203ea9824fbf7954742e96039..5e7e1610f19a0eab64273bdd1f080d3f70e84de6 100644
+--- a/apps/web/src/i18n/en/shell.json
++++ b/apps/web/src/i18n/en/shell.json
+@@ -25,8 +25,7 @@
+       "admin": "Administration",
+       "tutorials": "Tutorials",
+       "supportAccess": "Support access",
+-      "mcpCredentials": "MCP credentials",
+-      "offers": "Offers"
++      "mcpCredentials": "MCP credentials"
+     },
+     "badges": {
+       "new": "New"
+diff --git a/apps/web/src/i18n/es/shell.json b/apps/web/src/i18n/es/shell.json
+index bd7fc44aeaecb79e54370862774181ce7d7ac938..63155c0421c0281fd0fe1fdd66fbb2be3e90f149 100644
+--- a/apps/web/src/i18n/es/shell.json
++++ b/apps/web/src/i18n/es/shell.json
+@@ -25,8 +25,7 @@
+       "admin": "Administración",
+       "tutorials": "Tutoriales",
+       "supportAccess": "Accesos de soporte",
+-      "mcpCredentials": "Credenciales MCP",
+-      "offers": "Ofertas"
++      "mcpCredentials": "Credenciales MCP"
+     },
+     "badges": {
+       "new": "Nuevo"
+diff --git a/apps/web/src/i18n/pt-BR/shell.json b/apps/web/src/i18n/pt-BR/shell.json
+index a165c19034a68b8f743115247c81603e89de6c58..ba927d7e8c117e2f84713c46062737dafe3c53e7 100644
+--- a/apps/web/src/i18n/pt-BR/shell.json
++++ b/apps/web/src/i18n/pt-BR/shell.json
+@@ -25,8 +25,7 @@
+       "admin": "Administrativo",
+       "tutorials": "Tutoriais",
+       "supportAccess": "Acessos de suporte",
+-      "mcpCredentials": "Credenciais MCP",
+-      "offers": "Ofertas"
++      "mcpCredentials": "Credenciais MCP"
+     },
+     "badges": {
+       "new": "Novo"
+diff --git a/apps/web/src/lib/session.ts b/apps/web/src/lib/session.ts
+index 942bd168161a622497b82f332df769e72dd82f76..b30724b96197e9091025c801a8de8a02f6fdd256 100644
+--- a/apps/web/src/lib/session.ts
++++ b/apps/web/src/lib/session.ts
+@@ -6,7 +6,6 @@ import { effectivePermissions, type CompanyRole, type PermissionKey, type User }
+ import { api, HttpError, PROFILE_PATH, setActiveCompany } from './http'
+ 
+ export interface CompanySummary {
+-  shared_offers?: boolean
+   business_areas_admin?: boolean
+   business_areas_enabled?: boolean
+   id: string
+diff --git a/apps/web/src/routeTree.gen.ts b/apps/web/src/routeTree.gen.ts
+index 72cbdb5f1edea740c53c856ceae8a01089ef3837..231cf46dd862e019618cce64be7e543746580841 100644
+--- a/apps/web/src/routeTree.gen.ts
++++ b/apps/web/src/routeTree.gen.ts
+@@ -14,7 +14,6 @@ import { Route as CadastroRouteImport } from './routes/cadastro'
+ import { Route as ChatsRouteRouteImport } from './routes/chats/route'
+ import { Route as ForgotPasswordRouteImport } from './routes/forgot-password'
+ import { Route as LoginRouteImport } from './routes/login'
+-import { Route as OffersRouteImport } from './routes/offers'
+ import { Route as RegisterRouteImport } from './routes/register'
+ import { Route as ResetPasswordRouteImport } from './routes/reset-password'
+ import { Route as AdminIndexRouteImport } from './routes/admin/index'
+@@ -75,11 +74,6 @@ const LoginRoute = LoginRouteImport.update({
+   path: '/login',
+   getParentRoute: () => rootRouteImport,
+ } as any)
+-const OffersRoute = OffersRouteImport.update({
+-  id: '/offers',
+-  path: '/offers',
+-  getParentRoute: () => rootRouteImport,
+-} as any)
+ const RegisterRoute = RegisterRouteImport.update({
+   id: '/register',
+   path: '/register',
+@@ -260,7 +254,6 @@ export interface FileRoutesByFullPath {
+   '/cadastro': typeof CadastroRoute
+   '/forgot-password': typeof ForgotPasswordRoute
+   '/login': typeof LoginRoute
+-  '/offers': typeof OffersRoute
+   '/register': typeof RegisterRoute
+   '/reset-password': typeof ResetPasswordRoute
+   '/agentes/$agentId': typeof AgentesAgentIdRoute
+@@ -301,7 +294,6 @@ export interface FileRoutesByTo {
+   '/cadastro': typeof CadastroRoute
+   '/forgot-password': typeof ForgotPasswordRoute
+   '/login': typeof LoginRoute
+-  '/offers': typeof OffersRoute
+   '/register': typeof RegisterRoute
+   '/reset-password': typeof ResetPasswordRoute
+   '/agentes/$agentId': typeof AgentesAgentIdRoute
+@@ -343,7 +335,6 @@ export interface FileRoutesById {
+   '/cadastro': typeof CadastroRoute
+   '/forgot-password': typeof ForgotPasswordRoute
+   '/login': typeof LoginRoute
+-  '/offers': typeof OffersRoute
+   '/register': typeof RegisterRoute
+   '/reset-password': typeof ResetPasswordRoute
+   '/agentes/$agentId': typeof AgentesAgentIdRoute
+@@ -387,7 +378,6 @@ export interface FileRouteTypes {
+     | '/cadastro'
+     | '/forgot-password'
+     | '/login'
+-    | '/offers'
+     | '/register'
+     | '/reset-password'
+     | '/agentes/$agentId'
+@@ -428,7 +418,6 @@ export interface FileRouteTypes {
+     | '/cadastro'
+     | '/forgot-password'
+     | '/login'
+-    | '/offers'
+     | '/register'
+     | '/reset-password'
+     | '/agentes/$agentId'
+@@ -469,7 +458,6 @@ export interface FileRouteTypes {
+     | '/cadastro'
+     | '/forgot-password'
+     | '/login'
+-    | '/offers'
+     | '/register'
+     | '/reset-password'
+     | '/agentes/$agentId'
+@@ -512,7 +500,6 @@ export interface RootRouteChildren {
+   CadastroRoute: typeof CadastroRoute
+   ForgotPasswordRoute: typeof ForgotPasswordRoute
+   LoginRoute: typeof LoginRoute
+-  OffersRoute: typeof OffersRoute
+   RegisterRoute: typeof RegisterRoute
+   ResetPasswordRoute: typeof ResetPasswordRoute
+   AgentesAgentIdRoute: typeof AgentesAgentIdRoute
+@@ -581,13 +568,6 @@ declare module '@tanstack/react-router' {
+       preLoaderRoute: typeof LoginRouteImport
+       parentRoute: typeof rootRouteImport
+     }
+-    '/offers': {
+-      id: '/offers'
+-      path: '/offers'
+-      fullPath: '/offers'
+-      preLoaderRoute: typeof OffersRouteImport
+-      parentRoute: typeof rootRouteImport
+-    }
+     '/register': {
+       id: '/register'
+       path: '/register'
+@@ -868,7 +848,6 @@ const rootRouteChildren: RootRouteChildren = {
+   CadastroRoute: CadastroRoute,
+   ForgotPasswordRoute: ForgotPasswordRoute,
+   LoginRoute: LoginRoute,
+-  OffersRoute: OffersRoute,
+   RegisterRoute: RegisterRoute,
+   ResetPasswordRoute: ResetPasswordRoute,
+   AgentesAgentIdRoute: AgentesAgentIdRoute,
+diff --git a/apps/web/src/routes/offers.tsx b/apps/web/src/routes/offers.tsx
+deleted file mode 100644
+index d5d496c01f571789a705b7308a3597e11c362d19..0000000000000000000000000000000000000000
+--- a/apps/web/src/routes/offers.tsx
++++ /dev/null
+@@ -1,3 +0,0 @@
+-import { createFileRoute } from '@tanstack/react-router'
+-import { OffersPage } from '@/features/offers/page'
+-export const Route = createFileRoute('/offers')({ component: OffersPage })
