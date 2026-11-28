@@ -7,6 +7,8 @@ export const TREE = 'b3979cf611df4796ccb197179095ab938e2b7817'
 // New artifacts must match TREE exactly; never accept arbitrary historical trees.
 export const INSTALLED_CRM_JOURNALS = new Map([
   [TREE, 50],
+  // CRM-004: release bf422f2 instalada (árvore b6082fd) continua reconhecida para o upgrade.
+  ['b6082fd032570621878736058edf9158214733c4', 50],
   ['4ca23fc779974f3772dcf5e6aeb6f0604fde0e0c', 49],
   ['fcf5007316b6cb214e1a63d85532b28984997cde', 49],
   ['f9b91ba97ba578ec44b6c0f5bc33404f4004f795', 49],
