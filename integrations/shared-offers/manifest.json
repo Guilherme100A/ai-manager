@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/Guilherme100A/crm-copy.git",
   "base_sha": "acf78e2da49865afa06fe6a4cee77bcf0e888152",
-  "expected_tree": "b6082fd032570621878736058edf9158214733c4",
+  "expected_tree": "b3979cf611df4796ccb197179095ab938e2b7817",
   "sanitization": {
     "excluded_files": [
       "scripts/elevenlabs-account-diagnose.ts",
@@ -28,7 +28,7 @@
     ],
     "reason": "Exclude unrelated operator scripts/private deployment context and audit-only harnesses; replace operational hosts in documentation and URL fixtures with reserved example.test hosts. Original local source preserved.",
     "baseline_tree": "539e4a6dac07e50188e418d0e1a3d669e5f6d687",
-    "final_tree": "b6082fd032570621878736058edf9158214733c4"
+    "final_tree": "b3979cf611df4796ccb197179095ab938e2b7817"
   },
   "test_only_changes": [
     {
@@ -798,6 +798,22 @@
         "tests/acceptance/T125/crm003-browser.test.ts",
         "tests/acceptance/T125/crm003-regression.test.ts",
         "tests/acceptance/T125/crm003-upgrade-system.ts"
+      ]
+    },
+    {
+      "file": "32-flow-audio-voice-note.patch",
+      "description": "CRM-004: flow audio (send_multi_media/audio) is converted to Ogg/Opus mono 48 kHz before sending (MP3/M4A sent as voice note showed as a broken audio on WhatsApp). Source: http(s) download (16 MB cap, 30 s timeout) or blob: owned by the company (ownsPrivateMedia); result stored through MediaService (ownership recorded) and sent as blob:<sha256> with audio/ogg; codecs=opus. Per company+source cache; conversion failure logs and sends the original. Requires ffmpeg in the release image (Dockerfile). Download uses safeHttpRequest (internal network blocked at destination, DNS and each redirect; raw bytes added to its response). ffmpeg input limited to -protocol_whitelist pipe and killed after 60 s.",
+      "sha256": "2d6a29a1e03e9ad5f27a7cba194840dea5125c5a22072f234113d80026924f32",
+      "bytes": 29708,
+      "files": [
+        "apps/worker/src/boot/production.ts",
+        "packages/ai/src/audio/ptt.ts",
+        "packages/core/src/flows/nodes/external/http.ts",
+        "packages/core/src/flows/nodes/messaging/handlers.ts",
+        "packages/core/src/flows/nodes/messaging/index.ts",
+        "packages/core/src/flows/nodes/messaging/production.ts",
+        "packages/core/src/flows/nodes/messaging/voice-note.ts",
+        "packages/core/src/flows/nodes/messaging/voice-note.unit.test.ts"
       ]
     }
   ],

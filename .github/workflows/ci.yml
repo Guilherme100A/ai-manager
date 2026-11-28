@@ -138,7 +138,7 @@ jobs:
         run: |
           mkdir -p "$CRM_REPORT_DIR" "$RUNNER_TEMP/output/shared-offers"
           node scripts/prepare-shared-offers-crm.mjs "$RUNNER_TEMP/crm-source"
-          test "$(git -C "$RUNNER_TEMP/crm-source" write-tree)" = b6082fd032570621878736058edf9158214733c4
+          test "$(git -C "$RUNNER_TEMP/crm-source" write-tree)" = b3979cf611df4796ccb197179095ab938e2b7817
       - name: Install and build test dependencies on the runner only
         run: |
           diag() { node "$GITHUB_WORKSPACE/scripts/crm-release/listener-diagnostic.mjs" "$RUNNER_TEMP/crm-source" "$CRM_REPORT_DIR" "$@"; }
@@ -158,6 +158,8 @@ jobs:
           for package in @crm/api @crm/core @crm/web @crm/worker @crm/wa-port @crm/wa-gateway-rpc; do diag "type-${package#@crm/}" pnpm --filter "$package" typecheck; done
           diag wa-port pnpm --filter @crm/wa-port test
           diag wa-gateway pnpm --filter @crm/wa-gateway-rpc test
+          command -v ffmpeg >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends ffmpeg; }
+          REQUIRE_FFMPEG=1 diag flow-audio pnpm --filter @crm/core exec vitest run src/flows/nodes/messaging
       - name: Real disposable PostgreSQL backup/restore/migrate/idempotence rehearsal
         env:
           CRM_CI_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
@@ -205,8 +207,10 @@ jobs:
       - name: Build immutable Alpine/musl release (never copy runner node_modules)
         run: |
           printf '.git\n**/node_modules\n**/dist\noutput\n.env\ntest-results\nplaywright-report\n**/.vite\ntests/acceptance/T125/operational-ci.test.ts\ntests/acceptance/T125/revisor-gated-ci.test.ts\ntests/acceptance/T125/persistent-login-ci.test.ts\n' > "$RUNNER_TEMP/crm-source/.dockerignore"
-          docker build --platform linux/amd64 --build-arg SOURCE_TREE=b6082fd032570621878736058edf9158214733c4 -f integrations/shared-offers/Dockerfile -t "crm-shared-offers:$GITHUB_SHA" "$RUNNER_TEMP/crm-source"
+          docker build --platform linux/amd64 --build-arg SOURCE_TREE=b3979cf611df4796ccb197179095ab938e2b7817 -f integrations/shared-offers/Dockerfile -t "crm-shared-offers:$GITHUB_SHA" "$RUNNER_TEMP/crm-source"
           docker run --rm --network none -w /crm/apps/api "crm-shared-offers:$GITHUB_SHA" node /crm/node_modules/tsx/dist/cli.mjs --conditions=development -e "import('@crm/core').then(()=>console.log('Alpine workspace/dependencies load'))"
+          # CRM-004: ffmpeg com libopus na imagem converte MP3 real em Ogg/Opus mono (nota de voz do fluxo).
+          docker run --rm --network none "crm-shared-offers:$GITHUB_SHA" sh -c 'ffmpeg -hide_banner -loglevel error -f lavfi -i sine=frequency=440:duration=2 -c:a libmp3lame -f mp3 /tmp/in.mp3 && ffmpeg -hide_banner -loglevel error -i /tmp/in.mp3 -vn -ac 1 -ar 48000 -c:a libopus -b:a 32k -f ogg /tmp/out.ogg && ffprobe -v error -show_entries stream=codec_name,channels -of csv=p=0 /tmp/out.ogg | grep -qx "opus,1"'
           docker volume create "ci_crm_${GITHUB_RUN_ID}_deps"
           docker run --rm --network none -v "ci_crm_${GITHUB_RUN_ID}_deps:/crm/node_modules:ro" "crm-shared-offers:$GITHUB_SHA" node -e "require('fs').accessSync('/crm/node_modules/tsx/dist/cli.mjs')"
       - name: Export image, CI SPA and checksummed release manifest

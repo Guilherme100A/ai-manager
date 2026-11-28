@@ -1,0 +1,564 @@
+diff --git a/apps/worker/src/boot/production.ts b/apps/worker/src/boot/production.ts
+index 8ff0e16..9ef1e6c 100644
+--- a/apps/worker/src/boot/production.ts
++++ b/apps/worker/src/boot/production.ts
+@@ -21,6 +21,7 @@ import {
+   crmConnectionSessionResolver,
+   crmConnectionsResolver,
+   flowMessageRecorder,
++  flowVoiceNotes,
+   FLOW_TIMER_QUEUE,
+   FlowControl,
+   FsExportFileStore,
+@@ -169,7 +170,8 @@ export function configureWorkerProduction(deps: WorkerProductionDeps): WorkerPro
+   const env = deps.env ?? process.env
+   const logger = deps.logger ? { logger: deps.logger } : {}
+   const publisher = deps.publisher ?? new RealtimePublisher({ redis })
+-  const media = new MediaService({ blobStore: deps.blobStore ?? new FsBlobStore(), onStored: privateMediaOwnershipRecorder(db) })
++  const blobStore = deps.blobStore ?? new FsBlobStore()
++  const media = new MediaService({ blobStore, onStored: privateMediaOwnershipRecorder(db) })
+   const files = deps.files ?? new FsExportFileStore()
+   const resolveSession = crmConnectionSessionResolver(db)
+   const pttConverter = (data: Uint8Array) => toPttOgg(data)
+@@ -187,7 +189,9 @@ export function configureWorkerProduction(deps: WorkerProductionDeps): WorkerPro
+   const fakeLlm = llm instanceof CompanyKeyedFakeLlm ? llm.fake : undefined
+ 
+   // Nós de mensagem gravam no chat o que enviaram (sender_type flow) e resolvem a mídia da empresa.
+-  const registry = productionNodeRegistry({ record: flowMessageRecorder(chatSend), mediaUrl: mediaUrlFrom(media) })
++  // Áudio do fluxo sai como Ogg/Opus mono (MP3/M4A como nota de voz chega "com defeito" no WhatsApp).
++  const voiceNote = flowVoiceNotes({ db, media, blobs: blobStore, convert: pttConverter })
++  const registry = productionNodeRegistry({ record: flowMessageRecorder(chatSend), mediaUrl: mediaUrlFrom(media), voiceNote })
+   configureFlowStep({ db, wa: waGateway, registry, llm, ...logger })
+ 
+   // Gatilhos: a mensagem fora do horário entra no histórico como `system`; resolver o chat dispara "atendimento finalizado".
+diff --git a/packages/ai/src/audio/ptt.ts b/packages/ai/src/audio/ptt.ts
+index f71a8d7..d709097 100644
+--- a/packages/ai/src/audio/ptt.ts
++++ b/packages/ai/src/audio/ptt.ts
+@@ -12,7 +12,7 @@ export interface FfmpegResult {
+ }
+ 
+ /** Executa `command args…` com `stdin` e devolve código de saída, stdout (bytes) e stderr (texto). */
+-export type FfmpegRunner = (command: string, args: string[], stdin: Uint8Array) => Promise<FfmpegResult>
++export type FfmpegRunner = (command: string, args: string[], stdin: Uint8Array, opts?: { timeoutMs?: number }) => Promise<FfmpegResult>
+ 
+ export interface PttOptions {
+   runner?: FfmpegRunner
+@@ -20,6 +20,8 @@ export interface PttOptions {
+   ffmpegPath?: string
+   /** Default `32k` (voz). */
+   bitrate?: string
++  /** Mata o ffmpeg depois disso (áudio patológico não pendura o worker). Default 60 s. */
++  timeoutMs?: number
+ }
+ 
+ export interface PttResult {
+@@ -44,7 +46,8 @@ export class AudioConversionError extends Error {
+ 
+ /** Argumentos do ffmpeg: stdin → Ogg/Opus mono 48 kHz em stdout. */
+ export function pttArgs(bitrate = '32k'): string[] {
+-  return ['-hide_banner', '-loglevel', 'info', '-i', 'pipe:0', '-vn', '-ac', '1', '-ar', '48000', '-c:a', 'libopus', '-b:a', bitrate, '-f', 'ogg', 'pipe:1']
++  // `-protocol_whitelist pipe`: um arquivo de entrada (playlist HLS/concat) não consegue abrir file:/http: por dentro.
++  return ['-hide_banner', '-loglevel', 'info', '-protocol_whitelist', 'pipe', '-i', 'pipe:0', '-vn', '-ac', '1', '-ar', '48000', '-c:a', 'libopus', '-b:a', bitrate, '-f', 'ogg', 'pipe:1']
+ }
+ 
+ /** Duração a partir do stderr: último `time=HH:MM:SS.xx` (saída), senão `Duration:` (entrada). */
+@@ -65,7 +68,7 @@ export async function toPttOgg(input: Uint8Array, opts: PttOptions = {}): Promis
+   const runner = opts.runner ?? spawnRunner
+   let res: FfmpegResult
+   try {
+-    res = await runner(command, pttArgs(opts.bitrate), input)
++    res = await runner(command, pttArgs(opts.bitrate), input, { timeoutMs: opts.timeoutMs ?? 60_000 })
+   } catch (err) {
+     throw new AudioConversionError(`ffmpeg não executou: ${err instanceof Error ? err.message : String(err)}`, undefined, undefined, { cause: err })
+   }
+@@ -76,9 +79,11 @@ export async function toPttOgg(input: Uint8Array, opts: PttOptions = {}): Promis
+ }
+ 
+ /** Runner real: `child_process.spawn`, stdin/stdout em pipe (sem arquivos temporários). */
+-export const spawnRunner: FfmpegRunner = (command, args, stdin) =>
++export const spawnRunner: FfmpegRunner = (command, args, stdin, opts) =>
+   new Promise((resolve, reject) => {
+     const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
++    const timer = opts?.timeoutMs ? setTimeout(() => child.kill('SIGKILL'), opts.timeoutMs) : undefined
++    child.on('close', () => clearTimeout(timer))
+     const out: Buffer[] = []
+     let err = ''
+     child.stdout.on('data', (c: Buffer) => out.push(c))
+diff --git a/packages/core/src/flows/nodes/external/http.ts b/packages/core/src/flows/nodes/external/http.ts
+index 6ff7968..2895872 100644
+--- a/packages/core/src/flows/nodes/external/http.ts
++++ b/packages/core/src/flows/nodes/external/http.ts
+@@ -74,6 +74,8 @@ export interface SafeHttpResponse {
+   status: number
+   headers: Record<string, string>
+   body: string
++  /** Corpo cru (mídia binária: o `body` em UTF-8 corrompe os bytes). */
++  bytes: Buffer
+   url: string
+ }
+ 
+@@ -109,7 +111,7 @@ function once(url: URL, req: SafeHttpRequest, opts: Required<Omit<SafeHttpOption
+         const headers = Object.fromEntries(Object.entries(res.headers).map(([k, v]) => [k, Array.isArray(v) ? v.join(', ') : String(v ?? '')]))
+         if (status >= 300 && status < 400 && res.headers.location) {
+           res.resume()
+-          return resolve({ status, headers, body: '', url: url.toString(), location: res.headers.location })
++          return resolve({ status, headers, body: '', bytes: Buffer.alloc(0), url: url.toString(), location: res.headers.location })
+         }
+         const chunks: Buffer[] = []
+         let size = 0
+@@ -122,7 +124,10 @@ function once(url: URL, req: SafeHttpRequest, opts: Required<Omit<SafeHttpOption
+           }
+           chunks.push(c)
+         })
+-        res.on('end', () => resolve({ status, headers, body: Buffer.concat(chunks).toString('utf8'), url: url.toString() }))
++        res.on('end', () => {
++          const bytes = Buffer.concat(chunks)
++          resolve({ status, headers, body: bytes.toString('utf8'), bytes, url: url.toString() })
++        })
+         res.on('error', (err) => reject(err))
+       },
+     )
+diff --git a/packages/core/src/flows/nodes/messaging/handlers.ts b/packages/core/src/flows/nodes/messaging/handlers.ts
+index ffc2747..73557a0 100644
+--- a/packages/core/src/flows/nodes/messaging/handlers.ts
++++ b/packages/core/src/flows/nodes/messaging/handlers.ts
+@@ -7,6 +7,7 @@ import { renderTemplateContent, type TemplateContent } from '../../../content/ru
+ import type { NodeContext, NodeHandler, NodeOutcome } from '../../engine/context'
+ import { defaultGlobals, defaultLoadTemplate, defaultResolveTarget, type SendTarget } from './data'
+ import { pixMessage, type PixKeyType } from './pix'
++import type { VoiceNotePreparer } from './voice-note'
+ 
+ /** Mensagem enviada por um nó (entrada do ponto de extensão `record`). */
+ export interface SentMessage {
+@@ -35,6 +36,11 @@ export interface MessagingDeps {
+    * depois de cada envio aceito pelo gateway; falha aqui só gera log (o envio já aconteceu).
+    */
+   record?: (ctx: NodeContext, sent: SentMessage) => Promise<void>
++  /**
++   * Áudio do nó → Ogg/Opus mono (`blob:` da empresa). Sem ele o áudio sai como está (o WhatsApp mostra MP3/M4A
++   * enviado como nota de voz como "áudio com defeito").
++   */
++  voiceNote?: VoiceNotePreparer
+ }
+ 
+ interface Resolved {
+@@ -45,6 +51,7 @@ interface Resolved {
+   globals: (ctx: NodeContext) => Promise<Record<string, unknown>>
+   mediaUrl?: MessagingDeps['mediaUrl']
+   record?: MessagingDeps['record']
++  voiceNote?: MessagingDeps['voiceNote']
+ }
+ 
+ const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+@@ -58,6 +65,7 @@ function resolveDeps(deps: MessagingDeps = {}): Resolved {
+     globals: deps.globals ?? defaultGlobals,
+     mediaUrl: deps.mediaUrl,
+     record: deps.record,
++    voiceNote: deps.voiceNote,
+   }
+ }
+ 
+@@ -188,6 +196,18 @@ class Sender {
+   }
+ }
+ 
++/** Áudio do nó: convertido para Ogg/Opus quando há conversor; se a conversão falhar, sai como está (com log). */
++async function audioContent(s: Sender, actionId: string, url: string, ptt: boolean): Promise<OutgoingContent> {
++  if (!s.deps.voiceNote) return { audio: { url }, ptt }
++  try {
++    const note = await s.deps.voiceNote(s.ctx, url)
++    return { audio: { url: note.url }, mimetype: note.mimetype, ptt }
++  } catch (err) {
++    s.ctx.log.error({ run_id: s.ctx.runId, action_id: actionId, err: err instanceof Error ? err.message : String(err) }, 'áudio do fluxo não foi convertido para Ogg/Opus: enviando o original')
++    return { audio: { url }, ptt }
++  }
++}
++
+ /** Mensagens de uma ação do nó `message` (vazio para `delay_between_messages`). */
+ async function outgoingOf(s: Sender, action: FlowAction): Promise<Outgoing[]> {
+   const c = action.config as Config
+@@ -223,7 +243,7 @@ async function outgoingOf(s: Sender, action: FlowAction): Promise<Outgoing[]> {
+         else if (kind === 'video') {
+           // `ptv` (vídeo-nota redonda): o wa-port ainda não tem o campo; vai junto para o adapter que o suportar.
+           content = { video: { url }, ...(caption ? { caption } : {}), ...(c.uazapi_video_type === 'ptv' ? { ptv: true } : {}) } as OutgoingContent
+-        } else if (kind === 'audio') content = { audio: { url }, ptt: c.audio_forward !== false }
++        } else if (kind === 'audio') content = await audioContent(s, action.id, url, c.audio_forward !== false)
+         else throw new MessagingConfigError(action.id, `tipo de mídia inválido: ${String(kind)}`)
+         out.push({ actionId, content, presence: kind === 'audio' ? 'recording' : 'composing', typingSeconds: i === 0 ? typing : 0, viewOnce })
+       }
+diff --git a/packages/core/src/flows/nodes/messaging/index.ts b/packages/core/src/flows/nodes/messaging/index.ts
+index cb48340..6c2be75 100644
+--- a/packages/core/src/flows/nodes/messaging/index.ts
++++ b/packages/core/src/flows/nodes/messaging/index.ts
+@@ -25,4 +25,5 @@ export {
+ } from './handlers'
+ export { DRY_RUN_SESSION, MessagingTargetError, defaultGlobals, defaultLoadTemplate, defaultResolveTarget, type SendTarget } from './data'
+ export { PIX_KEY_TYPES, crc16ccitt, normalizePixKey, pixAmount, pixEmv, pixMessage, type PixEmvInput, type PixKeyType } from './pix'
+-export { flowMessageRecorder, mediaUrlFrom, productionNodeRegistry } from './production'
++export { flowMessageRecorder, flowVoiceNotes, mediaUrlFrom, productionNodeRegistry } from './production'
++export { VOICE_NOTE_MIME, VoiceNoteSourceError, voiceNotePreparer, type VoiceNotePreparer, type VoiceNotePreparerOptions, type VoiceNoteResult } from './voice-note'
+diff --git a/packages/core/src/flows/nodes/messaging/production.ts b/packages/core/src/flows/nodes/messaging/production.ts
+index ed51c11..392b54b 100644
+--- a/packages/core/src/flows/nodes/messaging/production.ts
++++ b/packages/core/src/flows/nodes/messaging/production.ts
+@@ -2,7 +2,10 @@
+ // sem reenviar; idempotente pelo id do pipeline, então o retry do passo não duplica) e `mediaUrl` resolve a mídia da
+ // empresa (cabeçalho de modelos) para a referência `blob:<sha256>` que o engine lê do BlobStore compartilhado.
+ import type { RecordOutboundInput } from '../../../chats/send/service'
++import type { Database } from '@crm/db'
+ import { blobUrl, type MediaService } from '../../../media/service'
++import { ownsPrivateMedia } from '../../../media/private-ownership'
++import { voiceNotePreparer, type VoiceNotePreparer, type VoiceNotePreparerOptions } from './voice-note'
+ import { createNodeRegistry, type NodeRegistry } from '../../engine/registry'
+ import type { MessagingDeps } from './handlers'
+ import { registerMessagingNodes } from './index'
+@@ -38,6 +41,25 @@ export function mediaUrlFrom(media: Pick<MediaService, 'info'>): NonNullable<Mes
+   }
+ }
+ 
++/**
++ * Conversor de áudio do fluxo em produção: lê `blob:` só se a empresa for dona (mesma prova do `/internal/wa-media`),
++ * baixa URLs http(s), converte com `convert` (ffmpeg) e grava pelo MediaService (que registra a posse do resultado).
++ */
++export function flowVoiceNotes(opts: {
++  db: Database
++  media: Pick<MediaService, 'store'>
++  blobs: { get(key: string): Promise<Uint8Array | null> }
++  convert: VoiceNotePreparerOptions['convert']
++  download?: VoiceNotePreparerOptions['download']
++}): VoiceNotePreparer {
++  return voiceNotePreparer({
++    convert: opts.convert,
++    ...(opts.download ? { download: opts.download } : {}),
++    readBlob: async (companyId, sha256) => ((await ownsPrivateMedia(opts.db, companyId, sha256)) ? opts.blobs.get(sha256).catch(() => null) : null),
++    store: (companyId, data, mime) => opts.media.store(companyId, data, mime),
++  })
++}
++
+ /** Registro de nós padrão com os nós de mensagem ligados às dependências de produção. */
+ export function productionNodeRegistry(deps: MessagingDeps): NodeRegistry {
+   return registerInteractiveNodes(registerMessagingNodes(createNodeRegistry(), deps), deps)
+diff --git a/packages/core/src/flows/nodes/messaging/voice-note.ts b/packages/core/src/flows/nodes/messaging/voice-note.ts
+new file mode 100644
+index 0000000..6c13c73
+--- /dev/null
++++ b/packages/core/src/flows/nodes/messaging/voice-note.ts
+@@ -0,0 +1,106 @@
++// Áudio do nó `message` (send_multi_media/audio) → Ogg/Opus mono antes do envio. O WhatsApp só toca nota de voz
++// (e áudio sem mimetype, que o Baileys rotula como `audio/ogg; codecs=opus`) se os bytes forem Ogg/Opus de fato:
++// MP3/M4A/WAV enviados como estão aparecem para o lead como "áudio com defeito". O Baileys não converte; o fluxo
++// converte aqui, grava o resultado no BlobStore da empresa e envia a referência `blob:<sha256>`.
++import type { NodeContext } from '../../engine/context'
++import { blobUrl } from '../../../media/service'
++import { safeHttpRequest } from '../external/http'
++
++export const VOICE_NOTE_MIME = 'audio/ogg; codecs=opus'
++/** Teto de download do áudio de origem (o limite de áudio do WhatsApp é 16 MB). */
++export const VOICE_NOTE_MAX_SOURCE_BYTES = 16 * 1024 * 1024
++
++export interface VoiceNoteResult {
++  url: string
++  mimetype: string
++}
++
++/** Converte a mídia de `url` (http(s) ou `blob:<sha256>` da empresa) e devolve a referência pronta para envio. */
++export type VoiceNotePreparer = (ctx: NodeContext, url: string) => Promise<VoiceNoteResult>
++
++export class VoiceNoteSourceError extends Error {
++  constructor(message: string, options?: { cause?: unknown }) {
++    super(message, options)
++    this.name = 'VoiceNoteSourceError'
++  }
++}
++
++export interface VoiceNotePreparerOptions {
++  /** Bytes de um blob da empresa, só se ela for dona (senão `null`). */
++  readBlob: (companyId: string, sha256: string) => Promise<Uint8Array | null>
++  /** Grava o áudio convertido para a empresa (registra a posse) e devolve o sha256. */
++  store: (companyId: string, data: Uint8Array, mime: string) => Promise<{ sha256: string }>
++  /** Conversor para Ogg/Opus mono (produção: `toPttOgg` de @crm/ai, com ffmpeg). */
++  convert: (data: Uint8Array) => Promise<{ audio: Uint8Array; mime: string }>
++  /** Download da origem http(s). Padrão: `safeHttpRequest` (bloqueia rede interna no destino, no DNS e em cada redirect). */
++  download?: (url: string, limits: { maxBytes: number; timeoutMs: number }) => Promise<{ status: number; bytes: Uint8Array }>
++  maxSourceBytes?: number
++  timeoutMs?: number
++  /** Conversões lembradas por empresa+origem (o mesmo áudio vai para muitos leads). */
++  cacheSize?: number
++  cacheTtlMs?: number
++  now?: () => number
++}
++
++const BLOB_REF = /^blob:([a-f0-9]{64})$/
++
++export function voiceNotePreparer(opts: VoiceNotePreparerOptions): VoiceNotePreparer {
++  const fetchSource = opts.download ?? defaultDownload
++  const maxBytes = opts.maxSourceBytes ?? VOICE_NOTE_MAX_SOURCE_BYTES
++  const timeoutMs = opts.timeoutMs ?? 30_000
++  const cacheSize = opts.cacheSize ?? 500
++  const ttl = opts.cacheTtlMs ?? 60 * 60 * 1000
++  const now = opts.now ?? Date.now
++  const cache = new Map<string, { result: VoiceNoteResult; at: number }>()
++  const inflight = new Map<string, Promise<VoiceNoteResult>>()
++
++  const download = async (url: string): Promise<Uint8Array> => {
++    if (!/^https?:\/\//i.test(url)) throw new VoiceNoteSourceError('URL do áudio precisa ser http(s)')
++    let res: { status: number; bytes: Uint8Array }
++    try {
++      res = await fetchSource(url, { maxBytes, timeoutMs })
++    } catch (err) {
++      throw new VoiceNoteSourceError(`download do áudio falhou (${err instanceof Error ? err.message : String(err)})`, { cause: err })
++    }
++    if (res.status < 200 || res.status >= 300) throw new VoiceNoteSourceError(`download do áudio respondeu ${res.status}`)
++    if (!res.bytes.byteLength) throw new VoiceNoteSourceError('áudio vazio')
++    if (res.bytes.byteLength > maxBytes) throw new VoiceNoteSourceError('áudio acima do limite')
++    return res.bytes
++  }
++
++  const prepare = async (companyId: string, url: string): Promise<VoiceNoteResult> => {
++    const sha = BLOB_REF.exec(url)?.[1]
++    let source: Uint8Array
++    if (sha) {
++      const data = await opts.readBlob(companyId, sha)
++      if (!data || !data.byteLength) throw new VoiceNoteSourceError('mídia do áudio não encontrada para a empresa')
++      source = data
++    } else source = await download(url)
++    const converted = await opts.convert(source)
++    const stored = await opts.store(companyId, converted.audio, converted.mime)
++    return { url: blobUrl(stored.sha256), mimetype: converted.mime }
++  }
++
++  return async (ctx, url) => {
++    const key = `${ctx.companyId}\u0000${url}`
++    const hit = cache.get(key)
++    if (hit && now() - hit.at < ttl) return hit.result
++    const running = inflight.get(key)
++    if (running) return running
++    const job = prepare(ctx.companyId, url)
++      .then((result) => {
++        cache.delete(key)
++        cache.set(key, { result, at: now() })
++        while (cache.size > cacheSize) cache.delete(cache.keys().next().value!)
++        return result
++      })
++      .finally(() => inflight.delete(key))
++    inflight.set(key, job)
++    return job
++  }
++}
++
++const defaultDownload: NonNullable<VoiceNotePreparerOptions['download']> = async (url, limits) => {
++  const res = await safeHttpRequest({ method: 'GET', url }, { maxResponseBytes: limits.maxBytes, timeoutMs: limits.timeoutMs })
++  return { status: res.status, bytes: new Uint8Array(res.bytes) }
++}
+diff --git a/packages/core/src/flows/nodes/messaging/voice-note.unit.test.ts b/packages/core/src/flows/nodes/messaging/voice-note.unit.test.ts
+new file mode 100644
+index 0000000..be72b8a
+--- /dev/null
++++ b/packages/core/src/flows/nodes/messaging/voice-note.unit.test.ts
+@@ -0,0 +1,205 @@
++import { spawnSync } from 'node:child_process'
++import { describe, expect, it } from 'vitest'
++import { toPttOgg } from '@crm/ai'
++import type { FlowAction, FlowNode } from '@crm/shared'
++import { FakeWaGateway } from '@crm/wa-port/testing'
++import { buildContext, type NodeContext, type StepStore } from '../../engine/context'
++import { messagingHandlers, voiceNotePreparer, VoiceNoteSourceError, VOICE_NOTE_MIME, type MessagingDeps, type VoiceNotePreparerOptions } from './index'
++
++const SESSION = 'sess-1'
++const PHONE = '+5511999990000'
++const MP3 = new Uint8Array([0x49, 0x44, 0x33, 3, 0, 0, 0, 0, 0, 1])
++const OGG = new Uint8Array([0x4f, 0x67, 0x67, 0x53, 9, 9])
++const SHA_SRC = 'a'.repeat(64)
++const SHA_OUT = 'b'.repeat(64)
++
++const audioNode = (config: Record<string, unknown>): FlowNode => ({
++  id: 'n1',
++  type: 'message',
++  name: 'message',
++  position: { x: 0, y: 0 },
++  actions: [{ id: 'a1', type: 'send_multi_media', order: 0, config: { media_type: 'audio', media_source: 'url', ...config } } as FlowAction],
++})
++
++function memoryStore(): StepStore {
++  const actions = new Map<string, unknown>()
++  return {
++    findAction: async (key) => (actions.has(key) ? { result: actions.get(key) } : null),
++    saveAction: async (row) => void actions.set(row.key, row.result),
++    saveStep: async () => undefined,
++  }
++}
++
++function setup(n: FlowNode, deps: MessagingDeps) {
++  const wa = new FakeWaGateway({ sessions: [{ id: SESSION, name: 'c1', state: 'STABLE' }] })
++  const errors: string[] = []
++  const ctx = () =>
++    buildContext({
++      runId: 'run-1',
++      companyId: 'co-1',
++      flowId: 'f1',
++      contactId: 'ct-1',
++      chatId: 'chat-1',
++      seq: 1,
++      node: n,
++      definition: { schema: 'crm.flow/v1', entry: 'start', nodes: [n], edges: [], variables: [], refs: {} },
++      contact: { full_name: 'Maria Silva', phone_number: '5511999990000' },
++      vars: {},
++      wa,
++      log: { debug() {}, info() {}, warn() {}, error: (_o: unknown, msg?: string) => void errors.push(String(msg)) },
++      repo: { companyId: 'co-1', db: null, dryRun: false },
++      store: memoryStore(),
++    })
++  const handlers = messagingHandlers({ resolveTarget: async () => ({ sessionId: SESSION, phone: PHONE }), sleep: async () => undefined, ...deps })
++  return { wa, ctx, handlers, errors }
++}
++
++function fakes() {
++  const converted: Uint8Array[] = []
++  const stored: { companyId: string; mime: string }[] = []
++  const fetched: string[] = []
++  const owned = new Map<string, Uint8Array>([[`co-1:${SHA_SRC}`, MP3]])
++  const opts = {
++    readBlob: async (companyId: string, sha: string) => owned.get(`${companyId}:${sha}`) ?? null,
++    store: async (companyId: string, _data: Uint8Array, mime: string) => (stored.push({ companyId, mime }), { sha256: SHA_OUT }),
++    convert: async (data: Uint8Array) => (converted.push(data), { audio: OGG, mime: VOICE_NOTE_MIME }),
++    download: async (url: string) => (fetched.push(url), { status: 200, bytes: MP3 }),
++  }
++  return { opts, converted, stored, fetched }
++}
++
++const ctxOf = (companyId: string) => ({ companyId }) as NodeContext
++
++describe('voiceNotePreparer', () => {
++  it('URL http(s) (ex.: MP3 do Google Drive): baixa, converte para Ogg/Opus e devolve blob da empresa', async () => {
++    const f = fakes()
++    const prepare = voiceNotePreparer(f.opts)
++    const out = await prepare(ctxOf('co-1'), 'https://drive.usercontent.google.com/download?id=x&export=download')
++    expect(out).toEqual({ url: `blob:${SHA_OUT}`, mimetype: 'audio/ogg; codecs=opus' })
++    expect(f.converted[0]).toEqual(MP3)
++    expect(f.stored).toEqual([{ companyId: 'co-1', mime: VOICE_NOTE_MIME }])
++  })
++
++  it('blob: da própria empresa é lido e convertido', async () => {
++    const f = fakes()
++    const out = await voiceNotePreparer(f.opts)(ctxOf('co-1'), `blob:${SHA_SRC}`)
++    expect(out.url).toBe(`blob:${SHA_OUT}`)
++    expect(f.fetched).toEqual([])
++  })
++
++  it('blob: de outra empresa é recusado (sem ler nem converter)', async () => {
++    const f = fakes()
++    await expect(voiceNotePreparer(f.opts)(ctxOf('co-2'), `blob:${SHA_SRC}`)).rejects.toThrow(/não encontrada/)
++    expect(f.converted).toEqual([])
++  })
++
++  it('o mesmo áudio para vários leads converte uma vez (cache por empresa + origem)', async () => {
++    const f = fakes()
++    const prepare = voiceNotePreparer(f.opts)
++    await Promise.all([prepare(ctxOf('co-1'), 'https://x.test/a.mp3'), prepare(ctxOf('co-1'), 'https://x.test/a.mp3')])
++    await prepare(ctxOf('co-1'), 'https://x.test/a.mp3')
++    expect(f.converted).toHaveLength(1)
++    await prepare(ctxOf('co-2'), 'https://x.test/a.mp3')
++    expect(f.converted).toHaveLength(2)
++  })
++
++  it('recusa protocolo que não é http(s) e origem acima do limite', async () => {
++    const f = fakes()
++    await expect(voiceNotePreparer(f.opts)(ctxOf('co-1'), 'file:///etc/passwd')).rejects.toThrow(/http/)
++    await expect(voiceNotePreparer({ ...f.opts, maxSourceBytes: 4 })(ctxOf('co-1'), 'https://x.test/big.mp3')).rejects.toThrow(/limite/)
++  })
++
++  it('HTTP de erro, corpo vazio, download rejeitado e corpo acima do limite viram VoiceNoteSourceError', async () => {
++    const f = fakes()
++    const withDownload = (download: VoiceNotePreparerOptions['download']) => voiceNotePreparer({ ...f.opts, download })(ctxOf('co-1'), 'https://x.test/a.mp3')
++    await expect(withDownload(async () => ({ status: 404, bytes: MP3 }))).rejects.toThrow(/404/)
++    await expect(withDownload(async () => ({ status: 200, bytes: new Uint8Array() }))).rejects.toThrow(/vazio/)
++    await expect(withDownload(async () => Promise.reject(new Error('timeout: sem resposta')))).rejects.toBeInstanceOf(VoiceNoteSourceError)
++    await expect(voiceNotePreparer({ ...f.opts, maxSourceBytes: 4 })(ctxOf('co-1'), 'https://x.test/a.mp3')).rejects.toThrow(/limite/)
++    expect(f.converted).toEqual([])
++  })
++
++  it('download padrão bloqueia rede interna (SSRF): loopback e metadados da nuvem', async () => {
++    const f = fakes()
++    const { download: _ignored, ...withoutDownload } = f.opts
++    const prepare = voiceNotePreparer(withoutDownload)
++    await expect(prepare(ctxOf('co-1'), 'http://127.0.0.1:3000/internal/wa-media')).rejects.toThrow(/ssrf_blocked/)
++    await expect(prepare(ctxOf('co-1'), 'http://169.254.169.254/latest/meta-data')).rejects.toThrow(/ssrf_blocked/)
++    expect(f.converted).toEqual([])
++  })
++
++  it('cache expira pelo TTL e respeita o tamanho máximo', async () => {
++    const f = fakes()
++    let t = 0
++    const prepare = voiceNotePreparer({ ...f.opts, now: () => t, cacheTtlMs: 1000, cacheSize: 1 })
++    await prepare(ctxOf('co-1'), 'https://x.test/a.mp3')
++    t = 999
++    await prepare(ctxOf('co-1'), 'https://x.test/a.mp3')
++    expect(f.converted).toHaveLength(1)
++    t = 1000
++    await prepare(ctxOf('co-1'), 'https://x.test/a.mp3')
++    expect(f.converted).toHaveLength(2)
++    await prepare(ctxOf('co-1'), 'https://x.test/b.mp3')
++    await prepare(ctxOf('co-1'), 'https://x.test/a.mp3')
++    expect(f.converted).toHaveLength(4)
++  })
++
++  it('falha de conversão não fica no cache (próxima tentativa converte de novo)', async () => {
++    const f = fakes()
++    let calls = 0
++    const prepare = voiceNotePreparer({ ...f.opts, convert: async () => { if (++calls === 1) throw new Error('ffmpeg ausente'); return { audio: OGG, mime: VOICE_NOTE_MIME } } })
++    await expect(prepare(ctxOf('co-1'), 'https://x.test/a.mp3')).rejects.toThrow('ffmpeg ausente')
++    expect((await prepare(ctxOf('co-1'), 'https://x.test/a.mp3')).url).toBe(`blob:${SHA_OUT}`)
++  })
++})
++
++describe('nó message: áudio do fluxo', () => {
++  it('nota de voz sai como Ogg/Opus convertido (não o MP3 original)', async () => {
++    const f = fakes()
++    const { wa, ctx, handlers } = setup(audioNode({ media_url: 'https://x.test/a.mp3' }), { voiceNote: voiceNotePreparer(f.opts) })
++    expect(await handlers.message.execute(ctx())).toEqual({ next: 'source' })
++    expect(wa.sent[0]!.content).toEqual({ audio: { url: `blob:${SHA_OUT}` }, mimetype: 'audio/ogg; codecs=opus', ptt: true })
++  })
++
++  it('audio_forward=false continua sem ptt, mas com os bytes convertidos', async () => {
++    const f = fakes()
++    const { wa, ctx, handlers } = setup(audioNode({ media_url: 'https://x.test/a.mp3', audio_forward: false }), { voiceNote: voiceNotePreparer(f.opts) })
++    await handlers.message.execute(ctx())
++    expect(wa.sent[0]!.content).toEqual({ audio: { url: `blob:${SHA_OUT}` }, mimetype: VOICE_NOTE_MIME, ptt: false })
++  })
++
++  it('se a conversão falhar, envia o original e registra erro (o fluxo não trava)', async () => {
++    const { wa, ctx, handlers, errors } = setup(audioNode({ media_url: 'https://x.test/a.mp3' }), {
++      voiceNote: async () => {
++        throw new Error('ffmpeg não executou')
++      },
++    })
++    expect(await handlers.message.execute(ctx())).toEqual({ next: 'source' })
++    expect(wa.sent[0]!.content).toEqual({ audio: { url: 'https://x.test/a.mp3' }, ptt: true })
++    expect(errors[0]).toMatch(/Ogg\/Opus/)
++  })
++})
++
++// Conversão real (sem fakes): roda onde houver ffmpeg (CI/imagem); sem ele, pula.
++const hasFfmpeg = spawnSync(process.env.FFMPEG_PATH ?? 'ffmpeg', ['-version']).status === 0
++if (process.env.REQUIRE_FFMPEG === '1' && !hasFfmpeg) throw new Error('REQUIRE_FFMPEG=1 sem ffmpeg')
++describe.skipIf(!hasFfmpeg)('ffmpeg real', () => {
++  it('MP3 de verdade sai Ogg/Opus mono (OggS + OpusHead, 1 canal)', async () => {
++    const mp3 = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=2', '-c:a', 'libmp3lame', '-f', 'mp3', 'pipe:1'], { maxBuffer: 8 << 20 }).stdout
++    expect(mp3.subarray(0, 3).toString('latin1')).toMatch(/ID3|ÿ/)
++    const f = fakes()
++    let out: Uint8Array = new Uint8Array()
++    const prepare = voiceNotePreparer({
++      ...f.opts,
++      download: async () => ({ status: 200, bytes: new Uint8Array(mp3) }),
++      convert: async (data) => toPttOgg(data),
++      store: async (_c, data) => ((out = data), { sha256: SHA_OUT }),
++    })
++    expect((await prepare(ctxOf('co-1'), 'https://x.test/real.mp3')).mimetype).toBe(VOICE_NOTE_MIME)
++    const buf = Buffer.from(out)
++    expect(buf.subarray(0, 4).toString('latin1')).toBe('OggS')
++    const head = buf.indexOf('OpusHead')
++    expect(head).toBeGreaterThan(0)
++    expect(buf[head + 9]).toBe(1)
++  })
++})
