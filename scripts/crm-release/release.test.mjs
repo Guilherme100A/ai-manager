@@ -400,6 +400,7 @@ for (const [sourceTree, journalCount] of [
   ['f9b91ba97ba578ec44b6c0f5bc33404f4004f795', 49],
   ['fcf5007316b6cb214e1a63d85532b28984997cde', 49],
   ['4ca23fc779974f3772dcf5e6aeb6f0604fde0e0c', 49],
+  ['b6082fd032570621878736058edf9158214733c4', 50],
   [TREE, 50],
 ]) test('release accepts the exact installed migration prefix: '+sourceTree, t => {
   const f=installedFixture(t); f.old.source_tree=sourceTree;
