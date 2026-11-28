@@ -63,8 +63,8 @@ test('the committed release contract matches the reconstructable source and CI i
   assert.ok(managerFix)
   // CRM-003 R1: shared Offers retirement is appended after patch 26, in source order.
   const crm003 = ['27-remove-shared-offers-web-api.patch', '28-remove-shared-offers-mcp-catalog.patch', '29-remove-shared-offers-mcp-import-fix.patch', '30-retire-shared-offers-runtime.patch', '31-crm003-removal-regression-tests.patch']
-  assert.deepEqual(manifest.patches.slice(-6).map(item => item.file), ['26-manager-polling-fx-count.patch', ...crm003])
-  for (const item of [recovery, discovery, selection, managerFix, ...manifest.patches.slice(-5)]) {
+  assert.deepEqual(manifest.patches.slice(-7).map(item => item.file), ['26-manager-polling-fx-count.patch', ...crm003, '32-flow-audio-voice-note.patch'])
+  for (const item of [recovery, discovery, selection, managerFix, ...manifest.patches.slice(-6)]) {
     const delta = fs.readFileSync(path.resolve(here, '../../integrations/shared-offers', item.file), 'utf8')
     assert.deepEqual([...delta.matchAll(/^diff --git a\/.* b\/(.*)$/gm)].map(m => m[1]), item.files)
   }
